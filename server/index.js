@@ -883,6 +883,7 @@ function initiateSparkShutdown(spark) {
 const SWITCH_SCRIPT = process.env.SWITCH_SCRIPT || "/host/root/home/gilfoyle/switch-model.sh";
 const CPA_STATUS_PATH = process.env.CPA_STATUS_PATH || "/host/root/home/gilfoyle/.cli-proxy-api/live-models-status.json";
 const MODEL_HISTORY_PATH = path.join(ROOT, "config", "model-history.json");
+const TOKEN_LIFETIMES_PATH = path.join(ROOT, "config", "token-lifetimes.json");
 
 // ─── Model switch history ────────────────────────────────
 const SWITCH_STATUS_PATH = path.join(ROOT, "config", ".switch-in-progress");
@@ -1031,6 +1032,103 @@ app.post("/api/models/refresh", async (_req, res) => {
     switchScript: switchStatus,
     available: getAvailableModels(),
   });
+});
+
+// ─── Per-model usage history ─────────────────────────────
+function readTokenLifetimes() {
+  try {
+    if (fs.existsSync(TOKEN_LIFETIMES_PATH)) {
+      return JSON.parse(fs.readFileSync(TOKEN_LIFETIMES_PATH, "utf8"));
+    }
+  } catch {}
+  return {};
+}
+
+app.get("/api/models/usage", async (_req, res) => {
+  const events = readModelHistory();
+  const tokenLifetimes = readTokenLifetimes();
+
+  // Build per-model aggregate from events
+  const modelMap = new Map();
+
+  for (const evt of events) {
+    if (!modelMap.has(evt.model)) {
+      modelMap.set(evt.model, { switches: 0, lastSeen: null, lastStatus: null, completed: 0, failed: 0 });
+    }
+    const m = modelMap.get(evt.model);
+    m.switches++;
+    const ts = new Date(evt.ts).getTime();
+    if (!m.lastSeen || ts > m.lastSeen) {
+      m.lastSeen = ts;
+      m.lastStatus = evt.status;
+    }
+    if (evt.status === "completed") m.completed++;
+    if (evt.status === "failed") m.failed++;
+  }
+
+  // Attach lifetime token counts from token-lifetimes.json
+  // Keys are sparkId:port:modelId
+  const modelTokenTotals = new Map();
+  for (const [key, counts] of Object.entries(tokenLifetimes)) {
+    // key format: "anton:8888:deepseek-v4-flash-dspark"
+    const parts = key.split(":");
+    if (parts.length < 3) continue;
+    const modelId = parts.slice(2).join(":");
+    if (!modelTokenTotals.has(modelId)) {
+      modelTokenTotals.set(modelId, { totalInputTokens: 0, totalOutputTokens: 0 });
+    }
+    const t = modelTokenTotals.get(modelId);
+    t.totalInputTokens += counts.input || 0;
+    t.totalOutputTokens += counts.output || 0;
+  }
+
+  // Available models list with rich info
+  const availableModels = getAvailableModels();
+  const modelInfo = new Map(availableModels.map((m) => [m.id, m]));
+
+  const models = [];
+  for (const [id, stats] of modelMap) {
+    const info = modelInfo.get(id);
+    const tokens = modelTokenTotals.get(id);
+    models.push({
+      id,
+      name: info?.name || id,
+      type: info?.type || "unknown",
+      desc: info?.desc || "",
+      switches: stats.switches,
+      completed: stats.completed,
+      failed: stats.failed,
+      lastSeen: stats.lastSeen,
+      lastStatus: stats.lastStatus,
+      totalInputTokens: tokens?.totalInputTokens || 0,
+      totalOutputTokens: tokens?.totalOutputTokens || 0,
+    });
+  }
+
+  // Add models that have token data but no switch events (first-time detection)
+  for (const [id, tokens] of modelTokenTotals) {
+    if (!modelMap.has(id)) {
+      const info = modelInfo.get(id);
+      models.push({
+        id,
+        name: info?.name || id,
+        type: info?.type || "unknown",
+        desc: info?.desc || "",
+        switches: 0,
+        completed: 0,
+        failed: 0,
+        lastSeen: null,
+        lastStatus: null,
+        totalInputTokens: tokens.totalInputTokens,
+        totalOutputTokens: tokens.totalOutputTokens,
+      });
+    }
+  }
+
+  // Sort by lastSeen descending, then by name
+  models.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0) || a.name.localeCompare(b.name));
+
+  res.json({ models, current: (await Promise.resolve(readCpaStatus()))?.probe?.[0]?.ids?.[0] || null });
 });
 
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
