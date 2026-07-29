@@ -1048,6 +1048,35 @@ app.get("/api/models/usage", async (_req, res) => {
   const events = readModelHistory();
   const tokenLifetimes = readTokenLifetimes();
 
+  // Collect live token counts from active LLM probes (current session + disk)
+  const liveTokens = new Map();
+  for (const [sparkId, mon] of monitors) {
+    if (!mon.llmProbes) continue;
+    for (const [port, probe] of mon.llmProbes) {
+      const modelId = probe.modelId;
+      if (!modelId) continue;
+      const key = `${sparkId}:${port}:${modelId}`;
+      if (!liveTokens.has(key)) {
+        liveTokens.set(key, { input: 0, output: 0, isLive: false });
+      }
+      const t = liveTokens.get(key);
+      // probe.totalInput/Output already includes disk accumulated + current raw
+      t.input = Math.max(t.input, probe.totalInputTokens || 0);
+      t.output = Math.max(t.output, probe.totalOutputTokens || 0);
+      t.isLive = true;
+    }
+  }
+
+  // Merge live token data into the disk snapshot
+  for (const [key, live] of liveTokens) {
+    if (!tokenLifetimes[key]) {
+      tokenLifetimes[key] = { input: 0, output: 0 };
+    }
+    // Use the live value (which includes disk accumulated + current session)
+    tokenLifetimes[key].input = Math.max(tokenLifetimes[key].input, live.input);
+    tokenLifetimes[key].output = Math.max(tokenLifetimes[key].output, live.output);
+  }
+
   // Build per-model aggregate from events
   const modelMap = new Map();
 
