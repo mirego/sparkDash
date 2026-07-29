@@ -21,7 +21,7 @@ import type { SparkSnapshot } from "../api/types";
  * All listeners are woken on notify; unchanged keys keep the same ref → no render.
  */
 
-const HISTORY_MAX = 900; // 30 min at 2 s poll
+const HISTORY_MAX = 1800; // 1 h at 2 s poll
 /** Samples shown in inline sparklines (≈1 min at 2 s poll). Full series stays in HISTORY_MAX. */
 export const SPARKLINE_TAIL = 30;
 

@@ -143,18 +143,20 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
 }
 
 /** Mounted inside the portal (only when dialog is open) so useMetricsHistory is safe. */
-function DialogChart({ sparkId, portKey, tab }: {
+function DialogChart({ sparkId, portKey, tab, maxSamples }: {
   sparkId: string;
   portKey: string;
   tab: "gen" | "prefill";
+  maxSamples: number;
 }) {
   const color = tab === "gen" ? "var(--color-accent)" : "var(--color-warning)";
   const label = tab === "gen" ? "gen tok/s" : "prefill tok/s";
   const data = useMetricsHistory(sparkId, `llm${portKey}.${tab === "gen" ? "tps" : "prefill"}`);
+  const sliced = data.length > maxSamples ? data.slice(-maxSamples) : data;
   return (
     <div>
-      <ScrubChart data={data} color={color} label={label} pollIntervalMs={2000} />
-      <p className="mt-2 text-[10px] text-muted">~{Math.round((data.length * 2) / 60)} min · Hover to inspect</p>
+      <ScrubChart data={sliced} color={color} label={label} pollIntervalMs={2000} />
+      <p className="mt-2 text-[10px] text-muted">{sliced.length} samples · Hover to inspect</p>
     </div>
   );
 }
@@ -170,6 +172,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
   const online = spark.online;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [tab, setTab] = useState<"gen" | "prefill">("gen");
+  const [timeRange, setTimeRange] = useState(30); // minutes
 
   const llmArr = spark.metrics.llm;
   const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
@@ -298,7 +301,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
           {/* Token history dialog portal */}
           {dialogOpen && createPortal(
             <div style={{ position: "fixed", zIndex: 99999, inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)" }}
-              onClick={() => { setDialogOpen(false); setTab("gen"); }}>
+              onClick={() => { setDialogOpen(false); setTab("gen"); setTimeRange(30); }}>
               <div onClick={e => e.stopPropagation()}
                 style={{ background: "var(--color-surface-elevated, #262626)", borderRadius: 12, padding: 0, maxWidth: 500, width: "90vw", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", border: "1px solid var(--color-border, #353535)" }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px", flexShrink: 0 }}>
@@ -306,7 +309,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
                     <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--color-text-strong, #fff)" }}>Token Throughput</h2>
                     <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--color-muted, #888)" }}>Live values from the LLM server</p>
                   </div>
-                  <button type="button" onClick={() => { setDialogOpen(false); setTab("gen"); }}
+                  <button type="button" onClick={() => { setDialogOpen(false); setTab("gen"); setTimeRange(30); }}
                     style={{ background: "none", border: "none", color: "var(--color-muted, #888)", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>✕</button>
                 </div>
                 <div style={{ padding: "0 20px 20px", overflow: "auto", flex: 1 }}>
@@ -334,7 +337,18 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
                         <strong style={{ color: "var(--color-accent, #e8a830)" }}>Generation</strong> — output tokens streamed to the client after the first token (decode).<br />
                         <strong style={{ color: "var(--color-warning, #e0a838)" }}>Prefill</strong> — input prompt tokens processed in parallel before generation begins.
                       </div>
-                      <DialogChart sparkId={spark.id} portKey={portKey} tab={tab} />
+                      {/* Time range selector */}
+                      <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                        {[1, 5, 15, 30, 60].map((m) => (
+                          <button key={m} type="button" onClick={() => setTimeRange(m)}
+                            style={{ borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 500, border: "none", cursor: "pointer",
+                              background: timeRange === m ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                              color: timeRange === m ? "#fff" : "var(--color-muted, #888)" }}>
+                            {m < 60 ? `${m}m` : "1h"}
+                          </button>
+                        ))}
+                      </div>
+                      <DialogChart sparkId={spark.id} portKey={portKey} tab={tab} maxSamples={timeRange * 30} />
                     </div>
                   )}
                 </div>
