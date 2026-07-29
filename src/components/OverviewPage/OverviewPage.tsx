@@ -7,6 +7,7 @@ import { MetricBar } from "../ui/MetricBar";
 import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { ModelPanel } from "../ModelPanel";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -434,6 +435,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
         </div>
       </div>
+      <ModelPanel />
       <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
         {visibleSparks.map((spark) => (
           <SparkCard key={spark.id} spark={spark}

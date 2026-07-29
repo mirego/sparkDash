@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import os from "os";
 import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
@@ -877,6 +878,103 @@ function initiateSparkShutdown(spark) {
 }
 
 /** Batch routes first so they never collide with /:id/* if routing changes. */
+
+// ─── Model fleet status ──────────────────────────────────
+const SWITCH_SCRIPT = process.env.SWITCH_SCRIPT || "/host/root/home/gilfoyle/switch-model.sh";
+const CPA_STATUS_PATH = process.env.CPA_STATUS_PATH || "/host/root/home/gilfoyle/.cli-proxy-api/live-models-status.json";
+
+/** Read CPA live-models-status.json (if it exists). */
+function readCpaStatus() {
+  try {
+    if (fs.existsSync(CPA_STATUS_PATH)) {
+      return JSON.parse(fs.readFileSync(CPA_STATUS_PATH, "utf8"));
+    }
+  } catch { /* not available yet */ }
+  return null;
+}
+
+/** Run switch-model.sh status and return parsed output. */
+function readSwitchStatus() {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(SWITCH_SCRIPT, ["status"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+        env: { ...process.env, TERM: "dumb" },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
+      child.stderr.on("data", (d) => { stderr += d.toString(); });
+      child.on("close", (code) => {
+        resolve({ ok: code === 0, stdout, stderr, code });
+      });
+      child.on("error", (err) => {
+        resolve({ ok: false, stdout: "", stderr: err.message, code: -1 });
+      });
+    } catch (err) {
+      resolve({ ok: false, stdout: "", stderr: err.message, code: -1 });
+    }
+  });
+}
+
+/** List available model names from the switch script's help / known models. */
+function getAvailableModels() {
+  return [
+    { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context" },
+    { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, least-queue" },
+    { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node" },
+    { id: "qwen", name: "Qwen3.6 Q8", type: "dual", desc: "Both Sparks, least-queue" },
+    { id: "qwen-anton", name: "Qwen3.6 Q8 (anton only)", type: "single", desc: "Single node" },
+  ];
+}
+
+app.get("/api/models/status", async (_req, res) => {
+  const [switchStatus, cpaData] = await Promise.all([
+    readSwitchStatus(),
+    Promise.resolve(readCpaStatus()),
+  ]);
+  res.json({
+    current: cpaData?.probe?.[0]?.ids?.[0] || null,
+    cpa: cpaData,
+    switchScript: switchStatus,
+    available: getAvailableModels(),
+  });
+});
+
+app.post("/api/models/switch", async (req, res) => {
+  const model = req.body?.model;
+  if (!model || typeof model !== "string") {
+    return res.status(400).json({ error: "model name required" });
+  }
+  // SAFETY: We only run status or allowed model names against the switch script.
+  // The switch script stops the current model before starting a new one.
+  const allowed = getAvailableModels().map((m) => m.id);
+  if (!allowed.includes(model)) {
+    return res.status(400).json({ error: `Unknown model: ${model}. Allowed: ${allowed.join(", ")}` });
+  }
+  res.json({ message: `Switch to ${model} initiated (running in background)` });
+  // Fire and forget — no await so the HTTP response returns quickly.
+  spawn(SWITCH_SCRIPT, [model], {
+    stdio: "ignore",
+    detached: true,
+    env: { ...process.env, TERM: "dumb" },
+  }).unref();
+});
+
+app.post("/api/models/refresh", async (_req, res) => {
+  const [switchStatus, cpaData] = await Promise.all([
+    readSwitchStatus(),
+    Promise.resolve(readCpaStatus()),
+  ]);
+  res.json({
+    current: cpaData?.probe?.[0]?.ids?.[0] || null,
+    cpa: cpaData,
+    switchScript: switchStatus,
+    available: getAvailableModels(),
+  });
+});
+
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
   const results = [];
   // Remotes first, local last — shutting down the dashboard host mid-loop would
