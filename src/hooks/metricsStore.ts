@@ -21,9 +21,13 @@ import type { SparkSnapshot } from "../api/types";
  * All listeners are woken on notify; unchanged keys keep the same ref → no render.
  */
 
-const HISTORY_MAX = 1800; // 1 h at 2 s poll — the WS interval, not wall-clock guarantees
+const HISTORY_MAX = 900; // 30 min at 2 s poll
 /** Samples shown in inline sparklines (≈1 min at 2 s poll). Full series stays in HISTORY_MAX. */
 export const SPARKLINE_TAIL = 30;
+
+/** localStorage key for cross-reload persistence */
+const STORAGE_KEY = "sparkdash:metrics-history";
+const STORAGE_DEBOUNCE_MS = 5000;
 
 const history = new Map<string, number[]>(); // key: `${sparkId}:${metric}`
 /** Cached last-N views — refreshed whenever the full series is replaced. */
@@ -32,6 +36,46 @@ const sparkMap = new Map<string, SparkSnapshot>();
 const listeners = new Set<() => void>();
 
 const EMPTY: readonly number[] = Object.freeze([] as number[]);
+
+// ─── localStorage persistence ─────────────────────────────
+let _storageTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Debounced write of the full history map to localStorage. */
+function _saveToStorage() {
+  if (_storageTimer) return;
+  _storageTimer = setTimeout(() => {
+    _storageTimer = null;
+    try {
+      const obj: Record<string, number[]> = {};
+      for (const [key, vals] of history) {
+        obj[key] = vals;
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      // localStorage full or unavailable — silently skip
+    }
+  }, STORAGE_DEBOUNCE_MS);
+}
+
+/** Load persisted history from localStorage on module init. */
+function _loadFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (typeof obj !== "object" || obj === null) return;
+    for (const key of Object.keys(obj)) {
+      const arr = obj[key];
+      if (Array.isArray(arr) && arr.length > 0) {
+        // Cap to HISTORY_MAX in case the saved data is stale/oversized
+        history.set(key, arr.length > HISTORY_MAX ? arr.slice(-HISTORY_MAX) : arr);
+      }
+    }
+  } catch {
+    // Corrupt or unavailable — start fresh
+  }
+}
+_loadFromStorage();
 
 function notify() {
   for (const l of listeners) l();
@@ -68,6 +112,7 @@ function pushHistory(key: string, value: number) {
   }
   history.set(key, next);
   setHistoryTail(key, next);
+  _saveToStorage();
 }
 
 function removeHistoryForSpark(sparkId: string) {
@@ -179,4 +224,5 @@ export function _resetStore(): void {
   history.clear();
   historyTails.clear();
   sparkMap.clear();
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
 }
