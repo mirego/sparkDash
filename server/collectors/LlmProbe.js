@@ -366,7 +366,12 @@ export class LlmProbe {
         if (metricsRes.ok) {
           const txt = await metricsRes.text();
 
-          const promptTokens = this._getVllmMetric(txt, "prompt_tokens_total");
+          const promptTokensRaw = this._getVllmMetric(txt, "prompt_tokens_total");
+          // Use local_compute only — prompt_tokens_total includes MTP draft
+          // re-prefill cache hits that inflate the count ~240x for DSpark.
+          const computeRe = new RegExp(`^vllm:prompt_tokens_by_source_total\\{[^}]*source="local_compute"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`, "m");
+          const computeMatch = txt.match(computeRe);
+          const promptTokens = computeMatch ? parseFloat(computeMatch[1]) : null;
           const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
           if (promptTokens != null && genTokens != null) {
             const deltaIn = promptTokens - this.lastTokenCounts.input;
