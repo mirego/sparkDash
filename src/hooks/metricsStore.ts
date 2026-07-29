@@ -104,6 +104,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         const port = ports[i];
         const portKey = port != null ? `:${port}` : `:${i}`;
         pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
+        pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps);
       }
     }
   }

@@ -12,6 +12,9 @@ const GPU_MEMORY_JSON_PATH =
 /** Encrypted SSH password store (never served by API; lives on config volume). */
 const SPARKS_SECRETS_PATH =
   process.env.SPARKS_SECRETS_PATH || path.join(ROOT, "config", "sparks-secrets.json");
+/** Persistent lifetime token counters across sparkDash restarts (per spark:port). */
+const TOKEN_LIFETIMES_PATH =
+  process.env.TOKEN_LIFETIMES_PATH || path.join(ROOT, "config", "token-lifetimes.json");
 /** AES key file (auto-generated if SPARKDASH_SECRETS_KEY unset). */
 const SECRETS_KEY_PATH =
   process.env.SECRETS_KEY_PATH || path.join(ROOT, "config", ".secrets-key");
@@ -76,6 +79,7 @@ export {
   GPU_MEMORY_JSON_PATH,
   SPARKS_SECRETS_PATH,
   SECRETS_KEY_PATH,
+  TOKEN_LIFETIMES_PATH,
   LLM_PROBE_TIMEOUT_MS,
   SSH_CONNECT_TIMEOUT,
   POLL_INTERVAL_GPU,

@@ -172,6 +172,8 @@ export interface LlmMetrics {
   prefillTps: number;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
   totalOutputTokens: number;
+  /** Cumulative total input (prompt) tokens as reported by the LLM server */
+  totalInputTokens: number;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
   kvCacheUsage?: number | null;
   /** vLLM running request count. null when unavailable. */

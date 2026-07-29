@@ -5,7 +5,43 @@
  * Ported from legacy `probeLlamaServerType` and `_getLlamaMetricsFor`.
  */
 import { LLM_PROBE_TIMEOUT_MS } from "../config.js";
+import { TOKEN_LIFETIMES_PATH } from "../config.js";
+import { atomicWrite } from "../util/atomicWrite.js";
 import { classifyHostScope } from "../validate.js";
+import fs from "fs";
+import path from "path";
+
+// ─── Disk-persisted lifetime token counters ──────────────
+// Survives sparkDash restarts. Keyed by `${sparkId}:${port}`.
+let _diskCounts = {};
+try {
+  if (fs.existsSync(TOKEN_LIFETIMES_PATH)) {
+    _diskCounts = JSON.parse(fs.readFileSync(TOKEN_LIFETIMES_PATH, "utf8"));
+  }
+} catch { /* corrupt or missing — start fresh */ }
+
+function _saveDiskCounts() {
+  try {
+    atomicWrite(TOKEN_LIFETIMES_PATH, JSON.stringify(_diskCounts, null, 2), 0o600);
+  } catch (err) {
+    console.error("[LlmProbe] failed to save token-lifetimes.json:", err.message);
+  }
+}
+
+function _loadOffsets(sparkId, port, modelId) {
+  const key = modelId ? `${sparkId}:${port}:${modelId}` : `${sparkId}:${port}`;
+  const entry = _diskCounts[key];
+  if (entry && typeof entry.input === "number" && typeof entry.output === "number") {
+    return { input: entry.input, output: entry.output };
+  }
+  return { input: 0, output: 0 };
+}
+
+function _saveOffsets(sparkId, port, modelId, input, output) {
+  const key = modelId ? `${sparkId}:${port}:${modelId}` : `${sparkId}:${port}`;
+  _diskCounts[key] = { input, output };
+  _saveDiskCounts();
+}
 
 const FAIL_RESET_THRESHOLD = 3;
 const REDETECT_INTERVAL_MS = 60_000;
@@ -39,6 +75,15 @@ export class LlmProbe {
 
     // Cumulative total output tokens (generation) as reported by the LLM server
     this.totalOutputTokens = 0;
+    /** Cumulative total input tokens (prompt) as reported by the LLM server */
+    this.totalInputTokens = 0;
+    // Lifetime accumulation across vLLM restarts (survives counter resets)
+    this._sparkId = spark.id;
+    const offsets = _loadOffsets(spark.id, port, null);
+    this._inputAccumulated = offsets.input;
+    this._outputAccumulated = offsets.output;
+    this._lastRawInput = 0;
+    this._lastRawOutput = 0;
 
     // vLLM inference metrics from /metrics (null when not vLLM / missing series)
     // Metric names follow stock vLLM Prometheus exposition (versions may differ).
@@ -69,6 +114,11 @@ export class LlmProbe {
     }
     this.baseUrl = `http://${this.spark.lanIp}:${this.port}`;
     if (this.baseUrl !== prevUrl) {
+      // Reload disk offsets for the new port key
+      const offsets = _loadOffsets(this._sparkId, this.port, this.modelId);
+      this._inputAccumulated = offsets.input;
+      this._outputAccumulated = offsets.output;
+      this._modelKeyed = false;
       this._resetDetection();
       this._lastDetectAt = 0;
       this._consecutiveFailures = 0;
@@ -110,6 +160,61 @@ export class LlmProbe {
     this.error = null;
   }
 
+  /**
+   * Update lifetime token counters, detecting vLLM counter resets (process restart).
+   * When the raw counter drops below the previous observation, the old value is
+   * added to the accumulated offset so the reported total never decreases.
+   */
+  _accumulateTokens(rawInput, rawOutput) {
+    const now = Date.now();
+    // Only accumulate for vLLM/SGLang where counters are cumulative from boot.
+    // llama.cpp uses slot-level decoded/prompted counters which work differently.
+    if (this.backendType !== "vllm" && this.backendType !== "sglang") {
+      this.totalInputTokens = rawInput;
+      this.totalOutputTokens = rawOutput;
+      return;
+    }
+    // First observation: just record it.
+    if (this._lastRawInput === 0 && this._lastRawOutput === 0) {
+      this._lastRawInput = rawInput;
+      this._lastRawOutput = rawOutput;
+      this.totalInputTokens = rawInput;
+      this.totalOutputTokens = rawOutput;
+      return;
+    }
+    // Detect counter reset (value dropped below last seen → vLLM restarted)
+    if (rawInput < this._lastRawInput) {
+      this._inputAccumulated += this._lastRawInput;
+    }
+    if (rawOutput < this._lastRawOutput) {
+      this._outputAccumulated += this._lastRawOutput;
+    }
+    this._lastRawInput = rawInput;
+    this._lastRawOutput = rawOutput;
+    this.totalInputTokens = this._inputAccumulated + rawInput;
+    this.totalOutputTokens = this._outputAccumulated + rawOutput;
+    // First time we have a modelId: reload offsets keyed by model
+    if (this.modelId && !this._modelKeyed) {
+      this._modelKeyed = true;
+      const offsets = _loadOffsets(this._sparkId, this.port, this.modelId);
+      this._inputAccumulated = offsets.input;
+      this._outputAccumulated = offsets.output;
+      this.totalInputTokens = this._inputAccumulated + rawInput;
+      this.totalOutputTokens = this._outputAccumulated + rawOutput;
+    }
+    // Persist to disk (debounced: save at most once per 10s)
+    this._scheduleDiskSave();
+  }
+
+  _scheduleDiskSave() {
+    if (this._saveTimer) return;
+    const modelId = this._modelKeyed ? this.modelId : null;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      _saveOffsets(this._sparkId, this.port, modelId, this._inputAccumulated, this._outputAccumulated);
+    }, 10_000);
+  }
+
   _noteFailure(message) {
     this.error = message;
     this._consecutiveFailures += 1;
@@ -130,7 +235,8 @@ export class LlmProbe {
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
     this.slotsTotal = 0;
-    this.totalOutputTokens = 0;
+    // Don't reset totalInputTokens / totalOutputTokens — _accumulateTokens
+    // preserves lifetime counts across detection resets and vLLM restarts.
     this.kvCacheUsage = null;
     this.requestsRunning = null;
     this.requestsWaiting = null;
@@ -242,6 +348,8 @@ export class LlmProbe {
             this.lastTokenCounts.input = sgData.total_input_tokens;
             this.lastTokenCounts.output = sgData.total_output_tokens;
             this.totalOutputTokens = sgData.total_output_tokens;
+            this.totalInputTokens = sgData.total_input_tokens;
+            this._accumulateTokens(sgData.total_input_tokens, sgData.total_output_tokens);
             if (dtSec > 0 && dtSec < 10) {
               this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
               this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
@@ -266,6 +374,8 @@ export class LlmProbe {
             this.lastTokenCounts.input = promptTokens;
             this.lastTokenCounts.output = genTokens;
             this.totalOutputTokens = genTokens;
+            this.totalInputTokens = promptTokens;
+            this._accumulateTokens(promptTokens, genTokens);
             if (dtSec > 0 && dtSec < 10) {
               this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
               this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
@@ -537,6 +647,7 @@ export class LlmProbe {
       generationTps: this.generationTps,
       prefillTps: this.prefillTps,
       totalOutputTokens: this.totalOutputTokens,
+      totalInputTokens: this.totalInputTokens,
       kvCacheUsage: this.kvCacheUsage,
       requestsRunning: this.requestsRunning,
       requestsWaiting: this.requestsWaiting,
@@ -564,6 +675,7 @@ export class LlmProbe {
       generationTps: 0,
       prefillTps: 0,
       totalOutputTokens: 0,
+      totalInputTokens: 0,
       kvCacheUsage: null,
       requestsRunning: null,
       requestsWaiting: null,
