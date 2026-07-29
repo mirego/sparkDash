@@ -144,61 +144,7 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
   );
 }
 
-/** Renders the clickable token throughput section with sparklines. */
-function SparkPreview({ sparkId, portKey, llm, onOpen }: {
-  sparkId: string; portKey: string;
-  llm: NonNullable<SparkSnapshot["metrics"]["llm"] extends (infer U)[] ? U : never>;
-  onOpen: () => void;
-}) {
-  const genHistory = useMetricsHistoryTail(sparkId, `llm${portKey}.tps`);
-  const prefillHistory = useMetricsHistoryTail(sparkId, `llm${portKey}.prefill`);
-  return (
-    <button type="button" onClick={onOpen}
-      aria-label="Open token throughput history"
-      className="mt-3.5 w-full border-t border-border pt-3 text-center transition-colors hover:bg-accent/5 rounded-sm -mx-1 px-1">
-      {llm.requestsRunning != null && (
-        <div className="mb-2 flex items-center justify-center gap-3 text-[10px]">
-          <span className="inline-flex items-center gap-1">
-            <span className={`h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
-            <span className="font-medium text-text-strong">{Math.round(llm.requestsRunning)}</span>
-            <span className="text-muted">running</span>
-          </span>
-          {llm.requestsWaiting != null && llm.requestsWaiting > 0 && (
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-warning" />
-              <span className="font-medium text-text-strong">{Math.round(llm.requestsWaiting)}</span>
-              <span className="text-muted">waiting</span>
-            </span>
-          )}
-        </div>
-      )}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="flex flex-col items-center gap-1">
-          <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
-            <Sparkline data={genHistory} width={100} height={24} color="var(--color-accent)" area />
-          </div>
-          <div className="flex items-baseline gap-0.5">
-            <span className="font-tabular text-[13px] font-bold leading-none text-accent">{llm.generationTps.toFixed(0)}</span>
-            <span className="text-[9px] text-muted">tok/s</span>
-          </div>
-          <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
-        </div>
-        <div className="flex flex-col items-center gap-1">
-          <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
-            <Sparkline data={prefillHistory} width={100} height={24} color="var(--color-warning)" area />
-          </div>
-          <div className="flex items-baseline gap-0.5">
-            <span className="font-tabular text-[13px] font-bold leading-none text-warning">{llm.prefillTps.toFixed(0)}</span>
-            <span className="text-[9px] text-muted">tok/s</span>
-          </div>
-          <span className="text-[8px] uppercase tracking-wider text-muted">Prefill</span>
-        </div>
-      </div>
-      <div className="mt-1.5 text-[9px] text-muted">Click to view full history</div>
-    </button>
-  );
-}
-
+/** Mounted inside the portal (only when dialog is open) so useMetricsHistory is safe. */
 function DialogChart({ sparkId, portKey, tab, maxSamples }: {
   sparkId: string;
   portKey: string;
@@ -235,6 +181,8 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
   const ports = spark.llmPorts ?? [];
   const llmIdx = ports.findIndex((p, i) => llmArr?.[i]?.available);
   const portKey = ports[llmIdx] != null ? `:${ports[llmIdx]}` : ":0";
+  const genHistory = useMetricsHistoryTail(spark.id, `llm${portKey}.tps`);
+  const prefillHistory = useMetricsHistoryTail(spark.id, `llm${portKey}.prefill`);
 
   const usage = gpu?.usage ?? 0;
   const tempRaw = gpu?.temperature ?? 0;
@@ -323,7 +271,33 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
 
           {/* Token throughput sparklines */}
           {llm && (
-            <SparkPreview sparkId={spark.id} portKey={portKey} llm={llm} onOpen={() => setDialogOpen(true)} />
+            <button type="button" onClick={() => setDialogOpen(true)}
+              aria-label="Open token throughput history"
+              className="mt-3.5 w-full border-t border-border pt-3 text-center transition-colors hover:bg-accent/5 rounded-sm -mx-1 px-1">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col items-center gap-1">
+                  <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
+                    <Sparkline data={genHistory} width={100} height={24} color="var(--color-accent)" area />
+                  </div>
+                  <div className="flex items-baseline gap-0.5">
+                    <span className="font-tabular text-[13px] font-bold leading-none text-accent">{llm.generationTps.toFixed(0)}</span>
+                    <span className="text-[9px] text-muted">tok/s</span>
+                  </div>
+                  <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
+                </div>
+                <div className="flex flex-col items-center gap-1">
+                  <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
+                    <Sparkline data={prefillHistory} width={100} height={24} color="var(--color-warning)" area />
+                  </div>
+                  <div className="flex items-baseline gap-0.5">
+                    <span className="font-tabular text-[13px] font-bold leading-none text-warning">{llm.prefillTps.toFixed(0)}</span>
+                    <span className="text-[9px] text-muted">tok/s</span>
+                  </div>
+                  <span className="text-[8px] uppercase tracking-wider text-muted">Prefill</span>
+                </div>
+              </div>
+              <div className="mt-1.5 text-[9px] text-muted">Click to view full history</div>
+            </button>
           )}
 
           {/* Token history dialog portal */}
