@@ -65,11 +65,14 @@ function formatTok(v: number): string {
 }
 
 /** Interactive SVG scrub chart for token history. */
-function ScrubChart({ data, color, label, pollIntervalMs }: {
+function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, secondaryColor, secondaryLabel }: {
   data: readonly number[];
   color: string;
   label: string;
   pollIntervalMs: number;
+  secondaryData?: readonly number[];
+  secondaryColor?: string;
+  secondaryLabel?: string;
 }) {
   const [scrubIdx, setScrubIdx] = useState<number | null>(null);
   const W = 600, H = 200;
@@ -84,9 +87,17 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
   const maxVal = Math.max(...data, 1);
   const minVal = Math.min(...data, 0);
   const span = maxVal - minVal || 1;
+
+  const showSecondary = secondaryData && secondaryData.length > 0;
+  const secMax = showSecondary ? Math.max(...secondaryData, 1) : 1;
+  const secMin = showSecondary ? Math.min(...secondaryData, 0) : 0;
+  const secSpan = (secMax - secMin) || 1;
+
   const toX = (i: number) => PAD.left + (i / (data.length - 1)) * innerW;
   const toY = (v: number) => PAD.top + innerH - ((v - minVal) / span) * innerH;
+  const toSecY = (v: number) => PAD.top + innerH - ((v - secMin) / secSpan) * innerH;
   const points = data.map((v, i) => `${toX(i)},${toY(v)}`);
+  const secPoints = showSecondary ? secondaryData.map((v, i) => `${toX(i)},${toSecY(v)}`) : [];
 
   const gridLabel = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}K` : v >= 100 ? v.toFixed(0) : v.toFixed(1);
   const gridYs = Array.from({ length: 6 }, (_, i) => {
@@ -121,12 +132,35 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
             <text x={PAD.left - 6} y={gy.y + 3} textAnchor="end" fill="var(--color-muted)" fontSize={10}>{gy.label}</text>
           </g>
         ))}
+        {showSecondary && secSpan > 0 && (
+          <>
+            {Array.from({ length: 4 }, (_, i) => {
+              const v = secMin + (secSpan * i) / 3;
+              const y = toSecY(v);
+              return (
+                <text key={i} x={W - PAD.right + 8} y={y + 3} textAnchor="start" fill={secondaryColor || "#888"} fontSize={9}>
+                  {v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(1)}K` : v.toFixed(0)}
+                </text>
+              );
+            })}
+            <text x={W - PAD.right + 8} y={PAD.top - 4} textAnchor="start" fill={secondaryColor || "#888"} fontSize={8}>
+              {secondaryLabel || ""}
+            </text>
+          </>
+        )}
         {timeLabels.map((tl, i) => (
           <text key={i} x={tl.x} y={H - 6} textAnchor="middle" fill="var(--color-muted)" fontSize={10}>{tl.label}</text>
         ))}
         <polyline points={points.join(" ")} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         <path d={`M${PAD.left},${H - PAD.bottom} L${points.join(" L")} L${W - PAD.right},${H - PAD.bottom} Z`}
           fill={`color-mix(in srgb, ${color} 12%, transparent)`} />
+        {showSecondary && secPoints.length > 0 && (
+          <g>
+            <polyline points={secPoints.join(" ")} fill="none" stroke={secondaryColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="3 2" />
+            <path d={`M${PAD.left},${H - PAD.bottom} L${secPoints.join(" L")} L${W - PAD.right},${H - PAD.bottom} Z`}
+              fill={`color-mix(in srgb, ${secondaryColor || "#888"} 8%, transparent)`} />
+          </g>
+        )}
         {scratchX != null && (
           <>
             <line x1={scratchX} y1={PAD.top} x2={scratchX} y2={H - PAD.bottom} stroke="var(--color-text-strong)" strokeWidth={1} strokeDasharray="3 2" opacity={0.5} />
@@ -136,8 +170,19 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
       </svg>
       {scrubIdx != null && scrubValue != null && (
         <div className="pointer-events-none absolute z-10 -translate-x-1/2 rounded border border-border bg-surface-elevated px-2.5 py-1.5 text-xs shadow-lg" style={{ left: "50%", top: "100%", marginTop: 2 }}>
-          <span className="font-semibold text-text-strong">{gridLabel(scrubValue)}</span>
-          <span className="text-muted"> {label} · {secsAgo < 60 ? `${Math.round(secsAgo)}s ago` : `${Math.round(secsAgo / 60)}m ago`}</span>
+          <div className="flex items-center gap-3">
+            <span>
+              <span className="font-semibold text-text-strong">{gridLabel(scrubValue)}</span>
+              <span className="text-muted"> {label}</span>
+            </span>
+            {showSecondary && scrubIdx < secondaryData!.length && (
+              <span className="border-l border-border pl-3">
+                <span className="font-semibold text-text-strong" style={{ color: secondaryColor }}>{Math.round(secondaryData[scrubIdx])}</span>
+                <span className="text-muted"> {secondaryLabel}</span>
+              </span>
+            )}
+          </div>
+          <div className="text-muted mt-0.5" style={{ fontSize: 10 }}>{secsAgo < 60 ? `${Math.round(secsAgo)}s ago` : `${Math.round(secsAgo / 60)}m ago`}</div>
         </div>
       )}
     </div>
