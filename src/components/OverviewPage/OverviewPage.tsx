@@ -134,15 +134,24 @@ function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, seconda
         ))}
         {showSecondary && secSpan > 0 && (
           <>
-            {Array.from({ length: 4 }, (_, i) => {
-              const v = secMin + (secSpan * i) / 3;
-              const y = toSecY(v);
-              return (
-                <text key={i} x={W - PAD.right + 8} y={y + 3} textAnchor="start" fill={secondaryColor || "#888"} fontSize={9}>
-                  {v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(1)}K` : v.toFixed(0)}
-                </text>
-              );
-            })}
+            {(() => {
+              // Integer-optimized tick labels: for small spans (≤4) use step=1,
+              // otherwise use 5 evenly-spaced labels rounded to int.
+              const raw = Array.from({ length: 5 }, (_, i) => secMin + (secSpan * i) / 4);
+              const labels = secMax - secMin <= 4
+                ? Array.from({ length: Math.min(secMax - secMin + 1, 5) }, (_, i) => secMin + i)
+                : raw.map(v => Math.round(v));
+              // Deduplicate but keep positions
+              const seen = new Set<number>();
+              return labels.filter(v => { const k = Math.round(v * 10); if (seen.has(k)) return false; seen.add(k); return true; }).map((v, i) => {
+                const y = toSecY(v);
+                return (
+                  <text key={i} x={W - PAD.right + 8} y={y + 3} textAnchor="start" fill={secondaryColor || "#888"} fontSize={9}>
+                    {v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(1)}K` : v.toFixed(0)}
+                  </text>
+                );
+              });
+            })()}
             <text x={W - PAD.right + 8} y={PAD.top - 4} textAnchor="start" fill={secondaryColor || "#888"} fontSize={8}>
               {secondaryLabel || ""}
             </text>
