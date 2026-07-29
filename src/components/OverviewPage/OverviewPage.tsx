@@ -76,7 +76,7 @@ function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, seconda
 }) {
   const [scrubIdx, setScrubIdx] = useState<number | null>(null);
   const W = 600, H = 200;
-  const PAD = { top: 12, right: 12, bottom: 28, left: 52 };
+  const PAD = { top: 12, right: 90, bottom: 28, left: 52 };
   const innerW = W - PAD.left - PAD.right;
   const innerH = H - PAD.top - PAD.bottom;
 
@@ -185,6 +185,78 @@ function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, seconda
           <div className="text-muted mt-0.5" style={{ fontSize: 10 }}>{secsAgo < 60 ? `${Math.round(secsAgo)}s ago` : `${Math.round(secsAgo / 60)}m ago`}</div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Token throughput dialog — proper component so hooks work. */
+function TokenDialog({ spark, dialogTab, setDialogTab, dialogTimeRange, setDialogTimeRange, onClose }: {
+  spark: SparkSnapshot;
+  dialogTab: "gen" | "prefill";
+  setDialogTab: (t: "gen" | "prefill") => void;
+  dialogTimeRange: number;
+  setDialogTimeRange: (m: number) => void;
+  onClose: () => void;
+}) {
+  const llmArr = spark.metrics.llm;
+  const llm = Array.isArray(llmArr) ? llmArr.length > 0 ? llmArr[0] : null : llmArr;
+  const ports = spark.llmPorts ?? [];
+  const llmIdx = ports.findIndex((p, i) => llmArr?.[i]?.available);
+  const portKey = ports[llmIdx] != null ? `:${ports[llmIdx]}` : ":0";
+  const currentTps = dialogTab === "gen" ? llm?.generationTps ?? 0 : llm?.prefillTps ?? 0;
+  return (
+    <div style={{ position: "fixed", zIndex: 99999, inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)" }}
+      onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "var(--color-surface-elevated, #262626)", borderRadius: 12, padding: 0, maxWidth: 500, width: "90vw", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", border: "1px solid var(--color-border, #353535)" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px", flexShrink: 0 }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--color-text-strong, #fff)" }}>Token Throughput</h2>
+            <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--color-muted, #888)" }}>Live values from the LLM server{llm?.requestsRunning != null ? ` · ${Math.round(llm.requestsRunning)} active request${llm.requestsRunning !== 1 ? "s" : ""}` : ""}</p>
+          </div>
+          <button type="button" onClick={onClose}
+            style={{ background: "none", border: "none", color: "var(--color-muted, #888)", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>✕</button>
+        </div>
+        <div style={{ padding: "0 20px 20px", overflow: "auto", flex: 1 }}>
+          {!llm ? (
+            <p style={{ fontSize: 12, color: "var(--color-muted, #888)" }}>No LLM data available.</p>
+          ) : (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <button type="button" onClick={() => setDialogTab("gen")}
+                  style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
+                    background: dialogTab === "gen" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                    color: dialogTab === "gen" ? "#fff" : "var(--color-muted, #888)" }}>Generation</button>
+                <button type="button" onClick={() => setDialogTab("prefill")}
+                  style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
+                    background: dialogTab === "prefill" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                    color: dialogTab === "prefill" ? "#fff" : "var(--color-muted, #888)" }}>Prefill</button>
+                <span style={{ marginLeft: "auto", fontFamily: "ui-monospace,monospace", fontSize: 14, fontWeight: 700, color: "var(--color-text-strong, #fff)" }}>
+                  {formatTok(currentTps)}
+                  <span style={{ fontSize: 11, fontWeight: 400, color: "var(--color-muted, #888)", marginLeft: 4 }}>
+                    {dialogTab === "gen" ? "gen" : "prefill"} tok/s now
+                  </span>
+                </span>
+              </div>
+              <div style={{ marginBottom: 12, fontSize: 11, lineHeight: 1.5, color: "var(--color-muted, #888)", padding: "8px 10px", borderRadius: 6, background: "var(--color-surface-hover, #303030)" }}>
+                <strong style={{ color: "var(--color-accent, #e8a830)" }}>Generation</strong> — output tokens streamed to the client after the first token (decode).<br />
+                <strong style={{ color: "var(--color-warning, #e0a838)" }}>Prefill</strong> — input prompt tokens processed in parallel before generation begins.
+              </div>
+              <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                {[1, 5, 15, 30, 60].map((m) => (
+                  <button key={m} type="button" onClick={() => setDialogTimeRange(m)}
+                    style={{ borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 500, border: "none", cursor: "pointer",
+                      background: dialogTimeRange === m ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                      color: dialogTimeRange === m ? "#fff" : "var(--color-muted, #888)" }}>
+                    {m < 60 ? `${m}m` : "1h"}
+                  </button>
+                ))}
+              </div>
+              <DialogChart sparkId={spark.id} portKey={portKey} tab={dialogTab} maxSamples={dialogTimeRange * 30} />
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -446,69 +518,11 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}
         currentModel={null} />
       {/* Token throughput dialog overlay */}
-      {dialogSpark != null && (() => {
-        const llmArr = dialogSpark.metrics.llm;
-        const llm = Array.isArray(llmArr) ? llmArr.length > 0 ? llmArr[0] : null : llmArr;
-        const ports = dialogSpark.llmPorts ?? [];
-        const llmIdx = ports.findIndex((p, i) => llmArr?.[i]?.available);
-        const portKey = ports[llmIdx] != null ? `:${ports[llmIdx]}` : ":0";
-        return (
-          <div style={{ position: "fixed", zIndex: 99999, inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)" }}
-            onClick={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }}>
-            <div onClick={e => e.stopPropagation()}
-              style={{ background: "var(--color-surface-elevated, #262626)", borderRadius: 12, padding: 0, maxWidth: 500, width: "90vw", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", border: "1px solid var(--color-border, #353535)" }}>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px", flexShrink: 0 }}>
-                <div>
-                  <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--color-text-strong, #fff)" }}>Token Throughput</h2>
-                  <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--color-muted, #888)" }}>Live values from the LLM server</p>
-                </div>
-                <button type="button" onClick={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }}
-                  style={{ background: "none", border: "none", color: "var(--color-muted, #888)", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>✕</button>
-              </div>
-              <div style={{ padding: "0 20px 20px", overflow: "auto", flex: 1 }}>
-                {!llm ? (
-                  <p style={{ fontSize: 12, color: "var(--color-muted, #888)" }}>No LLM data available.</p>
-                ) : (
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                      <button type="button" onClick={() => setDialogTab("gen")}
-                        style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
-                          background: dialogTab === "gen" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
-                          color: dialogTab === "gen" ? "#fff" : "var(--color-muted, #888)" }}>Generation</button>
-                      <button type="button" onClick={() => setDialogTab("prefill")}
-                        style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
-                          background: dialogTab === "prefill" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
-                          color: dialogTab === "prefill" ? "#fff" : "var(--color-muted, #888)" }}>Prefill</button>
-                      <span style={{ marginLeft: "auto", fontFamily: "ui-monospace,monospace", fontSize: 14, fontWeight: 700, color: "var(--color-text-strong, #fff)" }}>
-                        {formatTok(dialogTab === "gen" ? llm.generationTps : llm.prefillTps)}
-                        <span style={{ fontSize: 11, fontWeight: 400, color: "var(--color-muted, #888)", marginLeft: 4 }}>
-                          {dialogTab === "gen" ? "gen" : "prefill"} tok/s now
-                        </span>
-                      </span>
-                    </div>
-                    <div style={{ marginBottom: 12, fontSize: 11, lineHeight: 1.5, color: "var(--color-muted, #888)", padding: "8px 10px", borderRadius: 6, background: "var(--color-surface-hover, #303030)" }}>
-                      <strong style={{ color: "var(--color-accent, #e8a830)" }}>Generation</strong> — output tokens streamed to the client after the first token (decode).<br />
-                      <strong style={{ color: "var(--color-warning, #e0a838)" }}>Prefill</strong> — input prompt tokens processed in parallel before generation begins.
-                    </div>
-                    {/* Time range selector */}
-                    <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
-                      {[1, 5, 15, 30, 60].map((m) => (
-                        <button key={m} type="button" onClick={() => setDialogTimeRange(m)}
-                          style={{ borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 500, border: "none", cursor: "pointer",
-                            background: dialogTimeRange === m ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
-                            color: dialogTimeRange === m ? "#fff" : "var(--color-muted, #888)" }}>
-                          {m < 60 ? `${m}m` : "1h"}
-                        </button>
-                      ))}
-                    </div>
-                    <DialogChart sparkId={dialogSpark.id} portKey={portKey} tab={dialogTab} maxSamples={dialogTimeRange * 30} />
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {dialogSpark != null && <TokenDialog spark={dialogSpark}
+        dialogTab={dialogTab} setDialogTab={setDialogTab}
+        dialogTimeRange={dialogTimeRange} setDialogTimeRange={setDialogTimeRange}
+        onClose={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }} />
+      }
     </div>
   );
 }
