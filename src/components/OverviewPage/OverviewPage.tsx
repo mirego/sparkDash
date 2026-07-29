@@ -8,6 +8,7 @@ import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
 import { ModelPanel } from "../ModelPanel";
+import { ModelSwitchModal } from "../ModelSwitchModal";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -367,6 +368,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
+  const [modelSwitchOpen, setModelSwitchOpen] = useState(false);
 
   async function handleShutdownAll() {
     const onlineCount = sparks.filter((s) => s.online).length;
@@ -430,12 +432,16 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
                 className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-danger/20 hover:text-danger transition-colors disabled:opacity-50">
                 <PowerOffIcon className="h-3 w-3" /> Shutdown All
               </button>
+              <button type="button" onClick={() => setModelSwitchOpen(true)}
+                title="Switch the model running on the fleet"
+                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-accent/20 hover:text-accent transition-colors">
+                <ActivityIcon className="h-3 w-3" /> Switch Model
+              </button>
             </div>
           )}
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
         </div>
       </div>
-      <ModelPanel />
       <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
         {visibleSparks.map((spark) => (
           <SparkCard key={spark.id} spark={spark}
@@ -443,6 +449,9 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
             temperatureUnit={temperatureUnit} onSelect={onSelectSpark} />
         ))}
       </div>
+      <ModelPanel />
+      <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}
+        currentModel={null} />
     </div>
   );
 }

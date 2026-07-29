@@ -882,6 +882,39 @@ function initiateSparkShutdown(spark) {
 // ─── Model fleet status ──────────────────────────────────
 const SWITCH_SCRIPT = process.env.SWITCH_SCRIPT || "/host/root/home/gilfoyle/switch-model.sh";
 const CPA_STATUS_PATH = process.env.CPA_STATUS_PATH || "/host/root/home/gilfoyle/.cli-proxy-api/live-models-status.json";
+const MODEL_HISTORY_PATH = path.join(ROOT, "config", "model-history.json");
+
+// ─── Model switch history ────────────────────────────────
+const SWITCH_STATUS_PATH = path.join(ROOT, "config", ".switch-in-progress");
+
+function readModelHistory() {
+  try {
+    if (fs.existsSync(MODEL_HISTORY_PATH)) {
+      return JSON.parse(fs.readFileSync(MODEL_HISTORY_PATH, "utf8"));
+    }
+  } catch { /* corrupt */ }
+  return [];
+}
+
+function writeModelHistory(events) {
+  try {
+    atomicWrite(MODEL_HISTORY_PATH, JSON.stringify(events, null, 2), 0o600);
+  } catch {}
+}
+
+function recordSwitchEvent(modelId, status, detail) {
+  const events = readModelHistory();
+  events.unshift({
+    ts: new Date().toISOString(),
+    model: modelId,
+    status, // "started" | "completed" | "failed"
+    detail: detail || null,
+  });
+  // Keep last 100 events
+  if (events.length > 100) events.length = 100;
+  writeModelHistory(events);
+  return events[0];
+}
 
 /** Read CPA live-models-status.json (if it exists). */
 function readCpaStatus() {
@@ -947,19 +980,44 @@ app.post("/api/models/switch", async (req, res) => {
   if (!model || typeof model !== "string") {
     return res.status(400).json({ error: "model name required" });
   }
-  // SAFETY: We only run status or allowed model names against the switch script.
-  // The switch script stops the current model before starting a new one.
   const allowed = getAvailableModels().map((m) => m.id);
   if (!allowed.includes(model)) {
     return res.status(400).json({ error: `Unknown model: ${model}. Allowed: ${allowed.join(", ")}` });
   }
-  res.json({ message: `Switch to ${model} initiated (running in background)` });
-  // Fire and forget — no await so the HTTP response returns quickly.
-  spawn(SWITCH_SCRIPT, [model], {
-    stdio: "ignore",
+  const evt = recordSwitchEvent(model, "started", "Switching...");
+  res.json({ ok: true, eventId: evt.ts, message: `Switching to ${model}...` });
+  // Fire and forget — run the script in background
+  const child = spawn(SWITCH_SCRIPT, [model], {
+    stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     env: { ...process.env, TERM: "dumb" },
-  }).unref();
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => { stdout += d.toString(); });
+  child.stderr.on("data", (d) => { stderr += d.toString(); });
+  child.on("close", (code) => {
+    const succeeded = code === 0;
+    recordSwitchEvent(model, succeeded ? "completed" : "failed",
+      succeeded ? stdout.split("\n").filter(l => l.trim()).slice(-3).join(" | ") : stderr.slice(0, 200));
+  });
+  child.on("error", (err) => {
+    recordSwitchEvent(model, "failed", err.message);
+  });
+  child.unref();
+});
+
+app.get("/api/models/history", async (_req, res) => {
+  const events = readModelHistory();
+  res.json({ events });
+});
+
+app.post("/api/models/switch-status", async (req, res) => {
+  // Check if a switch is in progress by looking at the most recent "started" event
+  const events = readModelHistory();
+  const last = events[0];
+  const inProgress = last && last.status === "started";
+  res.json({ inProgress: !!inProgress, lastEvent: last || null });
 });
 
 app.post("/api/models/refresh", async (_req, res) => {
