@@ -236,6 +236,8 @@ export interface SparkSnapshot {
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;
+  lanIp: string;
+  llmHost: string | null;
   /** Cluster role (head / worker / standalone) */
   role?: SparkRole;
   /** Distributed LLM worker — LLM card inactive / not shown (role === worker) */
