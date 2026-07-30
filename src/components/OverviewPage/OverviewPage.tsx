@@ -401,31 +401,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
             <button type="button" onClick={() => onOpenDialog?.(spark.id)}
               aria-label="Open token throughput history"
               className="mt-3.5 w-full border-t border-border pt-3 text-center transition-colors hover:bg-accent/5 rounded-sm -mx-1 px-1">
-              {llm.requestsRunning != null && (
-                <div className="mb-2.5 flex items-center justify-center gap-3 text-[10px]">
-                  <span className={`inline-block h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
-                  <span className="font-semibold text-text-strong">{Math.round(llm.requestsRunning)}</span>
-                  <span className="text-muted">active request{llm.requestsRunning !== 1 ? "s" : ""}</span>
-                  {llm.requestsWaiting != null && llm.requestsWaiting > 0 && (
-                    <>
-                      <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning" />
-                      <span className="font-semibold text-text-strong">{Math.round(llm.requestsWaiting)}</span>
-                      <span className="text-muted">waiting</span>
-                    </>
-                  )}
-                </div>
-              )}
               <div className="grid grid-cols-2 gap-4">
-                <div className="flex flex-col items-center gap-1">
-                  <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
-                    <Sparkline data={genHistory} width={100} height={24} color="var(--color-accent)" area />
-                  </div>
-                  <div className="flex items-baseline gap-0.5">
-                    <span className="font-tabular text-[13px] font-bold leading-none text-accent">{llm.generationTps.toFixed(0)}</span>
-                    <span className="text-[9px] text-muted">tok/s</span>
-                  </div>
-                  <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
-                </div>
                 <div className="flex flex-col items-center gap-1">
                   <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
                     <Sparkline data={prefillHistory} width={100} height={24} color="var(--color-warning)" area />
@@ -436,8 +412,34 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                   </div>
                   <span className="text-[8px] uppercase tracking-wider text-muted">Prefill</span>
                 </div>
+                <div className="flex flex-col items-center gap-1">
+                  <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
+                    <Sparkline data={genHistory} width={100} height={24} color="var(--color-accent)" area />
+                  </div>
+                  <div className="flex items-baseline gap-0.5">
+                    <span className="font-tabular text-[13px] font-bold leading-none text-accent">{llm.generationTps.toFixed(0)}</span>
+                    <span className="text-[9px] text-muted">tok/s</span>
+                  </div>
+                  <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
+                </div>
               </div>
-              <div className="mt-1.5 text-[9px] text-muted">Click to view full history</div>
+              <div className="mt-2 flex items-center justify-center gap-3 text-[10px]">
+                {llm.requestsRunning != null && (
+                  <span className={`inline-flex items-center gap-1`}>
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
+                    <span className="font-medium text-text-strong">{Math.round(llm.requestsRunning)}</span>
+                    <span className="text-muted">active{llm.requestsRunning !== 1 ? "s" : ""}</span>
+                  </span>
+                )}
+                {llm.requestsWaiting != null && llm.requestsWaiting > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-warning" />
+                    <span className="font-medium text-text-strong">{Math.round(llm.requestsWaiting)}</span>
+                    <span className="text-muted">waiting</span>
+                  </span>
+                )}
+                <span className="text-muted">· Click to view full history</span>
+              </div>
             </button>
           )}
           </>
