@@ -152,7 +152,7 @@ function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, seconda
                 );
               });
             })()}
-            <text x={W - PAD.right + 8} y={PAD.top - 4} textAnchor="start" fill={secondaryColor || "#888"} fontSize={8}>
+            <text x={W - PAD.right + 8} y={H - PAD.bottom + 14} textAnchor="start" fill={secondaryColor || "#888"} fontSize={8}>
               {secondaryLabel || ""}
             </text>
           </>
