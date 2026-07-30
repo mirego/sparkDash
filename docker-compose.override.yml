@@ -2,8 +2,7 @@
 # Mounts gilfoyle cluster SSH key so sparkDash can poll every Spark via SSH (uniform N-node).
 services:
   sparkdash:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: host
     volumes:
       - /home/gilfoyle/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
       - /home/gilfoyle/.ssh/id_ed25519.pub:/root/.ssh/id_ed25519.pub:ro
