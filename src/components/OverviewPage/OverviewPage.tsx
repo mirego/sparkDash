@@ -391,7 +391,6 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {llm.contextLength != null && <SpecBadge label="Context" value={llm.contextLength >= 1_000_000 ? `${(llm.contextLength / 1_000_000).toFixed(0)}M` : fmtCompact(llm.contextLength)} />}
                 {llm.kvCacheUsage != null && <SpecBadge label="KV Cache" value={`${(llm.kvCacheUsage * 100).toFixed(0)}%`} />}
-                {llm.requestsRunning != null && <SpecBadge label="Requests" value={`${Math.round(llm.requestsRunning)} run${llm.requestsWaiting != null && llm.requestsWaiting > 0 ? ` · ${Math.round(llm.requestsWaiting)} wait` : ""}`} />}
                 {llm.totalInputTokens != null && llm.totalInputTokens > 0 && <SpecBadge label="Total Input" value={fmtCompact(llm.totalInputTokens)} />}
                 {llm.totalOutputTokens != null && llm.totalOutputTokens > 0 && <SpecBadge label="Total Output" value={fmtCompact(llm.totalOutputTokens)} />}
               </div>
@@ -402,6 +401,20 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
             <button type="button" onClick={() => onOpenDialog?.(spark.id)}
               aria-label="Open token throughput history"
               className="mt-3.5 w-full border-t border-border pt-3 text-center transition-colors hover:bg-accent/5 rounded-sm -mx-1 px-1">
+              {llm.requestsRunning != null && (
+                <div className="mb-2.5 flex items-center justify-center gap-3 text-[10px]">
+                  <span className={`inline-block h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
+                  <span className="font-semibold text-text-strong">{Math.round(llm.requestsRunning)}</span>
+                  <span className="text-muted">active request{llm.requestsRunning !== 1 ? "s" : ""}</span>
+                  {llm.requestsWaiting != null && llm.requestsWaiting > 0 && (
+                    <>
+                      <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-warning" />
+                      <span className="font-semibold text-text-strong">{Math.round(llm.requestsWaiting)}</span>
+                      <span className="text-muted">waiting</span>
+                    </>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col items-center gap-1">
                   <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
