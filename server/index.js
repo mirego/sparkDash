@@ -560,6 +560,7 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
     const job = decodeBenchManager.start({
       sparkId: spark.id,
       lanIp: spark.lanIp,
+      llmHost: spark.llmHost || null,
       port,
       modelId,
       concurrencies: req.body?.concurrencies,
@@ -715,6 +716,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
     const result = showcaseManager.start({
       sparkId: spark.id,
       lanIp: spark.lanIp,
+      llmHost: spark.llmHost || null,
       port,
       modelId,
       maxTokens: req.body?.maxTokens,

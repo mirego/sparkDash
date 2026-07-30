@@ -599,7 +599,8 @@ export class DecodeBenchManager {
   }
 
   async _runJob(job, lanIp) {
-    const baseUrl = `http://${lanIp}:${job.config.port}`;
+    const host = job.config?.llmHost || lanIp;
+    const baseUrl = `http://${host}:${job.config.port}`;
     const debug = Boolean(job._debug);
     try {
       for (const c of job.config.concurrencies) {
