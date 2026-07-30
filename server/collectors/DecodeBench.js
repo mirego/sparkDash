@@ -510,6 +510,7 @@ export class DecodeBenchManager {
     const {
       sparkId,
       lanIp,
+      llmHost,
       port,
       modelId,
       concurrencies: rawConc,
@@ -558,6 +559,7 @@ export class DecodeBenchManager {
       completedAt: null,
       config: {
         port: p,
+        llmHost: llmHost || null,
         modelId: modelId || null,
         concurrencies,
         maxTokens,
