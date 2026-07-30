@@ -6,6 +6,7 @@ interface ModelOption {
   name: string;
   type: "shared" | "dual" | "single";
   desc: string;
+  maxConcurrency: number;
 }
 
 interface SwitchEvent {
@@ -16,11 +17,11 @@ interface SwitchEvent {
 }
 
 const MODELS: ModelOption[] = [
-  { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context · 3-token speculative" },
-  { id: "qwen", name: "Qwen3.6 35B Q8", type: "dual", desc: "Both Sparks, llama.cpp, least-queue proxy" },
-  { id: "qwen-anton", name: "Qwen3.6 35B Q8 (anton only)", type: "single", desc: "Single node only" },
-  { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, vLLM, least-queue proxy" },
-  { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node only" },
+  { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context · 3-token speculative", maxConcurrency: 6 },
+  { id: "qwen", name: "Qwen3.6 35B Q8", type: "dual", desc: "Both Sparks, llama.cpp, least-queue proxy", maxConcurrency: 4 },
+  { id: "qwen-anton", name: "Qwen3.6 35B Q8 (anton only)", type: "single", desc: "Single node only", maxConcurrency: 2 },
+  { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, vLLM, least-queue proxy", maxConcurrency: 4 },
+  { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node only", maxConcurrency: 2 },
 ];
 
 const TYPE_LABELS: Record<string, { label: string; icon: string }> = {

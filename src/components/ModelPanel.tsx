@@ -11,6 +11,7 @@ interface ModelUsageRow {
   maxRequests: number;
   contextLength: number | null;
   totalRequests: number;
+  maxConcurrency: number | null;
 }
 
 interface UsageData {
@@ -37,14 +38,14 @@ const TYPE_LABELS: Record<string, string> = {
   single: "📍 single",
 };
 
-type SortKey = "name" | "type" | "totalInputTokens" | "totalOutputTokens" | "maxRequests" | "contextLength" | "totalRequests";
+type SortKey = "name" | "type" | "totalInputTokens" | "totalOutputTokens" | "maxConcurrency" | "contextLength" | "totalRequests";
 
 const COLUMNS: { key: SortKey; label: string; align?: string }[] = [
   { key: "name", label: "Model" },
   { key: "type", label: "Type" },
   { key: "totalInputTokens", label: "Total Input", align: "right" },
   { key: "totalOutputTokens", label: "Total Output", align: "right" },
-  { key: "maxRequests", label: "Max Reqs", align: "right" },
+  { key: "maxConcurrency", label: "Max Conc", align: "right" },
   { key: "contextLength", label: "Context", align: "right" },
   { key: "totalRequests", label: "Total Reqs", align: "right" },
 ];
@@ -147,7 +148,7 @@ export function ModelPanel() {
                       {fmtCompact(m.totalOutputTokens)}
                     </td>
                     <td style={{ padding: "8px 8px", textAlign: "right", fontFamily: "ui-monospace,monospace", color: "var(--color-text, #ccc)" }}>
-                      {m.maxRequests}
+                      {m.maxConcurrency != null ? m.maxConcurrency : "—"}
                     </td>
                     <td style={{ padding: "8px 8px", textAlign: "right", fontFamily: "ui-monospace,monospace", color: "var(--color-text, #ccc)" }}>
                       {fmtContext(m.contextLength)}

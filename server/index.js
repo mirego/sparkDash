@@ -952,14 +952,21 @@ function readSwitchStatus() {
   });
 }
 
+/** Fuzzy-match a full model ID against the recipe list (e.g. 'deepseek-v4-flash-dspark' → 'dspark'). */
+function findModelInfo(modelId, availableModels) {
+  return availableModels.find(
+    (m) => modelId.includes(m.id) || m.id.includes(modelId)
+  ) || null;
+}
+
 /** List available model names from the switch script's help / known models. */
 function getAvailableModels() {
   return [
-    { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context" },
-    { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, least-queue" },
-    { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node" },
-    { id: "qwen", name: "Qwen3.6 Q8", type: "dual", desc: "Both Sparks, least-queue" },
-    { id: "qwen-anton", name: "Qwen3.6 Q8 (anton only)", type: "single", desc: "Single node" },
+    { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context", maxConcurrency: 6 },
+    { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, least-queue", maxConcurrency: 4 },
+    { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node", maxConcurrency: 2 },
+    { id: "qwen", name: "Qwen3.6 Q8", type: "dual", desc: "Both Sparks, least-queue", maxConcurrency: 4 },
+    { id: "qwen-anton", name: "Qwen3.6 Q8 (anton only)", type: "single", desc: "Single node", maxConcurrency: 2 },
   ];
 }
 
@@ -1135,7 +1142,7 @@ app.get("/api/models/usage", async (_req, res) => {
 
   const models = [];
   for (const [id, stats] of modelMap) {
-    const info = modelInfo.get(id);
+    const info = modelInfo.get(id) || findModelInfo(id, availableModels);
     const tokens = modelTokenTotals.get(id);
     models.push({
       id,
@@ -1152,13 +1159,14 @@ app.get("/api/models/usage", async (_req, res) => {
       maxRequests: modelLiveMeta.get(id)?.maxRequests || 0,
       contextLength: modelLiveMeta.get(id)?.contextLength || null,
       totalRequests: modelLiveMeta.get(id)?.totalRequests || 0,
+      maxConcurrency: info?.maxConcurrency ?? null,
     });
   }
 
   // Add models that have token data but no switch events (first-time detection)
   for (const [id, tokens] of modelTokenTotals) {
     if (!modelMap.has(id)) {
-      const info = modelInfo.get(id);
+      const info = modelInfo.get(id) || findModelInfo(id, availableModels);
       models.push({
         id,
         name: info?.name || id,
@@ -1174,6 +1182,7 @@ app.get("/api/models/usage", async (_req, res) => {
         maxRequests: modelLiveMeta.get(id)?.maxRequests || 0,
         contextLength: modelLiveMeta.get(id)?.contextLength || null,
         totalRequests: modelLiveMeta.get(id)?.totalRequests || 0,
+        maxConcurrency: info?.maxConcurrency ?? null,
       });
     }
   }
