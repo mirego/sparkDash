@@ -34,12 +34,31 @@ function _loadOffsets(sparkId, port, modelId) {
   if (entry && typeof entry.input === "number" && typeof entry.output === "number") {
     return { input: entry.input, output: entry.output };
   }
+  // Fallback: when loading without modelId and no zero-key entry exists,
+  // scan for any model-keyed entry for this spark:port so probe host/port
+  // changes don't orphan accumulated token history.
+  if (!modelId) {
+    const prefix = `${sparkId}:${port}:`;
+    for (const k of Object.keys(_diskCounts)) {
+      if (k.startsWith(prefix)) {
+        const e = _diskCounts[k];
+        if (e && typeof e.input === "number" && typeof e.output === "number" && (e.input > 0 || e.output > 0)) {
+          return { input: e.input, output: e.output };
+        }
+      }
+    }
+  }
   return { input: 0, output: 0 };
 }
 
 function _saveOffsets(sparkId, port, modelId, input, output) {
   const key = modelId ? `${sparkId}:${port}:${modelId}` : `${sparkId}:${port}`;
   _diskCounts[key] = { input, output };
+  // Also write to the null-modelId slot so probes recreated without modelId
+  // (e.g. after a host/port change) find the accumulated data.
+  if (modelId) {
+    _diskCounts[`${sparkId}:${port}`] = { input, output };
+  }
   _saveDiskCounts();
 }
 
