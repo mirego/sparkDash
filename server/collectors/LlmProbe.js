@@ -50,7 +50,7 @@ export class LlmProbe {
   constructor(spark, port = 8888) {
     this.spark = spark;
     this.port = port;
-    this.baseUrl = `http://${spark.lanIp}:${port}`;
+    this.baseUrl = `http://${spark.llmHost || spark.lanIp}:${port}`;
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | null
@@ -114,7 +114,7 @@ export class LlmProbe {
     if (Number.isInteger(next) && next >= 1 && next <= 65535) {
       this.port = next;
     }
-    this.baseUrl = `http://${this.spark.lanIp}:${this.port}`;
+    this.baseUrl = `http://${this.spark.llmHost || this.spark.lanIp}:${this.port}`;
     if (this.baseUrl !== prevUrl) {
       // Reload disk offsets for the new port key
       const offsets = _loadOffsets(this._sparkId, this.port, this.modelId);
@@ -617,7 +617,7 @@ export class LlmProbe {
   _buildPosture() {
     if (this.authOpen == null) return null;
 
-    const host = this.spark?.lanIp || "";
+    const host = this.spark?.llmHost || this.spark?.lanIp || "";
     const scope = classifyHostScope(host);
     const auth = this.authOpen ? "open" : "protected";
 

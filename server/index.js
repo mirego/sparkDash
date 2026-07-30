@@ -130,6 +130,7 @@ app.post("/api/sparks/test", async (req, res) => {
       name: body.name || "test",
       lanIp: body.lanIp || "",
       cx7Ip: body.cx7Ip || null,
+      llmHost: body.llmHost || null,
       isLocal: Boolean(body.isLocal),
       llmPort: resolveLlmPort(body),
       ssh: {
@@ -176,7 +177,7 @@ app.patch("/api/sparks/:id", (req, res) => {
   try {
     const body = req.body || {};
     // Only validate host fields if they are being updated
-    if (body.lanIp != null || body.ssh?.host != null || body.ssh?.user != null) {
+    if (body.lanIp != null || body.llmHost != null || body.ssh?.host != null || body.ssh?.user != null) {
       const existing = registry.getSpark(req.params.id);
       if (!existing) return res.status(404).json({ error: "Spark not found" });
       const merged = {

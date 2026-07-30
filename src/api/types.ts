@@ -4,6 +4,7 @@ export interface SparkConfig {
   name: string;
   lanIp: string;
   cx7Ip?: string | null;
+  llmHost?: string | null;
   /**
    * Optional Wake-on-LAN MAC override. When empty, the server uses
    * `detectedMacAddress` from the enP7s7 interface.

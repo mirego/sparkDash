@@ -164,7 +164,7 @@ export async function sshTest(spark) {
  */
 export async function llmTest(spark, port) {
   try {
-    const host = spark.lanIp;
+    const host = spark.llmHost || spark.lanIp;
     if (!isAllowedTargetHost(host)) {
       return { ok: false, message: `Invalid or disallowed lanIp: ${host}` };
     }
