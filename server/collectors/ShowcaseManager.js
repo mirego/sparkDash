@@ -449,7 +449,7 @@ export class ShowcaseManager {
       _lastTouchAt: now,
       _contentCap: cap,
       _lanIp: lanIp,
-      _llmHost: options.llmHost || null,
+      _llmHost: opts.llmHost || null,
       _sentContentLengths: /** @type {number[]} */ (prompts.map(() => 0)),
       _sentReasoningLengths: /** @type {number[]} */ (prompts.map(() => 0)),
     };
