@@ -423,9 +423,9 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                   <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
                 </div>
               </div>
-              <div className="mt-2 flex items-center justify-center gap-3 text-[10px]">
+              <div className="mt-2 flex flex-col items-center gap-1 text-[10px]">
                 {llm.requestsRunning != null && (
-                  <span className={`inline-flex items-center gap-1`}>
+                  <span className="inline-flex items-center gap-1">
                     <span className={`inline-block h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
                     <span className="font-medium text-text-strong">{Math.round(llm.requestsRunning)}</span>
                     <span className="text-muted">active{llm.requestsRunning !== 1 ? "s" : ""}</span>
@@ -438,7 +438,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                     <span className="text-muted">waiting</span>
                   </span>
                 )}
-                <span className="text-muted">· Click to view full history</span>
+                <span className="text-[9px] text-muted">Click to view full history</span>
               </div>
             </button>
           )}
