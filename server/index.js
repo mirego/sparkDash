@@ -1057,12 +1057,15 @@ app.get("/api/models/usage", async (_req, res) => {
       if (!modelId) continue;
       const key = `${sparkId}:${port}:${modelId}`;
       if (!liveTokens.has(key)) {
-        liveTokens.set(key, { input: 0, output: 0, isLive: false });
+        liveTokens.set(key, { input: 0, output: 0, isLive: false, maxRequests: 0, contextLength: null, totalRequests: 0 });
       }
       const t = liveTokens.get(key);
       // probe.totalInput/Output already includes disk accumulated + current raw
       t.input = Math.max(t.input, probe.totalInputTokens || 0);
       t.output = Math.max(t.output, probe.totalOutputTokens || 0);
+      t.maxRequests = Math.max(t.maxRequests, probe.maxRequestsRunning || 0);
+      if (probe.contextLength != null) t.contextLength = probe.contextLength;
+      t.totalRequests = Math.max(t.totalRequests, probe.totalRequests || 0);
       t.isLive = true;
     }
   }
@@ -1111,6 +1114,21 @@ app.get("/api/models/usage", async (_req, res) => {
     t.totalOutputTokens += counts.output || 0;
   }
 
+  // Aggregate live probe metadata per model (max requests, context, total requests)
+  const modelLiveMeta = new Map();
+  for (const [key, live] of liveTokens) {
+    const parts = key.split(":");
+    if (parts.length < 3) continue;
+    const modelId = parts.slice(2).join(":");
+    if (!modelLiveMeta.has(modelId)) {
+      modelLiveMeta.set(modelId, { maxRequests: 0, contextLength: null, totalRequests: 0 });
+    }
+    const m = modelLiveMeta.get(modelId);
+    m.maxRequests = Math.max(m.maxRequests, live.maxRequests || 0);
+    if (live.contextLength != null) m.contextLength = live.contextLength;
+    m.totalRequests = Math.max(m.totalRequests, live.totalRequests || 0);
+  }
+
   // Available models list with rich info
   const availableModels = getAvailableModels();
   const modelInfo = new Map(availableModels.map((m) => [m.id, m]));
@@ -1131,6 +1149,9 @@ app.get("/api/models/usage", async (_req, res) => {
       lastStatus: stats.lastStatus,
       totalInputTokens: tokens?.totalInputTokens || 0,
       totalOutputTokens: tokens?.totalOutputTokens || 0,
+      maxRequests: modelLiveMeta.get(id)?.maxRequests || 0,
+      contextLength: modelLiveMeta.get(id)?.contextLength || null,
+      totalRequests: modelLiveMeta.get(id)?.totalRequests || 0,
     });
   }
 
@@ -1150,6 +1171,9 @@ app.get("/api/models/usage", async (_req, res) => {
         lastStatus: null,
         totalInputTokens: tokens.totalInputTokens,
         totalOutputTokens: tokens.totalOutputTokens,
+        maxRequests: modelLiveMeta.get(id)?.maxRequests || 0,
+        contextLength: modelLiveMeta.get(id)?.contextLength || null,
+        totalRequests: modelLiveMeta.get(id)?.totalRequests || 0,
       });
     }
   }

@@ -90,6 +90,8 @@ export class LlmProbe {
     this.kvCacheUsage = null; // 0–1 fraction
     this.requestsRunning = null;
     this.requestsWaiting = null;
+    this.maxRequestsRunning = 0;
+    this.totalRequests = null;
     this.ttftP95Seconds = null;
     this.preemptionsTotal = null; // cumulative counter
     /** Prefix cache hit rate 0–1 (hits/queries). */
@@ -240,6 +242,8 @@ export class LlmProbe {
     this.kvCacheUsage = null;
     this.requestsRunning = null;
     this.requestsWaiting = null;
+    this.maxRequestsRunning = 0;
+    this.totalRequests = null;
     this.ttftP95Seconds = null;
     this.preemptionsTotal = null;
     this.prefixCacheHitRate = null;
@@ -390,7 +394,10 @@ export class LlmProbe {
           const running = this._getVllmMetric(txt, "num_requests_running");
           // Keep requestsRunning in sync with other vLLM tiles (null when missing)
           this.requestsRunning = running;
-          if (running != null) this.slotsActive = Math.round(running);
+          if (running != null) {
+            this.slotsActive = Math.round(running);
+            if (running > this.maxRequestsRunning) this.maxRequestsRunning = Math.round(running);
+          }
 
           // Engine sleep state (0 = active, 1 = sleeping)
           if (this.gpuMemoryUtilization == null) {
@@ -400,6 +407,13 @@ export class LlmProbe {
 
           // vLLM inference performance (same /metrics body — no extra HTTP)
           this.requestsWaiting = this._getVllmMetric(txt, "num_requests_waiting");
+          // Total completed requests — sum across all finished_reason labels
+          const reqRe = /^vllm:request_success_total\{[^}]*\}\s+([\d.eE+-]+)\s*$/m;
+          const reqMatch = txt.match(new RegExp(reqRe.source, "gm"));
+          this.totalRequests = reqMatch ? reqMatch.reduce((sum, line) => {
+            const v = parseFloat(line.match(/([\d.eE+-]+)\s*$/)?.[1] || "0");
+            return sum + (isNaN(v) ? 0 : v);
+          }, 0) : null;
           this.kvCacheUsage = this._getVllmMetric(txt, "kv_cache_usage_perc");
           this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
 
@@ -653,9 +667,12 @@ export class LlmProbe {
       prefillTps: this.prefillTps,
       totalOutputTokens: this.totalOutputTokens,
       totalInputTokens: this.totalInputTokens,
+      contextLength: this.contextLength,
       kvCacheUsage: this.kvCacheUsage,
       requestsRunning: this.requestsRunning,
       requestsWaiting: this.requestsWaiting,
+      maxRequestsRunning: this.maxRequestsRunning,
+      totalRequests: this.totalRequests,
       ttftP95Seconds: this.ttftP95Seconds,
       preemptionsTotal: this.preemptionsTotal,
       prefixCacheHitRate: this.prefixCacheHitRate,
@@ -684,6 +701,8 @@ export class LlmProbe {
       kvCacheUsage: null,
       requestsRunning: null,
       requestsWaiting: null,
+      maxRequestsRunning: 0,
+      totalRequests: null,
       ttftP95Seconds: null,
       preemptionsTotal: null,
       prefixCacheHitRate: null,
