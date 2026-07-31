@@ -551,7 +551,8 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       }
       <ConfirmShutdownDialog
         open={shutdownOpen}
-        onlineCount={sparks.filter((s) => s.online).length}
+        title="All Sparks"
+        description={`Gracefully shut down all ${sparks.filter((s) => s.online).length} online Spark(s)? Offline nodes will be skipped.`}
         onConfirm={handleShutdownAll}
         onClose={() => setShutdownOpen(false)}
       />
