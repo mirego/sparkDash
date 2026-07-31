@@ -330,6 +330,7 @@ export class SparkRegistry {
       id: config.id,
       name: config.name || config.id,
       lanIp: config.lanIp || "",
+      llmHost: config.llmHost || null,
       cx7Ip: config.cx7Ip || null,
       /** Optional user override for Wake-on-LAN. Empty → use detectedMacAddress. */
       macAddress: config.macAddress || null,

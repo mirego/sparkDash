@@ -34,12 +34,31 @@ function _loadOffsets(sparkId, port, modelId) {
   if (entry && typeof entry.input === "number" && typeof entry.output === "number") {
     return { input: entry.input, output: entry.output };
   }
+  // Fallback: when loading without modelId and no zero-key entry exists,
+  // scan for any model-keyed entry for this spark:port so probe host/port
+  // changes don't orphan accumulated token history.
+  if (!modelId) {
+    const prefix = `${sparkId}:${port}:`;
+    for (const k of Object.keys(_diskCounts)) {
+      if (k.startsWith(prefix)) {
+        const e = _diskCounts[k];
+        if (e && typeof e.input === "number" && typeof e.output === "number" && (e.input > 0 || e.output > 0)) {
+          return { input: e.input, output: e.output };
+        }
+      }
+    }
+  }
   return { input: 0, output: 0 };
 }
 
 function _saveOffsets(sparkId, port, modelId, input, output) {
   const key = modelId ? `${sparkId}:${port}:${modelId}` : `${sparkId}:${port}`;
   _diskCounts[key] = { input, output };
+  // Also write to the null-modelId slot so probes recreated without modelId
+  // (e.g. after a host/port change) find the accumulated data.
+  if (modelId) {
+    _diskCounts[`${sparkId}:${port}`] = { input, output };
+  }
   _saveDiskCounts();
 }
 
@@ -50,7 +69,7 @@ export class LlmProbe {
   constructor(spark, port = 8888) {
     this.spark = spark;
     this.port = port;
-    this.baseUrl = `http://${spark.lanIp}:${port}`;
+    this.baseUrl = `http://${spark.llmHost || spark.lanIp}:${port}`;
 
     // State
     this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | null
@@ -90,6 +109,8 @@ export class LlmProbe {
     this.kvCacheUsage = null; // 0–1 fraction
     this.requestsRunning = null;
     this.requestsWaiting = null;
+    this.maxRequestsRunning = 0;
+    this.totalRequests = null;
     this.ttftP95Seconds = null;
     this.preemptionsTotal = null; // cumulative counter
     /** Prefix cache hit rate 0–1 (hits/queries). */
@@ -112,7 +133,7 @@ export class LlmProbe {
     if (Number.isInteger(next) && next >= 1 && next <= 65535) {
       this.port = next;
     }
-    this.baseUrl = `http://${this.spark.lanIp}:${this.port}`;
+    this.baseUrl = `http://${this.spark.llmHost || this.spark.lanIp}:${this.port}`;
     if (this.baseUrl !== prevUrl) {
       // Reload disk offsets for the new port key
       const offsets = _loadOffsets(this._sparkId, this.port, this.modelId);
@@ -240,6 +261,8 @@ export class LlmProbe {
     this.kvCacheUsage = null;
     this.requestsRunning = null;
     this.requestsWaiting = null;
+    this.maxRequestsRunning = 0;
+    this.totalRequests = null;
     this.ttftP95Seconds = null;
     this.preemptionsTotal = null;
     this.prefixCacheHitRate = null;
@@ -366,7 +389,12 @@ export class LlmProbe {
         if (metricsRes.ok) {
           const txt = await metricsRes.text();
 
-          const promptTokens = this._getVllmMetric(txt, "prompt_tokens_total");
+          const promptTokensRaw = this._getVllmMetric(txt, "prompt_tokens_total");
+          // Use local_compute only — prompt_tokens_total includes MTP draft
+          // re-prefill cache hits that inflate the count ~240x for DSpark.
+          const computeRe = new RegExp(`^vllm:prompt_tokens_by_source_total\\{[^}]*source="local_compute"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`, "m");
+          const computeMatch = txt.match(computeRe);
+          const promptTokens = computeMatch ? parseFloat(computeMatch[1]) : null;
           const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
           if (promptTokens != null && genTokens != null) {
             const deltaIn = promptTokens - this.lastTokenCounts.input;
@@ -385,7 +413,10 @@ export class LlmProbe {
           const running = this._getVllmMetric(txt, "num_requests_running");
           // Keep requestsRunning in sync with other vLLM tiles (null when missing)
           this.requestsRunning = running;
-          if (running != null) this.slotsActive = Math.round(running);
+          if (running != null) {
+            this.slotsActive = Math.round(running);
+            if (running > this.maxRequestsRunning) this.maxRequestsRunning = Math.round(running);
+          }
 
           // Engine sleep state (0 = active, 1 = sleeping)
           if (this.gpuMemoryUtilization == null) {
@@ -395,6 +426,13 @@ export class LlmProbe {
 
           // vLLM inference performance (same /metrics body — no extra HTTP)
           this.requestsWaiting = this._getVllmMetric(txt, "num_requests_waiting");
+          // Total completed requests — sum across all finished_reason labels
+          const reqRe = /^vllm:request_success_total\{[^}]*\}\s+([\d.eE+-]+)\s*$/m;
+          const reqMatch = txt.match(new RegExp(reqRe.source, "gm"));
+          this.totalRequests = reqMatch ? reqMatch.reduce((sum, line) => {
+            const v = parseFloat(line.match(/([\d.eE+-]+)\s*$/)?.[1] || "0");
+            return sum + (isNaN(v) ? 0 : v);
+          }, 0) : null;
           this.kvCacheUsage = this._getVllmMetric(txt, "kv_cache_usage_perc");
           this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
 
@@ -598,7 +636,7 @@ export class LlmProbe {
   _buildPosture() {
     if (this.authOpen == null) return null;
 
-    const host = this.spark?.lanIp || "";
+    const host = this.spark?.llmHost || this.spark?.lanIp || "";
     const scope = classifyHostScope(host);
     const auth = this.authOpen ? "open" : "protected";
 
@@ -648,9 +686,12 @@ export class LlmProbe {
       prefillTps: this.prefillTps,
       totalOutputTokens: this.totalOutputTokens,
       totalInputTokens: this.totalInputTokens,
+      contextLength: this.contextLength,
       kvCacheUsage: this.kvCacheUsage,
       requestsRunning: this.requestsRunning,
       requestsWaiting: this.requestsWaiting,
+      maxRequestsRunning: this.maxRequestsRunning,
+      totalRequests: this.totalRequests,
       ttftP95Seconds: this.ttftP95Seconds,
       preemptionsTotal: this.preemptionsTotal,
       prefixCacheHitRate: this.prefixCacheHitRate,
@@ -679,6 +720,8 @@ export class LlmProbe {
       kvCacheUsage: null,
       requestsRunning: null,
       requestsWaiting: null,
+      maxRequestsRunning: 0,
+      totalRequests: null,
       ttftP95Seconds: null,
       preemptionsTotal: null,
       prefixCacheHitRate: null,

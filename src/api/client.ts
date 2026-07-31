@@ -266,6 +266,17 @@ export function updateLlmPort(
   });
 }
 
+/** Update a Spark's LLM host override. Empty/nil → use lanIp. */
+export function updateLlmHost(
+  id: string,
+  llmHost: string | null
+): Promise<{ success: boolean }> {
+  return apiFetch(`/api/sparks/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ llmHost: llmHost || null }),
+  });
+}
+
 // ─── Power management ────────────────────────────────────
 export interface PowerResult {
   success: boolean;

@@ -7,6 +7,8 @@ import { MetricBar } from "../ui/MetricBar";
 import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { ModelPanel } from "../ModelPanel";
+import { ModelSwitchModal } from "../ModelSwitchModal";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -63,15 +65,18 @@ function formatTok(v: number): string {
 }
 
 /** Interactive SVG scrub chart for token history. */
-function ScrubChart({ data, color, label, pollIntervalMs }: {
+function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, secondaryColor, secondaryLabel }: {
   data: readonly number[];
   color: string;
   label: string;
   pollIntervalMs: number;
+  secondaryData?: readonly number[];
+  secondaryColor?: string;
+  secondaryLabel?: string;
 }) {
   const [scrubIdx, setScrubIdx] = useState<number | null>(null);
   const W = 600, H = 200;
-  const PAD = { top: 12, right: 12, bottom: 28, left: 52 };
+  const PAD = { top: 12, right: 90, bottom: 28, left: 52 };
   const innerW = W - PAD.left - PAD.right;
   const innerH = H - PAD.top - PAD.bottom;
 
@@ -82,9 +87,17 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
   const maxVal = Math.max(...data, 1);
   const minVal = Math.min(...data, 0);
   const span = maxVal - minVal || 1;
+
+  const showSecondary = secondaryData && secondaryData.length > 0;
+  const secMax = showSecondary ? Math.max(...secondaryData, 1) : 1;
+  const secMin = showSecondary ? Math.min(...secondaryData, 0) : 0;
+  const secSpan = (secMax - secMin) || 1;
+
   const toX = (i: number) => PAD.left + (i / (data.length - 1)) * innerW;
   const toY = (v: number) => PAD.top + innerH - ((v - minVal) / span) * innerH;
+  const toSecY = (v: number) => PAD.top + innerH - ((v - secMin) / secSpan) * innerH;
   const points = data.map((v, i) => `${toX(i)},${toY(v)}`);
+  const secPoints = showSecondary ? secondaryData.map((v, i) => `${toX(i)},${toSecY(v)}`) : [];
 
   const gridLabel = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}K` : v >= 100 ? v.toFixed(0) : v.toFixed(1);
   const gridYs = Array.from({ length: 6 }, (_, i) => {
@@ -119,12 +132,44 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
             <text x={PAD.left - 6} y={gy.y + 3} textAnchor="end" fill="var(--color-muted)" fontSize={10}>{gy.label}</text>
           </g>
         ))}
+        {showSecondary && secSpan > 0 && (
+          <>
+            {(() => {
+              // Integer-optimized tick labels: for small spans (≤4) use step=1,
+              // otherwise use 5 evenly-spaced labels rounded to int.
+              const raw = Array.from({ length: 5 }, (_, i) => secMin + (secSpan * i) / 4);
+              const labels = secMax - secMin <= 4
+                ? Array.from({ length: Math.min(secMax - secMin + 1, 5) }, (_, i) => secMin + i)
+                : raw.map(v => Math.round(v));
+              // Deduplicate but keep positions
+              const seen = new Set<number>();
+              return labels.filter(v => { const k = Math.round(v * 10); if (seen.has(k)) return false; seen.add(k); return true; }).map((v, i) => {
+                const y = toSecY(v);
+                return (
+                  <text key={i} x={W - PAD.right + 8} y={y + 3} textAnchor="start" fill={secondaryColor || "#888"} fontSize={9}>
+                    {v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(1)}K` : v.toFixed(0)}
+                  </text>
+                );
+              });
+            })()}
+            <text x={W - PAD.right + 8} y={H - PAD.bottom + 14} textAnchor="start" fill={secondaryColor || "#888"} fontSize={8}>
+              {secondaryLabel || ""}
+            </text>
+          </>
+        )}
         {timeLabels.map((tl, i) => (
           <text key={i} x={tl.x} y={H - 6} textAnchor="middle" fill="var(--color-muted)" fontSize={10}>{tl.label}</text>
         ))}
         <polyline points={points.join(" ")} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         <path d={`M${PAD.left},${H - PAD.bottom} L${points.join(" L")} L${W - PAD.right},${H - PAD.bottom} Z`}
           fill={`color-mix(in srgb, ${color} 12%, transparent)`} />
+        {showSecondary && secPoints.length > 0 && (
+          <g>
+            <polyline points={secPoints.join(" ")} fill="none" stroke={secondaryColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="3 2" />
+            <path d={`M${PAD.left},${H - PAD.bottom} L${secPoints.join(" L")} L${W - PAD.right},${H - PAD.bottom} Z`}
+              fill={`color-mix(in srgb, ${secondaryColor || "#888"} 8%, transparent)`} />
+          </g>
+        )}
         {scratchX != null && (
           <>
             <line x1={scratchX} y1={PAD.top} x2={scratchX} y2={H - PAD.bottom} stroke="var(--color-text-strong)" strokeWidth={1} strokeDasharray="3 2" opacity={0.5} />
@@ -134,15 +179,98 @@ function ScrubChart({ data, color, label, pollIntervalMs }: {
       </svg>
       {scrubIdx != null && scrubValue != null && (
         <div className="pointer-events-none absolute z-10 -translate-x-1/2 rounded border border-border bg-surface-elevated px-2.5 py-1.5 text-xs shadow-lg" style={{ left: "50%", top: "100%", marginTop: 2 }}>
-          <span className="font-semibold text-text-strong">{gridLabel(scrubValue)}</span>
-          <span className="text-muted"> {label} · {secsAgo < 60 ? `${Math.round(secsAgo)}s ago` : `${Math.round(secsAgo / 60)}m ago`}</span>
+          <div className="flex items-center gap-3">
+            <span>
+              <span className="font-semibold text-text-strong">{gridLabel(scrubValue)}</span>
+              <span className="text-muted"> {label}</span>
+            </span>
+            {showSecondary && scrubIdx < secondaryData!.length && (
+              <span className="border-l border-border pl-3">
+                <span className="font-semibold text-text-strong" style={{ color: secondaryColor }}>{Math.round(secondaryData[scrubIdx])}</span>
+                <span className="text-muted"> {secondaryLabel}</span>
+              </span>
+            )}
+          </div>
+          <div className="text-muted mt-0.5" style={{ fontSize: 10 }}>{secsAgo < 60 ? `${Math.round(secsAgo)}s ago` : `${Math.round(secsAgo / 60)}m ago`}</div>
         </div>
       )}
     </div>
   );
 }
 
-/** Mounted inside the portal (only when dialog is open) so useMetricsHistory is safe. */
+/** Token throughput dialog — proper component so hooks work. */
+function TokenDialog({ spark, dialogTab, setDialogTab, dialogTimeRange, setDialogTimeRange, onClose }: {
+  spark: SparkSnapshot;
+  dialogTab: "gen" | "prefill";
+  setDialogTab: (t: "gen" | "prefill") => void;
+  dialogTimeRange: number;
+  setDialogTimeRange: (m: number) => void;
+  onClose: () => void;
+}) {
+  const llmArr = spark.metrics.llm;
+  const llm = Array.isArray(llmArr) ? llmArr.length > 0 ? llmArr[0] : null : llmArr;
+  const ports = spark.llmPorts ?? [];
+  const llmIdx = ports.findIndex((p, i) => llmArr?.[i]?.available);
+  const portKey = ports[llmIdx] != null ? `:${ports[llmIdx]}` : ":0";
+  const currentTps = dialogTab === "gen" ? llm?.generationTps ?? 0 : llm?.prefillTps ?? 0;
+  return (
+    <div style={{ position: "fixed", zIndex: 99999, inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)" }}
+      onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: "var(--color-surface-elevated, #262626)", borderRadius: 12, padding: 0, maxWidth: 500, width: "90vw", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", border: "1px solid var(--color-border, #353535)" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px", flexShrink: 0 }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--color-text-strong, #fff)" }}>Token Throughput</h2>
+            <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--color-muted, #888)" }}>Live values from the LLM server{llm?.requestsRunning != null ? ` · ${Math.round(llm.requestsRunning)} active request${llm.requestsRunning !== 1 ? "s" : ""}` : ""}</p>
+          </div>
+          <button type="button" onClick={onClose}
+            style={{ background: "none", border: "none", color: "var(--color-muted, #888)", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>✕</button>
+        </div>
+        <div style={{ padding: "0 20px 20px", overflow: "auto", flex: 1 }}>
+          {!llm ? (
+            <p style={{ fontSize: 12, color: "var(--color-muted, #888)" }}>No LLM data available.</p>
+          ) : (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                <button type="button" onClick={() => setDialogTab("gen")}
+                  style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
+                    background: dialogTab === "gen" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                    color: dialogTab === "gen" ? "#fff" : "var(--color-muted, #888)" }}>Generation</button>
+                <button type="button" onClick={() => setDialogTab("prefill")}
+                  style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
+                    background: dialogTab === "prefill" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                    color: dialogTab === "prefill" ? "#fff" : "var(--color-muted, #888)" }}>Prefill</button>
+                <span style={{ marginLeft: "auto", fontFamily: "ui-monospace,monospace", fontSize: 14, fontWeight: 700, color: "var(--color-text-strong, #fff)" }}>
+                  {formatTok(currentTps)}
+                  <span style={{ fontSize: 11, fontWeight: 400, color: "var(--color-muted, #888)", marginLeft: 4 }}>
+                    {dialogTab === "gen" ? "gen" : "prefill"} tok/s now
+                  </span>
+                </span>
+              </div>
+              <div style={{ marginBottom: 12, fontSize: 11, lineHeight: 1.5, color: "var(--color-muted, #888)", padding: "8px 10px", borderRadius: 6, background: "var(--color-surface-hover, #303030)" }}>
+                <strong style={{ color: "var(--color-accent, #e8a830)" }}>Generation</strong> — output tokens streamed to the client after the first token (decode).<br />
+                <strong style={{ color: "var(--color-warning, #e0a838)" }}>Prefill</strong> — input prompt tokens processed in parallel before generation begins.
+              </div>
+              <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                {[1, 5, 15, 30, 60].map((m) => (
+                  <button key={m} type="button" onClick={() => setDialogTimeRange(m)}
+                    style={{ borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 500, border: "none", cursor: "pointer",
+                      background: dialogTimeRange === m ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                      color: dialogTimeRange === m ? "#fff" : "var(--color-muted, #888)" }}>
+                    {m < 60 ? `${m}m` : "1h"}
+                  </button>
+                ))}
+              </div>
+              <DialogChart sparkId={spark.id} portKey={portKey} tab={dialogTab} maxSamples={dialogTimeRange * 30} />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Mounted at OverviewPage level (no portal) — useMetricsHistory is safe. */
 function DialogChart({ sparkId, portKey, tab, maxSamples }: {
   sparkId: string;
   portKey: string;
@@ -152,27 +280,30 @@ function DialogChart({ sparkId, portKey, tab, maxSamples }: {
   const color = tab === "gen" ? "var(--color-accent)" : "var(--color-warning)";
   const label = tab === "gen" ? "gen tok/s" : "prefill tok/s";
   const data = useMetricsHistory(sparkId, `llm${portKey}.${tab === "gen" ? "tps" : "prefill"}`);
+  const runningRaw = useMetricsHistory(sparkId, `llm${portKey}.running`);
   const sliced = data.length > maxSamples ? data.slice(-maxSamples) : data;
+  const runningSliced = runningRaw.length > maxSamples ? runningRaw.slice(-maxSamples) : runningRaw;
   return (
     <div>
-      <ScrubChart data={sliced} color={color} label={label} pollIntervalMs={2000} />
+      <ScrubChart data={sliced} color={color} label={label} pollIntervalMs={2000}
+        secondaryData={tab === "gen" ? runningSliced : undefined}
+        secondaryColor="var(--color-info, #60a5fa)"
+        secondaryLabel="req running" />
       <p className="mt-2 text-[10px] text-muted">{sliced.length} samples · Hover to inspect</p>
     </div>
   );
 }
 
-function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
+function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDialog }: {
   spark: SparkSnapshot;
   headSparkName?: string | null;
   temperatureUnit: "celsius" | "fahrenheit";
   onSelect?: (id: string) => void;
+  onOpenDialog?: (id: string) => void;
 }) {
   const gpu = spark.metrics.gpu;
   const um = spark.metrics.unifiedMemory;
   const online = spark.online;
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [tab, setTab] = useState<"gen" | "prefill">("gen");
-  const [timeRange, setTimeRange] = useState(30); // minutes
 
   const llmArr = spark.metrics.llm;
   const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
@@ -260,29 +391,17 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {llm.contextLength != null && <SpecBadge label="Context" value={llm.contextLength >= 1_000_000 ? `${(llm.contextLength / 1_000_000).toFixed(0)}M` : fmtCompact(llm.contextLength)} />}
                 {llm.kvCacheUsage != null && <SpecBadge label="KV Cache" value={`${(llm.kvCacheUsage * 100).toFixed(0)}%`} />}
-                {llm.requestsRunning != null && <SpecBadge label="Requests" value={`${Math.round(llm.requestsRunning)} run${llm.requestsWaiting != null && llm.requestsWaiting > 0 ? ` · ${Math.round(llm.requestsWaiting)} wait` : ""}`} />}
                 {llm.totalInputTokens != null && llm.totalInputTokens > 0 && <SpecBadge label="Total Input" value={fmtCompact(llm.totalInputTokens)} />}
                 {llm.totalOutputTokens != null && llm.totalOutputTokens > 0 && <SpecBadge label="Total Output" value={fmtCompact(llm.totalOutputTokens)} />}
               </div>
             </div>
           )}
-
           {/* Token throughput sparklines */}
           {llm && (
-            <button type="button" onClick={() => setDialogOpen(true)}
+            <button type="button" onClick={() => onOpenDialog?.(spark.id)}
               aria-label="Open token throughput history"
               className="mt-3.5 w-full border-t border-border pt-3 text-center transition-colors hover:bg-accent/5 rounded-sm -mx-1 px-1">
               <div className="grid grid-cols-2 gap-4">
-                <div className="flex flex-col items-center gap-1">
-                  <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
-                    <Sparkline data={genHistory} width={100} height={24} color="var(--color-accent)" area />
-                  </div>
-                  <div className="flex items-baseline gap-0.5">
-                    <span className="font-tabular text-[13px] font-bold leading-none text-accent">{llm.generationTps.toFixed(0)}</span>
-                    <span className="text-[9px] text-muted">tok/s</span>
-                  </div>
-                  <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
-                </div>
                 <div className="flex flex-col items-center gap-1">
                   <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
                     <Sparkline data={prefillHistory} width={100} height={24} color="var(--color-warning)" area />
@@ -293,71 +412,38 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect }: {
                   </div>
                   <span className="text-[8px] uppercase tracking-wider text-muted">Prefill</span>
                 </div>
+                <div className="flex flex-col items-center gap-1">
+                  <div className="min-w-0" style={{ width: "100%", maxWidth: 100 }}>
+                    <Sparkline data={genHistory} width={100} height={24} color="var(--color-accent)" area />
+                  </div>
+                  <div className="flex items-baseline gap-0.5">
+                    <span className="font-tabular text-[13px] font-bold leading-none text-accent">{llm.generationTps.toFixed(0)}</span>
+                    <span className="text-[9px] text-muted">tok/s</span>
+                  </div>
+                  <span className="text-[8px] uppercase tracking-wider text-muted">Generation</span>
+                </div>
               </div>
-              <div className="mt-1.5 text-[9px] text-muted">Click to view full history</div>
+              <div className="mt-2 flex flex-col items-center gap-1 text-[10px]">
+                {llm.requestsRunning != null && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
+                    <span className="font-medium text-text-strong">{Math.round(llm.requestsRunning)}</span>
+                    <span className="text-muted">active{llm.requestsRunning !== 1 ? "s" : ""}</span>
+                  </span>
+                )}
+                {llm.requestsWaiting != null && llm.requestsWaiting > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-warning" />
+                    <span className="font-medium text-text-strong">{Math.round(llm.requestsWaiting)}</span>
+                    <span className="text-muted">waiting</span>
+                  </span>
+                )}
+                <span className="text-[9px] text-muted">Click to view full history</span>
+              </div>
             </button>
           )}
-
-          {/* Token history dialog portal */}
-          {dialogOpen && createPortal(
-            <div style={{ position: "fixed", zIndex: 99999, inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)" }}
-              onClick={() => { setDialogOpen(false); setTab("gen"); setTimeRange(30); }}>
-              <div onClick={e => e.stopPropagation()}
-                style={{ background: "var(--color-surface-elevated, #262626)", borderRadius: 12, padding: 0, maxWidth: 500, width: "90vw", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.4)", border: "1px solid var(--color-border, #353535)" }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px", flexShrink: 0 }}>
-                  <div>
-                    <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--color-text-strong, #fff)" }}>Token Throughput</h2>
-                    <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--color-muted, #888)" }}>Live values from the LLM server</p>
-                  </div>
-                  <button type="button" onClick={() => { setDialogOpen(false); setTab("gen"); setTimeRange(30); }}
-                    style={{ background: "none", border: "none", color: "var(--color-muted, #888)", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>✕</button>
-                </div>
-                <div style={{ padding: "0 20px 20px", overflow: "auto", flex: 1 }}>
-                  {!llm ? (
-                    <p style={{ fontSize: 12, color: "var(--color-muted, #888)" }}>No LLM data available.</p>
-                  ) : (
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                        <button type="button" onClick={() => setTab("gen")}
-                          style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
-                            background: tab === "gen" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
-                            color: tab === "gen" ? "#fff" : "var(--color-muted, #888)" }}>Generation</button>
-                        <button type="button" onClick={() => setTab("prefill")}
-                          style={{ borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
-                            background: tab === "prefill" ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
-                            color: tab === "prefill" ? "#fff" : "var(--color-muted, #888)" }}>Prefill</button>
-                        <span style={{ marginLeft: "auto", fontFamily: "ui-monospace,monospace", fontSize: 14, fontWeight: 700, color: "var(--color-text-strong, #fff)" }}>
-                          {formatTok(tab === "gen" ? llm.generationTps : llm.prefillTps)}
-                          <span style={{ fontSize: 11, fontWeight: 400, color: "var(--color-muted, #888)", marginLeft: 4 }}>
-                            {tab === "gen" ? "gen" : "prefill"} tok/s now
-                          </span>
-                        </span>
-                      </div>
-                      <div style={{ marginBottom: 12, fontSize: 11, lineHeight: 1.5, color: "var(--color-muted, #888)", padding: "8px 10px", borderRadius: 6, background: "var(--color-surface-hover, #303030)" }}>
-                        <strong style={{ color: "var(--color-accent, #e8a830)" }}>Generation</strong> — output tokens streamed to the client after the first token (decode).<br />
-                        <strong style={{ color: "var(--color-warning, #e0a838)" }}>Prefill</strong> — input prompt tokens processed in parallel before generation begins.
-                      </div>
-                      {/* Time range selector */}
-                      <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
-                        {[1, 5, 15, 30, 60].map((m) => (
-                          <button key={m} type="button" onClick={() => setTimeRange(m)}
-                            style={{ borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 500, border: "none", cursor: "pointer",
-                              background: timeRange === m ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
-                              color: timeRange === m ? "#fff" : "var(--color-muted, #888)" }}>
-                            {m < 60 ? `${m}m` : "1h"}
-                          </button>
-                        ))}
-                      </div>
-                      <DialogChart sparkId={spark.id} portKey={portKey} tab={tab} maxSamples={timeRange * 30} />
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>,
-            document.body
-          )}
-        </>
-      )}
+          </>
+        )}
     </div>
   );
 }
@@ -366,10 +452,15 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
+  const [modelSwitchOpen, setModelSwitchOpen] = useState(false);
+  const [dialogSparkId, setDialogSparkId] = useState<string | null>(null);
+  const [dialogTab, setDialogTab] = useState<"gen" | "prefill">("gen");
+  const [dialogTimeRange, setDialogTimeRange] = useState(30);
+
+  const dialogSpark = dialogSparkId ? visibleSparks.find((s) => s.id === dialogSparkId) ?? null : null;
 
   async function handleShutdownAll() {
     const onlineCount = sparks.filter((s) => s.online).length;
-    if (onlineCount === 0) return;
     if (!confirm(`Gracefully shut down all ${onlineCount} online Spark(s)? Offline nodes will be skipped.`)) return;
     setBatchLoading(true); setBatchMsg(null);
     try {
@@ -429,6 +520,11 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
                 className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-danger/20 hover:text-danger transition-colors disabled:opacity-50">
                 <PowerOffIcon className="h-3 w-3" /> Shutdown All
               </button>
+              <button type="button" onClick={() => setModelSwitchOpen(true)}
+                title="Switch the model running on the fleet"
+                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-accent/20 hover:text-accent transition-colors">
+                <ActivityIcon className="h-3 w-3" /> Switch Model
+              </button>
             </div>
           )}
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
@@ -438,9 +534,19 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         {visibleSparks.map((spark) => (
           <SparkCard key={spark.id} spark={spark}
             headSparkName={spark.workerHeadId ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null : null}
-            temperatureUnit={temperatureUnit} onSelect={onSelectSpark} />
+            temperatureUnit={temperatureUnit} onSelect={onSelectSpark}
+            onOpenDialog={(id) => { setDialogSparkId(id); setDialogTab("gen"); setDialogTimeRange(30); }} />
         ))}
       </div>
+      <ModelPanel />
+      <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}
+        currentModel={null} />
+      {/* Token throughput dialog overlay */}
+      {dialogSpark != null && <TokenDialog spark={dialogSpark}
+        dialogTab={dialogTab} setDialogTab={setDialogTab}
+        dialogTimeRange={dialogTimeRange} setDialogTimeRange={setDialogTimeRange}
+        onClose={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }} />
+      }
     </div>
   );
 }

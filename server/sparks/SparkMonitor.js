@@ -174,6 +174,8 @@ export class SparkMonitor {
       disabledDevices: this.spark.disabledDevices || [],
       disabledInterfaces: this.spark.disabledInterfaces || [],
       storagePollDisabled: Boolean(this.spark.storagePollDisabled),
+      lanIp: this.spark.lanIp || "",
+      llmHost: this.spark.llmHost || null,
       workerNode: Boolean(this.spark.workerNode),
       role: this.spark.role || (this.spark.workerNode ? "worker" : "standalone"),
       workerLabel: this.spark.workerLabel || null,

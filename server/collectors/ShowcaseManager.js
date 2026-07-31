@@ -449,6 +449,7 @@ export class ShowcaseManager {
       _lastTouchAt: now,
       _contentCap: cap,
       _lanIp: lanIp,
+      _llmHost: opts.llmHost || null,
       _sentContentLengths: /** @type {number[]} */ (prompts.map(() => 0)),
       _sentReasoningLengths: /** @type {number[]} */ (prompts.map(() => 0)),
     };
@@ -668,7 +669,7 @@ export class ShowcaseManager {
   }
 
   async _runSession(session) {
-    const baseUrl = `http://${session._lanIp}:${session.port}`;
+    const baseUrl = `http://${session._llmHost || session._lanIp}:${session.port}`;
     const url = `${baseUrl}/v1/chat/completions`;
 
     const ratePollAbort = new AbortController();

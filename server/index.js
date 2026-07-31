@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import os from "os";
 import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
@@ -17,8 +18,58 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
+import {
+  startPerKeyTracking,
+  stopPerKeyTracking,
+  getTopUsers,
+  getAllModelUsers,
+  getKnownApiKeys,
+} from "./collectors/PerKeyUsageTracker.js";
 
 dotenv.config();
+
+/**
+ * Normalize a model name for fuzzy matching.
+ * Handles:
+ *   - Stripping prefixes: /home/gilfoyle/, claude-, poolside/
+ *   - Stripping suffixes: -NVFP4, -DSpark, .gguf, _DGX-Spark-Recipe
+ *   - Replacing spaces with hyphens
+ *   - Lowercasing
+ *
+ * Examples:
+ *   "qwen3.6-35b-a3b-q8" → "qwen3.6-35b-a3b-q8"
+ *   "/home/gilfoyle/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf"
+ *     → "qwen3.6-35b-a3b-ud-q8_k_xl"
+ *   "mimo-v2.5" → "mimo-v2.5"
+ *   "MiMo-V2.5-NVFP4" → "mimo-v2.5"
+ *   "deepseek-v4-flash-dspark" → "deepseek-v4-flash"
+ *   "DeepSeek V4 Flash DSpark" → "deepseek-v4-flash"
+ *   "laguna-s-2.1" → "laguna-s-2.1"
+ *   "poolside/Laguna-S-2.1-NVFP4" → "laguna-s-2.1"
+ *   "claude-laguna-s-2.1" → "laguna-s-2.1"
+ */
+function normalizeModelName(name) {
+  if (!name) return "";
+  let n = name.toLowerCase();
+  // Strip path prefixes (e.g. /home/gilfoyle/.../model.gguf → model.gguf)
+  n = n.replace(/^.*\//, "");
+  // Strip "claude-" prefix
+  n = n.replace(/^claude-/, "");
+  // Strip "poolside/" prefix (already handled by path strip above, but be safe)
+  n = n.replace(/^poolside\//, "");
+  // Strip common suffixes
+  n = n.replace(/-(?:NVFP4|DSpark|FP16|INT4|INT8|GPTQ|AWQ)$/i, "");
+  n = n.replace(/_dgx-spark-recipe$/i, "");
+  n = n.replace(/\.gguf$/i, "");
+  // Strip quantization variant suffixes (e.g. _q8_k_xl, _ud_q8, etc.)
+  n = n.replace(/_q\d+.*$/i, "");
+  n = n.replace(/-q\d+.*$/i, "");
+  // Strip "ud-" prefix (e.g. ud-q8 → q8)
+  n = n.replace(/^ud-/, "");
+  // Replace spaces with hyphens
+  n = n.replace(/\s+/g, "-");
+  return n;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -129,6 +180,7 @@ app.post("/api/sparks/test", async (req, res) => {
       name: body.name || "test",
       lanIp: body.lanIp || "",
       cx7Ip: body.cx7Ip || null,
+      llmHost: body.llmHost || null,
       isLocal: Boolean(body.isLocal),
       llmPort: resolveLlmPort(body),
       ssh: {
@@ -175,7 +227,7 @@ app.patch("/api/sparks/:id", (req, res) => {
   try {
     const body = req.body || {};
     // Only validate host fields if they are being updated
-    if (body.lanIp != null || body.ssh?.host != null || body.ssh?.user != null) {
+    if (body.lanIp != null || body.llmHost != null || body.ssh?.host != null || body.ssh?.user != null) {
       const existing = registry.getSpark(req.params.id);
       if (!existing) return res.status(404).json({ error: "Spark not found" });
       const merged = {
@@ -558,6 +610,7 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
     const job = decodeBenchManager.start({
       sparkId: spark.id,
       lanIp: spark.lanIp,
+      llmHost: spark.llmHost || null,
       port,
       modelId,
       concurrencies: req.body?.concurrencies,
@@ -713,6 +766,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
     const result = showcaseManager.start({
       sparkId: spark.id,
       lanIp: spark.lanIp,
+      llmHost: spark.llmHost || null,
       port,
       modelId,
       maxTokens: req.body?.maxTokens,
@@ -877,6 +931,381 @@ function initiateSparkShutdown(spark) {
 }
 
 /** Batch routes first so they never collide with /:id/* if routing changes. */
+
+// ─── Model fleet status ──────────────────────────────────
+const SWITCH_SCRIPT = process.env.SWITCH_SCRIPT || "/host/root/home/gilfoyle/switch-model.sh";
+const CPA_STATUS_PATH = process.env.CPA_STATUS_PATH || "/host/root/home/gilfoyle/.cli-proxy-api/live-models-status.json";
+const MODEL_HISTORY_PATH = path.join(ROOT, "config", "model-history.json");
+const TOKEN_LIFETIMES_PATH = path.join(ROOT, "config", "token-lifetimes.json");
+
+// ─── Model switch history ────────────────────────────────
+const SWITCH_STATUS_PATH = path.join(ROOT, "config", ".switch-in-progress");
+
+function readModelHistory() {
+  try {
+    if (fs.existsSync(MODEL_HISTORY_PATH)) {
+      return JSON.parse(fs.readFileSync(MODEL_HISTORY_PATH, "utf8"));
+    }
+  } catch { /* corrupt */ }
+  return [];
+}
+
+function writeModelHistory(events) {
+  try {
+    atomicWrite(MODEL_HISTORY_PATH, JSON.stringify(events, null, 2), 0o600);
+  } catch {}
+}
+
+function recordSwitchEvent(modelId, status, detail) {
+  const events = readModelHistory();
+  events.unshift({
+    ts: new Date().toISOString(),
+    model: modelId,
+    status, // "started" | "completed" | "failed"
+    detail: detail || null,
+  });
+  // Keep last 100 events
+  if (events.length > 100) events.length = 100;
+  writeModelHistory(events);
+  return events[0];
+}
+
+/** Read CPA live-models-status.json (if it exists). */
+function readCpaStatus() {
+  try {
+    if (fs.existsSync(CPA_STATUS_PATH)) {
+      return JSON.parse(fs.readFileSync(CPA_STATUS_PATH, "utf8"));
+    }
+  } catch { /* not available yet */ }
+  return null;
+}
+
+/** Run switch-model.sh status and return parsed output. */
+function readSwitchStatus() {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(SWITCH_SCRIPT, ["status"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+        env: { ...process.env, TERM: "dumb" },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
+      child.stderr.on("data", (d) => { stderr += d.toString(); });
+      child.on("close", (code) => {
+        resolve({ ok: code === 0, stdout, stderr, code });
+      });
+      child.on("error", (err) => {
+        resolve({ ok: false, stdout: "", stderr: err.message, code: -1 });
+      });
+    } catch (err) {
+      resolve({ ok: false, stdout: "", stderr: err.message, code: -1 });
+    }
+  });
+}
+
+/** Fuzzy-match a full model ID against the recipe list (e.g. 'deepseek-v4-flash-dspark' → 'dspark'). */
+function findModelInfo(modelId, availableModels) {
+  return availableModels.find(
+    (m) => modelId.includes(m.id) || m.id.includes(modelId)
+  ) || null;
+}
+
+/** List available model names from the switch script's help / known models. */
+function getAvailableModels() {
+  return [
+    { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context", maxConcurrency: 6 },
+    { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, least-queue", maxConcurrency: 4 },
+    { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node", maxConcurrency: 2 },
+    { id: "qwen", name: "Qwen3.6 Q8", type: "dual", desc: "Both Sparks, least-queue", maxConcurrency: 4 },
+    { id: "qwen-anton", name: "Qwen3.6 Q8 (anton only)", type: "single", desc: "Single node", maxConcurrency: 2 },
+  ];
+}
+
+app.get("/api/models/status", async (_req, res) => {
+  const [switchStatus, cpaData] = await Promise.all([
+    readSwitchStatus(),
+    Promise.resolve(readCpaStatus()),
+  ]);
+  res.json({
+    current: cpaData?.probe?.[0]?.ids?.[0] || null,
+    cpa: cpaData,
+    switchScript: switchStatus,
+    available: getAvailableModels(),
+  });
+});
+
+app.post("/api/models/switch", async (req, res) => {
+  const model = req.body?.model;
+  if (!model || typeof model !== "string") {
+    return res.status(400).json({ error: "model name required" });
+  }
+  const allowed = getAvailableModels().map((m) => m.id);
+  if (!allowed.includes(model)) {
+    return res.status(400).json({ error: `Unknown model: ${model}. Allowed: ${allowed.join(", ")}` });
+  }
+  const evt = recordSwitchEvent(model, "started", "Switching...");
+  res.json({ ok: true, eventId: evt.ts, message: `Switching to ${model}...` });
+  // Fire and forget — run the script in background
+  const child = spawn(SWITCH_SCRIPT, [model], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+    env: { ...process.env, TERM: "dumb" },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => { stdout += d.toString(); });
+  child.stderr.on("data", (d) => { stderr += d.toString(); });
+  child.on("close", (code) => {
+    const succeeded = code === 0;
+    recordSwitchEvent(model, succeeded ? "completed" : "failed",
+      succeeded ? stdout.split("\n").filter(l => l.trim()).slice(-3).join(" | ") : stderr.slice(0, 200));
+  });
+  child.on("error", (err) => {
+    recordSwitchEvent(model, "failed", err.message);
+  });
+  child.unref();
+});
+
+app.get("/api/models/history", async (_req, res) => {
+  const events = readModelHistory();
+  res.json({ events });
+});
+
+app.post("/api/models/switch-status", async (req, res) => {
+  // Check if a switch is in progress by looking at the most recent "started" event
+  const events = readModelHistory();
+  const last = events[0];
+  const inProgress = last && last.status === "started";
+  res.json({ inProgress: !!inProgress, lastEvent: last || null });
+});
+
+app.post("/api/models/refresh", async (_req, res) => {
+  const [switchStatus, cpaData] = await Promise.all([
+    readSwitchStatus(),
+    Promise.resolve(readCpaStatus()),
+  ]);
+  res.json({
+    current: cpaData?.probe?.[0]?.ids?.[0] || null,
+    cpa: cpaData,
+    switchScript: switchStatus,
+    available: getAvailableModels(),
+  });
+});
+
+// ─── Per-model usage history ─────────────────────────────
+function readTokenLifetimes() {
+  try {
+    if (fs.existsSync(TOKEN_LIFETIMES_PATH)) {
+      return JSON.parse(fs.readFileSync(TOKEN_LIFETIMES_PATH, "utf8"));
+    }
+  } catch {}
+  return {};
+}
+
+app.get("/api/models/usage", async (_req, res) => {
+  const events = readModelHistory();
+  const tokenLifetimes = readTokenLifetimes();
+
+  // Collect live token counts from active LLM probes (current session + disk)
+  const liveTokens = new Map();
+  for (const [sparkId, mon] of monitors) {
+    if (!mon.llmProbes) continue;
+    for (const [port, probe] of mon.llmProbes) {
+      const modelId = probe.modelId;
+      if (!modelId) continue;
+      const key = `${sparkId}:${port}:${modelId}`;
+      if (!liveTokens.has(key)) {
+        liveTokens.set(key, { input: 0, output: 0, isLive: false, maxRequests: 0, contextLength: null, totalRequests: 0 });
+      }
+      const t = liveTokens.get(key);
+      // probe.totalInput/Output already includes disk accumulated + current raw
+      t.input = Math.max(t.input, probe.totalInputTokens || 0);
+      t.output = Math.max(t.output, probe.totalOutputTokens || 0);
+      t.maxRequests = Math.max(t.maxRequests, probe.maxRequestsRunning || 0);
+      if (probe.contextLength != null) t.contextLength = probe.contextLength;
+      t.totalRequests = Math.max(t.totalRequests, probe.totalRequests || 0);
+      t.isLive = true;
+    }
+  }
+
+  // Merge live token data into the disk snapshot
+  for (const [key, live] of liveTokens) {
+    if (!tokenLifetimes[key]) {
+      tokenLifetimes[key] = { input: 0, output: 0 };
+    }
+    // Use the live value (which includes disk accumulated + current session)
+    tokenLifetimes[key].input = Math.max(tokenLifetimes[key].input, live.input);
+    tokenLifetimes[key].output = Math.max(tokenLifetimes[key].output, live.output);
+  }
+
+  // Build per-model aggregate from events
+  const modelMap = new Map();
+
+  for (const evt of events) {
+    if (!modelMap.has(evt.model)) {
+      modelMap.set(evt.model, { switches: 0, lastSeen: null, lastStatus: null, completed: 0, failed: 0 });
+    }
+    const m = modelMap.get(evt.model);
+    m.switches++;
+    const ts = new Date(evt.ts).getTime();
+    if (!m.lastSeen || ts > m.lastSeen) {
+      m.lastSeen = ts;
+      m.lastStatus = evt.status;
+    }
+    if (evt.status === "completed") m.completed++;
+    if (evt.status === "failed") m.failed++;
+  }
+
+  // Attach lifetime token counts from token-lifetimes.json
+  // Keys are sparkId:port:modelId
+  const modelTokenTotals = new Map();
+  for (const [key, counts] of Object.entries(tokenLifetimes)) {
+    // key format: "anton:8888:deepseek-v4-flash-dspark"
+    const parts = key.split(":");
+    if (parts.length < 3) continue;
+    const modelId = parts.slice(2).join(":");
+    if (!modelTokenTotals.has(modelId)) {
+      modelTokenTotals.set(modelId, { totalInputTokens: 0, totalOutputTokens: 0 });
+    }
+    const t = modelTokenTotals.get(modelId);
+    t.totalInputTokens += counts.input || 0;
+    t.totalOutputTokens += counts.output || 0;
+  }
+
+  // Aggregate live probe metadata per model (max requests, context, total requests)
+  const modelLiveMeta = new Map();
+  for (const [key, live] of liveTokens) {
+    const parts = key.split(":");
+    if (parts.length < 3) continue;
+    const modelId = parts.slice(2).join(":");
+    if (!modelLiveMeta.has(modelId)) {
+      modelLiveMeta.set(modelId, { maxRequests: 0, contextLength: null, totalRequests: 0 });
+    }
+    const m = modelLiveMeta.get(modelId);
+    m.maxRequests = Math.max(m.maxRequests, live.maxRequests || 0);
+    if (live.contextLength != null) m.contextLength = live.contextLength;
+    m.totalRequests = Math.max(m.totalRequests, live.totalRequests || 0);
+  }
+
+  // Available models list with rich info
+  const availableModels = getAvailableModels();
+  const modelInfo = new Map(availableModels.map((m) => [m.id, m]));
+
+  const models = [];
+  for (const [id, stats] of modelMap) {
+    const info = modelInfo.get(id) || findModelInfo(id, availableModels);
+    const tokens = modelTokenTotals.get(id);
+    models.push({
+      id,
+      name: info?.name || id,
+      type: info?.type || "unknown",
+      desc: info?.desc || "",
+      switches: stats.switches,
+      completed: stats.completed,
+      failed: stats.failed,
+      lastSeen: stats.lastSeen,
+      lastStatus: stats.lastStatus,
+      totalInputTokens: tokens?.totalInputTokens || 0,
+      totalOutputTokens: tokens?.totalOutputTokens || 0,
+      maxRequests: modelLiveMeta.get(id)?.maxRequests || 0,
+      contextLength: modelLiveMeta.get(id)?.contextLength || null,
+      totalRequests: modelLiveMeta.get(id)?.totalRequests || 0,
+      maxConcurrency: info?.maxConcurrency ?? null,
+    });
+  }
+
+  // Add models that have token data but no switch events (first-time detection)
+  for (const [id, tokens] of modelTokenTotals) {
+    if (!modelMap.has(id)) {
+      const info = modelInfo.get(id) || findModelInfo(id, availableModels);
+      models.push({
+        id,
+        name: info?.name || id,
+        type: info?.type || "unknown",
+        desc: info?.desc || "",
+        switches: 0,
+        completed: 0,
+        failed: 0,
+        lastSeen: null,
+        lastStatus: null,
+        totalInputTokens: tokens.totalInputTokens,
+        totalOutputTokens: tokens.totalOutputTokens,
+        maxRequests: modelLiveMeta.get(id)?.maxRequests || 0,
+        contextLength: modelLiveMeta.get(id)?.contextLength || null,
+        totalRequests: modelLiveMeta.get(id)?.totalRequests || 0,
+        maxConcurrency: info?.maxConcurrency ?? null,
+      });
+    }
+  }
+
+  // Sort by lastSeen descending, then by name
+  models.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0) || a.name.localeCompare(b.name));
+
+  // Attach per-key usage data (top users) to each model
+  const currentModelId = (await Promise.resolve(readCpaStatus()))?.probe?.[0]?.ids?.[0] || null;
+  const allModelUsers = getAllModelUsers();
+
+  for (const m of models) {
+    // Find all tracked model data by matching both exact and normalized names
+    const matchedKeys = [];
+    for (const key of Object.keys(allModelUsers)) {
+      if (key === m.id) {
+        matchedKeys.push(key);
+        continue;
+      }
+      // fuzzy match: "mimo-v2.5" matches "MiMo-V2.5-NVFP4"
+      // Also handle "DeepSeek V4 Flash DSpark" vs "deepseek-v4-flash-dspark"
+      const a = normalizeModelName(key);
+      const b = normalizeModelName(m.id);
+      if (a === b) {
+        matchedKeys.push(key);
+        continue;
+      }
+      // Also check if key is a substring of b or vice versa
+      if (a.includes(b) || b.includes(a)) {
+        matchedKeys.push(key);
+      }
+    }
+
+    // Merge users from all matched keys, combining usage for same user
+    const mergedUsers = [];
+    const userMap = new Map();
+    let totalTokens = 0;
+    for (const mk of matchedKeys) {
+      const data = allModelUsers[mk];
+      if (!data || !data.users) continue;
+      totalTokens += data.totalTokens || 0;
+      for (const user of data.users) {
+        const userKey = user.apiKeyPrefix || user.label || user.clientIp;
+        if (userMap.has(userKey)) {
+          const existing = userMap.get(userKey);
+          existing.requests += user.requests;
+          existing.promptTokens += user.promptTokens;
+          existing.completionTokens += user.completionTokens;
+          existing.totalTokens += user.totalTokens;
+          existing.lastSeen = Math.max(existing.lastSeen || 0, user.lastSeen || 0);
+        } else {
+          userMap.set(userKey, { ...user });
+        }
+      }
+    }
+    mergedUsers.push(...userMap.values());
+    mergedUsers.sort((a, b) => b.totalTokens - a.totalTokens);
+
+    if (mergedUsers.length > 0) {
+      m.topUsers = mergedUsers;
+      m.totalClientRequests = totalTokens;
+    } else {
+      m.topUsers = [];
+      m.totalClientRequests = 0;
+    }
+  }
+
+  res.json({ models, current: currentModelId });
+});
+
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
   const results = [];
   // Remotes first, local last — shutting down the dashboard host mid-loop would
@@ -1092,6 +1521,7 @@ function restartBroadcast() {
 // ─── Start ───────────────────────────────────────────────
 loadSettings();
 startBroadcast();
+startPerKeyTracking();
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`[sparkDash] server listening on http://${BIND_HOST}:${PORT}`);
@@ -1112,6 +1542,7 @@ function shutdown(signal) {
     }
     for (const m of monitors.values()) m.stop();
     monitors.clear();
+    stopPerKeyTracking();
   } catch (err) {
     console.error("[sparkDash] error during shutdown:", err.message);
   }

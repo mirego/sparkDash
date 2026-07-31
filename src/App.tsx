@@ -44,6 +44,8 @@ function placeholderSnapshot(
     uptime: null,
     disabledDevices,
     disabledInterfaces,
+    lanIp: "",
+    llmHost: null,
     llmPort: llmPorts[0] ?? 8888,
     llmPorts,
     workerNode,

@@ -4,6 +4,7 @@ export interface SparkConfig {
   name: string;
   lanIp: string;
   cx7Ip?: string | null;
+  llmHost?: string | null;
   /**
    * Optional Wake-on-LAN MAC override. When empty, the server uses
    * `detectedMacAddress` from the enP7s7 interface.
@@ -235,6 +236,8 @@ export interface SparkSnapshot {
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;
+  lanIp: string;
+  llmHost: string | null;
   /** Cluster role (head / worker / standalone) */
   role?: SparkRole;
   /** Distributed LLM worker — LLM card inactive / not shown (role === worker) */
