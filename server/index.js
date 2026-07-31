@@ -18,8 +18,58 @@ import {
   DECODE_BENCH_DEFAULTS,
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
+import {
+  startPerKeyTracking,
+  stopPerKeyTracking,
+  getTopUsers,
+  getAllModelUsers,
+  getKnownApiKeys,
+} from "./collectors/PerKeyUsageTracker.js";
 
 dotenv.config();
+
+/**
+ * Normalize a model name for fuzzy matching.
+ * Handles:
+ *   - Stripping prefixes: /home/gilfoyle/, claude-, poolside/
+ *   - Stripping suffixes: -NVFP4, -DSpark, .gguf, _DGX-Spark-Recipe
+ *   - Replacing spaces with hyphens
+ *   - Lowercasing
+ *
+ * Examples:
+ *   "qwen3.6-35b-a3b-q8" → "qwen3.6-35b-a3b-q8"
+ *   "/home/gilfoyle/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf"
+ *     → "qwen3.6-35b-a3b-ud-q8_k_xl"
+ *   "mimo-v2.5" → "mimo-v2.5"
+ *   "MiMo-V2.5-NVFP4" → "mimo-v2.5"
+ *   "deepseek-v4-flash-dspark" → "deepseek-v4-flash"
+ *   "DeepSeek V4 Flash DSpark" → "deepseek-v4-flash"
+ *   "laguna-s-2.1" → "laguna-s-2.1"
+ *   "poolside/Laguna-S-2.1-NVFP4" → "laguna-s-2.1"
+ *   "claude-laguna-s-2.1" → "laguna-s-2.1"
+ */
+function normalizeModelName(name) {
+  if (!name) return "";
+  let n = name.toLowerCase();
+  // Strip path prefixes (e.g. /home/gilfoyle/.../model.gguf → model.gguf)
+  n = n.replace(/^.*\//, "");
+  // Strip "claude-" prefix
+  n = n.replace(/^claude-/, "");
+  // Strip "poolside/" prefix (already handled by path strip above, but be safe)
+  n = n.replace(/^poolside\//, "");
+  // Strip common suffixes
+  n = n.replace(/-(?:NVFP4|DSpark|FP16|INT4|INT8|GPTQ|AWQ)$/i, "");
+  n = n.replace(/_dgx-spark-recipe$/i, "");
+  n = n.replace(/\.gguf$/i, "");
+  // Strip quantization variant suffixes (e.g. _q8_k_xl, _ud_q8, etc.)
+  n = n.replace(/_q\d+.*$/i, "");
+  n = n.replace(/-q\d+.*$/i, "");
+  // Strip "ud-" prefix (e.g. ud-q8 → q8)
+  n = n.replace(/^ud-/, "");
+  // Replace spaces with hyphens
+  n = n.replace(/\s+/g, "-");
+  return n;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1193,7 +1243,67 @@ app.get("/api/models/usage", async (_req, res) => {
   // Sort by lastSeen descending, then by name
   models.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0) || a.name.localeCompare(b.name));
 
-  res.json({ models, current: (await Promise.resolve(readCpaStatus()))?.probe?.[0]?.ids?.[0] || null });
+  // Attach per-key usage data (top users) to each model
+  const currentModelId = (await Promise.resolve(readCpaStatus()))?.probe?.[0]?.ids?.[0] || null;
+  const allModelUsers = getAllModelUsers();
+
+  for (const m of models) {
+    // Find all tracked model data by matching both exact and normalized names
+    const matchedKeys = [];
+    for (const key of Object.keys(allModelUsers)) {
+      if (key === m.id) {
+        matchedKeys.push(key);
+        continue;
+      }
+      // fuzzy match: "mimo-v2.5" matches "MiMo-V2.5-NVFP4"
+      // Also handle "DeepSeek V4 Flash DSpark" vs "deepseek-v4-flash-dspark"
+      const a = normalizeModelName(key);
+      const b = normalizeModelName(m.id);
+      if (a === b) {
+        matchedKeys.push(key);
+        continue;
+      }
+      // Also check if key is a substring of b or vice versa
+      if (a.includes(b) || b.includes(a)) {
+        matchedKeys.push(key);
+      }
+    }
+
+    // Merge users from all matched keys, combining usage for same user
+    const mergedUsers = [];
+    const userMap = new Map();
+    let totalTokens = 0;
+    for (const mk of matchedKeys) {
+      const data = allModelUsers[mk];
+      if (!data || !data.users) continue;
+      totalTokens += data.totalTokens || 0;
+      for (const user of data.users) {
+        const userKey = user.apiKeyPrefix || user.label || user.clientIp;
+        if (userMap.has(userKey)) {
+          const existing = userMap.get(userKey);
+          existing.requests += user.requests;
+          existing.promptTokens += user.promptTokens;
+          existing.completionTokens += user.completionTokens;
+          existing.totalTokens += user.totalTokens;
+          existing.lastSeen = Math.max(existing.lastSeen || 0, user.lastSeen || 0);
+        } else {
+          userMap.set(userKey, { ...user });
+        }
+      }
+    }
+    mergedUsers.push(...userMap.values());
+    mergedUsers.sort((a, b) => b.totalTokens - a.totalTokens);
+
+    if (mergedUsers.length > 0) {
+      m.topUsers = mergedUsers;
+      m.totalClientRequests = totalTokens;
+    } else {
+      m.topUsers = [];
+      m.totalClientRequests = 0;
+    }
+  }
+
+  res.json({ models, current: currentModelId });
 });
 
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
@@ -1411,6 +1521,7 @@ function restartBroadcast() {
 // ─── Start ───────────────────────────────────────────────
 loadSettings();
 startBroadcast();
+startPerKeyTracking();
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`[sparkDash] server listening on http://${BIND_HOST}:${PORT}`);
@@ -1431,6 +1542,7 @@ function shutdown(signal) {
     }
     for (const m of monitors.values()) m.stop();
     monitors.clear();
+    stopPerKeyTracking();
   } catch (err) {
     console.error("[sparkDash] error during shutdown:", err.message);
   }
