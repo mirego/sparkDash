@@ -11,6 +11,8 @@ config/showcase-history.json
 config/gpu-memory.json
 config/gpu-memory.json.*
 config/bench-exports/
+config/per-key-usage.json
+config/.per-key-state.json
 *.log
 .DS_Store
 docs/
