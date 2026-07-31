@@ -266,6 +266,25 @@ export function updateLlmPort(
   });
 }
 
+/**
+ * Set or clear an optional LLM API key for one port.
+ * Pass apiKey "" to clear. Key is stored encrypted server-side and never returned.
+ */
+export function setLlmApiKey(
+  id: string,
+  port: number,
+  apiKey: string | null
+): Promise<{
+  success: boolean;
+  hasApiKey: boolean;
+  llmApiKeyPorts: number[];
+}> {
+  return apiFetch(`/api/sparks/${id}/llm-ports/${port}/api-key`, {
+    method: "PUT",
+    body: JSON.stringify({ apiKey }),
+  });
+}
+
 /** Update a Spark's LLM host override. Empty/nil → use lanIp. */
 export function updateLlmHost(
   id: string,

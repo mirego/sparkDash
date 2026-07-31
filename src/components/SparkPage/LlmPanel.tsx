@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { LlmMetrics } from "../../api/types";
-import { updateLlmPort, updateLlmHost } from "../../api/client";
+import { setLlmApiKey, updateLlmPort, updateLlmPorts, updateLlmHost } from "../../api/client";
 import { Sparkline } from "../ui/Sparkline";
 import { Panel } from "../ui/Panel";
 import { BotIcon, GearIcon, InfoIcon } from "../ui/icons";
@@ -13,6 +13,8 @@ interface LlmPanelProps {
   llmPort: number;
   llmHost: string | null;
   lanIp: string;
+  llmPorts?: number[];
+  hasApiKey?: boolean;
   onRemovePort?: (port: number) => void;
   className?: string;
 }
@@ -144,12 +146,24 @@ function MetricInfoTip({
   );
 }
 
-export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, className }: LlmPanelProps) {
+export function LlmPanel({
+  llm,
+  sparkId,
+  llmPort,
+  llmHost,
+  lanIp,
+  llmPorts,
+  hasApiKey = false,
+  onRemovePort,
+  className,
+}: LlmPanelProps) {
   // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
   const genHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.tps`);
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [hostDraft, setHostDraft] = useState(llmHost || "");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [clearApiKey, setClearApiKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [engineInfoOpen, setEngineInfoOpen] = useState(false);
@@ -173,11 +187,13 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
   const generationTps = llm?.generationTps ?? 0;
   const available = llm?.available ?? false;
 
-  // Keep drafts in sync when server pushes a different port/host
+  // Keep draft in sync when server pushes a different port (other tab / reload)
   useEffect(() => {
     if (!showSettings) {
       setPortDraft(String(llmPort));
       setHostDraft(llmHost || "");
+      setApiKeyDraft("");
+      setClearApiKey(false);
     }
   }, [llmPort, llmHost, showSettings]);
 
@@ -189,27 +205,52 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
 
   const portDirty = parsedPort !== null && parsedPort !== llmPort;
   const portInvalid = portDraft.trim() !== "" && parsedPort === null;
-  const hostDirty = hostDraft.trim() !== (llmHost || "");
+  const apiKeyDirty = apiKeyDraft.trim() !== "" || clearApiKey;
+  const hostDirty = hostDraft !== (llmHost || "");
+  const settingsDirty = portDirty || apiKeyDirty || hostDirty;
 
-  const handleSave = async () => {
+  const handleSaveSettings = async () => {
     if (parsedPort === null) {
       setSaveError("Port must be an integer 1–65535");
+      return;
+    }
+    if (!settingsDirty) {
+      setShowSettings(false);
       return;
     }
     setSaving(true);
     setSaveError(null);
     try {
-      // Save host if changed
+      if (portDirty) {
+        const currentPorts =
+          Array.isArray(llmPorts) && llmPorts.length > 0 ? llmPorts : [llmPort];
+        if (currentPorts.includes(parsedPort) && parsedPort !== llmPort) {
+          setSaveError(`Port ${parsedPort} is already configured`);
+          setSaving(false);
+          return;
+        }
+        // Rename this panel's port in-place so sibling ports (and their keys) survive
+        if (currentPorts.length > 1) {
+          const next = currentPorts.map((p) => (p === llmPort ? parsedPort : p));
+          await updateLlmPorts(sparkId, next);
+        } else {
+          await updateLlmPort(sparkId, parsedPort);
+        }
+      }
       if (hostDirty) {
-        await updateLlmHost(sparkId, hostDraft.trim() || null);
+        await updateLlmHost(sparkId, hostDraft || null);
       }
-      // Save port if changed
-      if (parsedPort !== llmPort) {
-        await updateLlmPort(sparkId, parsedPort);
+      const keyPort = parsedPort;
+      if (clearApiKey) {
+        await setLlmApiKey(sparkId, keyPort, "");
+      } else if (apiKeyDraft.trim() !== "") {
+        await setLlmApiKey(sparkId, keyPort, apiKeyDraft.trim());
       }
+      setApiKeyDraft("");
+      setClearApiKey(false);
       setShowSettings(false);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Failed to save settings");
+      setSaveError(err instanceof Error ? err.message : "Failed to save LLM settings");
     } finally {
       setSaving(false);
     }
@@ -240,7 +281,8 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
             onClick={() => {
               if (showSettings) {
                 setPortDraft(String(llmPort));
-                setHostDraft(llmHost || "");
+                setApiKeyDraft("");
+                setClearApiKey(false);
                 setSaveError(null);
               }
               setShowSettings(!showSettings);
@@ -259,21 +301,8 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
       {showSettings ? (
         <div className="space-y-3">
           <p className="text-[10px] text-muted">
-            HTTP host:port of the LLM server on this Spark (vLLM / llama.cpp / sglang). Leave host empty to use the Spark LAN IP.
+            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / OpenAI-compatible gateway).
           </p>
-          <label className="block space-y-1">
-            <span className="text-xs text-muted">Host</span>
-            <input
-              type="text"
-              value={hostDraft}
-              onChange={(e) => {
-                setHostDraft(e.target.value);
-                setSaveError(null);
-              }}
-              placeholder={lanIp}
-              className="w-full rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-tabular text-sm text-text outline-none focus:border-accent"
-            />
-          </label>
           <label className="block space-y-1">
             <span className="text-xs text-muted">Port</span>
             <input
@@ -289,12 +318,69 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  void handleSave();
+                  void handleSaveSettings();
                 }
               }}
               className="w-full rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-tabular text-sm text-text outline-none focus:border-accent"
             />
           </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted">LLM host override</span>
+            <input
+              type="text"
+              placeholder={lanIp}
+              value={hostDraft}
+              onChange={(e) => {
+                setHostDraft(e.target.value);
+                setSaveError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleSaveSettings();
+                }
+              }}
+              className="w-full rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-mono text-sm text-text outline-none focus:border-accent"
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-xs text-muted">API key (optional)</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              value={apiKeyDraft}
+              disabled={clearApiKey}
+              placeholder={hasApiKey && !clearApiKey ? "•••••••• (saved — leave blank to keep)" : "Bearer token if required"}
+              onChange={(e) => {
+                setApiKeyDraft(e.target.value);
+                setClearApiKey(false);
+                setSaveError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleSaveSettings();
+                }
+              }}
+              className="w-full rounded-md border border-border bg-surface-elevated px-3 py-1.5 font-mono text-sm text-text outline-none focus:border-accent disabled:opacity-50"
+            />
+          </label>
+          {hasApiKey && (
+            <label className="flex cursor-pointer items-center gap-2 text-[11px] text-muted">
+              <input
+                type="checkbox"
+                checked={clearApiKey}
+                onChange={(e) => {
+                  setClearApiKey(e.target.checked);
+                  if (e.target.checked) setApiKeyDraft("");
+                  setSaveError(null);
+                }}
+                className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+              />
+              Clear saved API key
+            </label>
+          )}
           {portInvalid && (
             <p className="text-[10px] text-danger">Enter an integer between 1 and 65535</p>
           )}
@@ -304,7 +390,8 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
               type="button"
               onClick={() => {
                 setPortDraft(String(llmPort));
-                setHostDraft(llmHost || "");
+                setApiKeyDraft("");
+                setClearApiKey(false);
                 setSaveError(null);
                 setShowSettings(false);
               }}
@@ -315,8 +402,8 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
             </button>
             <button
               type="button"
-              onClick={() => void handleSave()}
-              disabled={saving || portInvalid || (!portDirty && !hostDirty)}
+              onClick={() => void handleSaveSettings()}
+              disabled={saving || portInvalid || !settingsDirty}
               className="rounded bg-accent px-2 py-1 text-[10px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save"}
@@ -333,8 +420,8 @@ export function LlmPanel({ llm, sparkId, llmPort, llmHost, lanIp, onRemovePort, 
             )}
             <p className="text-xs text-muted">
               {llm?.posture?.auth === "protected"
-                ? `Auth required on ${llmHost || lanIp}:${llmPort}`
-                : `No model loaded on ${llmHost || lanIp}:${llmPort}`}
+                ? `${llm.posture.label} on :${llmPort}`
+                : `No model loaded on :${llmPort}`}
             </p>
           </div>
           <div className="border-t border-border pt-3 space-y-2">

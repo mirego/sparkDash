@@ -638,13 +638,23 @@ export class LlmProbe {
 
     const host = this.spark?.llmHost || this.spark?.lanIp || "";
     const scope = classifyHostScope(host);
-    const auth = this.authOpen ? "open" : "protected";
+    const keyed = Boolean(this._apiKey());
+    /** @type {"open" | "protected" | "keyed"} */
+    let auth;
+    if (keyed) {
+      // Key configured: success → keyed; 401/403 → protected (rejected)
+      auth = this.authOpen === false ? "protected" : "keyed";
+    } else {
+      auth = this.authOpen ? "open" : "protected";
+    }
 
     let level = "ok";
     if (auth === "open") {
       if (scope === "public") level = "danger";
       else if (scope === "local") level = "ok";
       else level = "warn"; // lan or unknown hostname
+    } else if (keyed && auth === "protected") {
+      level = "danger";
     }
 
     const scopeWords = {
@@ -661,12 +671,20 @@ export class LlmProbe {
     };
     const label =
       auth === "protected"
-        ? "Auth required"
-        : `Open · ${shortScope[scope]}`;
+        ? keyed
+          ? "Bad API key"
+          : "Auth required"
+        : auth === "keyed"
+          ? `API key · ${shortScope[scope]}`
+          : `Open · ${shortScope[scope]}`;
     const detail =
       auth === "protected"
-        ? `API key required · ${scopeWords[scope]} target (${host || "—"}). Based on the configured probe host, not the process bind address.`
-        : `Unauthenticated · ${scopeWords[scope]} target (${host || "—"}). Based on the configured probe host, not the process bind address.`;
+        ? keyed
+          ? `Configured API key was rejected (401/403) · ${scopeWords[scope]} target (${host || "—"}).`
+          : `API key required · ${scopeWords[scope]} target (${host || "—"}). Based on the configured probe host, not the process bind address.`
+        : auth === "keyed"
+          ? `Using configured API key · ${scopeWords[scope]} target (${host || "—"}). Based on the configured probe host, not the process bind address.`
+          : `Unauthenticated · ${scopeWords[scope]} target (${host || "—"}). Based on the configured probe host, not the process bind address.`;
 
     return { level, auth, scope, label, detail };
   }
@@ -734,7 +752,18 @@ export class LlmProbe {
   }
 
   // ─── HTTP helpers ────────────────────────────────────────
+  _apiKey() {
+    const keys = this.spark?.llmApiKeys;
+    if (!keys || typeof keys !== "object") return null;
+    const raw = keys[String(this.port)] ?? keys[this.port];
+    const key = raw != null ? String(raw).trim() : "";
+    return key || null;
+  }
+
   async _fetch(url) {
-    return fetch(url, { signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS) });
+    const headers = {};
+    const apiKey = this._apiKey();
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    return fetch(url, { signal: AbortSignal.timeout(LLM_PROBE_TIMEOUT_MS), headers });
   }
 }

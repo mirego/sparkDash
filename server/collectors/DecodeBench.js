@@ -65,7 +65,7 @@ const BENCH_PROMPTS = [
   "Write only valid HTML5 (no markdown fences). Create a multi-chapter tutorial with <h1>–<h3>, code samples in <pre>, and notes. Keep writing chapters.",
 ];
 
-const ALLOWED_CONCURRENCIES = new Set([1, 2, 3, 4, 6, 8, 16, 32]);
+const ALLOWED_CONCURRENCIES = new Set([1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32]);
 const DEFAULT_MAX_TOKENS = 500;
 const MIN_MAX_TOKENS = 64;
 const MAX_MAX_TOKENS = 2048;
@@ -222,6 +222,7 @@ async function runConcurrencyWave({
   abortSignal,
   sampleHardware = null,
   debug = false,
+  apiKey = null,
 }) {
   const url = `${baseUrl}/v1/chat/completions`;
   const prompts = pickDistinctPrompts(concurrency);
@@ -271,6 +272,7 @@ async function runConcurrencyWave({
     return runStreamingRequest(url, body, ctrl.signal, {
       debug,
       retryOnThinking400: true,
+      apiKey,
     }).finally(() => {
       clearTimeout(timeout);
       if (abortSignal) abortSignal.removeEventListener("abort", onParentAbort);
@@ -504,6 +506,7 @@ export class DecodeBenchManager {
    *   maxTokens?: number,
    *   debug?: boolean,
    *   sampleHardware?: (() => Promise<object | null> | object | null) | null,
+   *   apiKey?: string | null,
    * }} opts
    */
   start(opts) {
@@ -517,6 +520,7 @@ export class DecodeBenchManager {
       maxTokens: rawMax,
       debug = false,
       sampleHardware = null,
+      apiKey = null,
     } = opts;
 
     if (this.activeBySpark.has(sparkId)) {
@@ -527,7 +531,7 @@ export class DecodeBenchManager {
 
     const concurrencies = normalizeConcurrencies(rawConc);
     if (!concurrencies.length) {
-      const err = new Error("Select at least one concurrency level (1, 2, 3, 4, 6, 8, 16, or 32)");
+      const err = new Error("Select at least one concurrency level (1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, or 32)");
       err.status = 400;
       throw err;
     }
@@ -575,6 +579,7 @@ export class DecodeBenchManager {
       error: null,
       _abort: abort,
       _debug: debugOn,
+      _apiKey: apiKey != null && String(apiKey).trim() ? String(apiKey).trim() : null,
       _sampleHardware:
         debugOn && typeof sampleHardware === "function" ? sampleHardware : null,
     };
@@ -624,6 +629,7 @@ export class DecodeBenchManager {
           abortSignal: job._abort.signal,
           sampleHardware: job._sampleHardware,
           debug,
+          apiKey: job._apiKey,
         });
 
         if (job._abort.signal.aborted) {

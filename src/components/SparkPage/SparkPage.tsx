@@ -125,6 +125,8 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
                   llmPort={port}
                   llmHost={spark.llmHost ?? null}
                   lanIp={spark.lanIp}
+                  llmPorts={llmPorts}
+                  hasApiKey={Boolean(spark.llmApiKeyPorts?.includes(port))}
                   onRemovePort={canRemove ? handleRemovePort : undefined}
                   className="md:col-span-2"
                 />

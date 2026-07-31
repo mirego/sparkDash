@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
+import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { MetricBar } from "../ui/MetricBar";
 import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
@@ -456,12 +457,13 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const [dialogSparkId, setDialogSparkId] = useState<string | null>(null);
   const [dialogTab, setDialogTab] = useState<"gen" | "prefill">("gen");
   const [dialogTimeRange, setDialogTimeRange] = useState(30);
+  const [shutdownOpen, setShutdownOpen] = useState(false);
 
   const dialogSpark = dialogSparkId ? visibleSparks.find((s) => s.id === dialogSparkId) ?? null : null;
 
   async function handleShutdownAll() {
     const onlineCount = sparks.filter((s) => s.online).length;
-    if (!confirm(`Gracefully shut down all ${onlineCount} online Spark(s)? Offline nodes will be skipped.`)) return;
+    if (onlineCount === 0) return;
     setBatchLoading(true); setBatchMsg(null);
     try {
       const res = await shutdownAllSparks();
@@ -515,7 +517,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
                 className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50">
                 <PowerOnIcon className="h-3 w-3" /> Wake All
               </button>
-              <button type="button" onClick={() => void handleShutdownAll()} disabled={batchLoading || !sparks.some((s) => s.online)}
+              <button type="button" onClick={() => setShutdownOpen(true)} disabled={batchLoading || !sparks.some((s) => s.online)}
                 title="Shut down all online Sparks"
                 className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-danger/20 hover:text-danger transition-colors disabled:opacity-50">
                 <PowerOffIcon className="h-3 w-3" /> Shutdown All
@@ -547,6 +549,12 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         dialogTimeRange={dialogTimeRange} setDialogTimeRange={setDialogTimeRange}
         onClose={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }} />
       }
+      <ConfirmShutdownDialog
+        open={shutdownOpen}
+        onlineCount={sparks.filter((s) => s.online).length}
+        onConfirm={handleShutdownAll}
+        onClose={() => setShutdownOpen(false)}
+      />
     </div>
   );
 }
