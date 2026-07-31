@@ -13,6 +13,7 @@ config/gpu-memory.json.*
 config/bench-exports/
 config/per-key-usage.json
 config/.per-key-state.json
+config/*.bak.*
 *.log
 .DS_Store
 docs/
