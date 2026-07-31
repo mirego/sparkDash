@@ -439,6 +439,21 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                     <span className="text-muted">waiting</span>
                   </span>
                 )}
+                {/* Active users (by X-User header) with in-flight requests */}
+                {llm.activeUsers && llm.activeUsers.length > 0 && (
+                  <span className="mt-1 flex -space-x-1 flex-wrap items-center gap-1">
+                    {llm.activeUsers.slice(0, 4).map((u) => (
+                      <span key={u.label}
+                        className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium ${u.waiting ? 'bg-warning/15 text-warning' : 'bg-success/15 text-success'}`}
+                        title={`${u.label} \\u00b7 ${u.requests} in-flight request${u.requests !== 1 ? "s" : ""}${u.waiting ? " (waiting)" : " (active)"}`}>
+                        {u.label}
+                      </span>
+                    ))}
+                    {llm.activeUsers.length > 4 && (
+                      <span className="text-[9px] text-muted">+{llm.activeUsers.length - 4} more</span>
+                    )}
+                  </span>
+                )}
                 <span className="text-[9px] text-muted">Click to view full history</span>
               </div>
             </button>

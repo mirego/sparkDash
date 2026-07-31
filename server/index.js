@@ -23,6 +23,7 @@ import {
   stopPerKeyTracking,
   getTopUsers,
   getAllModelUsers,
+  getActiveUsers,
   getKnownApiKeys,
 } from "./collectors/PerKeyUsageTracker.js";
 
@@ -372,7 +373,7 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
     }
     await monitor.refreshDomain(domain);
     // Broadcast updated snapshot immediately (force, ignoring the diff cache)
-    const payload = buildSnapshotPayload();
+    const payload = await buildSnapshotPayload();
     _lastBroadcastPayload = payload;
     broadcastPayload(payload);
     res.json({ success: true, domain });
@@ -1515,12 +1516,12 @@ app.get("*splat", (_req, res) => {
 
 // ─── WebSocket ──────────────────────────────────────────
 const wss = new WebSocketServer({ server, path: "/ws" });
-wss.on("connection", (ws) => {
+wss.on("connection", async (ws) => {
   console.log("[ws] client connected");
   // Send the initial snapshot through the same path the broadcast uses so the
   // new client benefits from the same payload format (and bufferedAmount
   // guard, although a freshly-open socket trivially passes it).
-  broadcastPayload(buildSnapshotPayload());
+  broadcastPayload(await buildSnapshotPayload());
   ws.on("close", () => {
     console.log("[ws] client disconnected");
   });
@@ -1531,10 +1532,30 @@ let broadcastTimer = null;
 let _lastBroadcastPayload = null;
 
 /** Build the snapshot payload string. Centralized so broadcast + refresh share it. */
-function buildSnapshotPayload() {
+async function buildSnapshotPayload() {
+  // Poll the auth-proxy's /inflight endpoint for real-time active user counts.
+  const allActiveUsers = await getActiveUsers();
+  const proxyRunning = allActiveUsers._totalRunning || 0;
+  const proxyWaiting = allActiveUsers._totalWaiting || 0;
+  const sparks = orderedSnapshots();
+  // Attach active users to each LLM metrics entry so the SparkCard can show
+  // which users have active/waiting requests right now. Also override the
+  // vLLM requestsRunning/requestsWaiting with the auth-proxy's authoritative
+  // counts, so the "2 actives" / "1 waiting" labels are in sync with badges.
+  for (const spark of sparks) {
+    if (Array.isArray(spark.metrics?.llm)) {
+      for (const llm of spark.metrics.llm) {
+        llm.activeUsers = allActiveUsers;
+        if (proxyRunning > 0 || proxyWaiting > 0) {
+          llm.requestsRunning = proxyRunning;
+          llm.requestsWaiting = proxyWaiting;
+        }
+      }
+    }
+  }
   return JSON.stringify({
     type: "snapshot",
-    sparks: orderedSnapshots(),
+    sparks,
     refreshInterval: getSettings().pollIntervalMs,
   });
 }
@@ -1566,8 +1587,8 @@ function broadcastPayload(payload) {
 
 function startBroadcast() {
   const interval = getSettings().pollIntervalMs;
-  broadcastTimer = setInterval(() => {
-    const payload = buildSnapshotPayload();
+  broadcastTimer = setInterval(async () => {
+    const payload = await buildSnapshotPayload();
     // Skip the broadcast entirely when nothing changed since the last tick.
     // A 1s poll that produces identical snapshots becomes free for idle tabs.
     if (_lastBroadcastPayload !== null && payload === _lastBroadcastPayload) return;

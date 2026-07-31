@@ -266,7 +266,8 @@ function pollRequestLogs() {
 
       const parsed = parseRequestLog(path.join(CPA_REQUEST_LOG_DIR, fname));
       if (!parsed) {
-        _processedFiles.add(fname);
+        // No usage block yet — this file is still in-flight.
+        // Don't add to _processedFiles; leave it for getActiveUsers() to detect.
         continue;
       }
 
@@ -460,6 +461,50 @@ export function getAllModelUsers() {
     result[modelName] = { users: users.slice(0, 10), totalRequests, totalTokens };
   }
   return result;
+}
+
+/**
+ * Get users with active (in-flight) requests by polling the auth-proxy's
+ * /inflight endpoint.
+ *
+ * The auth-proxy (port 8317) intercepts every request to CPA, injects the
+ * X-User header, and maintains a real-time counter of in-flight requests
+ * per user. This is the ground-truth source: a request is "in-flight" from
+ * the moment the proxy accepts it until the last byte of the response is sent.
+ *
+ * No cache needed — this is a lightweight HTTP GET to localhost.
+ *
+ * @returns {{ label: string, requests: number }[]}
+ */
+export async function getActiveUsers() {
+  try {
+    const resp = await fetch("http://127.0.0.1:8317/inflight", {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!resp.ok) return [];
+    const result = await resp.json();
+    // Result format: { prefix: { waiting: N, active: M } }
+    // Return flat list with status + overall running/waiting counts
+    const users = [];
+    let totalRunning = 0;
+    let totalWaiting = 0;
+    for (const [label, counts] of Object.entries(result)) {
+      const waiting = counts.waiting || 0;
+      const active = counts.active || 0;
+      totalWaiting += waiting;
+      totalRunning += active;
+      const total = waiting + active;
+      if (total > 0) {
+        users.push({ label, requests: total, waiting: waiting > 0 });
+      }
+    }
+    // Attach aggregated counts so the snapshot can use them
+    users._totalRunning = totalRunning;
+    users._totalWaiting = totalWaiting;
+    return users.sort((a, b) => b.requests - a.requests);
+  } catch (err) {
+    return [];
+  }
 }
 
 export function getKnownApiKeys() {

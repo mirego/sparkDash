@@ -199,6 +199,12 @@ export interface LlmMetrics {
   /** vLLM speculative/MTP acceptance rate (accepted/drafted, 0–1). null when unavailable. */
   mtpAcceptanceRate?: number | null;
   /**
+   * Users with active or waiting (in-flight) requests, reported by the
+   * auth-proxy in real-time. Each entry includes whether the user has any
+   * requests still waiting for their first response byte.
+   */
+  activeUsers?: Array<{ label: string; requests: number; waiting: boolean }>;
+  /**
    * Observational exposure hint from unauthenticated probe reachability +
    * configured target host scope. null when auth status is unknown.
    * Does not claim process bind address.
