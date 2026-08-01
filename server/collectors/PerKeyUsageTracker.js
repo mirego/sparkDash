@@ -295,22 +295,14 @@ function pollRequestLogs() {
           lastSeen: 0,
           userLabel: parsed.userLabel || null,
           clientIp,
-          lastRawPromptTokens: null,
         };
       }
       const u = _modelUsage.models[parsed.model].users[userKey];
       u.requests++;
-      // Track only NEW input tokens by computing the delta from the user's
-      // last raw prompt_tokens value. Each request's usage.prompt_tokens
-      // includes the FULL conversation context (system prompt + history),
-      // so taking the delta isolates what was added by this request.
-      if (u.lastRawPromptTokens != null && parsed.promptTokens > u.lastRawPromptTokens) {
-        u.promptTokens += (parsed.promptTokens - u.lastRawPromptTokens);
-      } else {
-        // First request from this user or a new conversation (context reset)
-        u.promptTokens += parsed.promptTokens;
-      }
-      u.lastRawPromptTokens = parsed.promptTokens;
+      // Track raw/unadjusted prompt_tokens as reported per-request.
+      // No delta logic — each request's usage.prompt_tokens is recorded
+      // directly. This gives the total input volume through the proxy.
+      u.promptTokens += parsed.promptTokens;
       u.completionTokens += parsed.completionTokens;
       u.lastSeen = Date.now();
 
@@ -491,11 +483,12 @@ export async function getActiveUsers() {
     for (const [label, counts] of Object.entries(result)) {
       const waiting = counts.waiting || 0;
       const active = counts.active || 0;
+      const inputBytes = counts.inputBytes || 0;
       totalWaiting += waiting;
       totalRunning += active;
       const total = waiting + active;
       if (total > 0) {
-        users.push({ label, requests: total, waiting: waiting > 0 });
+        users.push({ label, requests: total, waiting: waiting > 0, inputBytes });
       }
     }
     // Attach aggregated counts so the snapshot can use them
