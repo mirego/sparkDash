@@ -295,14 +295,22 @@ function pollRequestLogs() {
           lastSeen: 0,
           userLabel: parsed.userLabel || null,
           clientIp,
+          lastRawPromptTokens: null,
         };
       }
       const u = _modelUsage.models[parsed.model].users[userKey];
       u.requests++;
-      // Track raw/unadjusted prompt_tokens as reported per-request.
-      // No delta logic — each request's usage.prompt_tokens is recorded
-      // directly. This gives the total input volume through the proxy.
-      u.promptTokens += parsed.promptTokens;
+      // Track only NEW input tokens per request by computing the delta from
+      // the user's last raw prompt_tokens value. Each request's prompt_tokens
+      // includes the FULL conversation context (system prompt + history),
+      // so the delta isolates what was added since the last turn.
+      if (u.lastRawPromptTokens != null && parsed.promptTokens > u.lastRawPromptTokens) {
+        u.promptTokens += (parsed.promptTokens - u.lastRawPromptTokens);
+      } else {
+        // First request from this user or a new conversation (context reset)
+        u.promptTokens += parsed.promptTokens;
+      }
+      u.lastRawPromptTokens = parsed.promptTokens;
       u.completionTokens += parsed.completionTokens;
       u.lastSeen = Date.now();
 
