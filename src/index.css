@@ -716,6 +716,26 @@ input[type="checkbox"] {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 20%, transparent);
 }
 
+/* ─── Energy chip (overview welcome row) ─────────────── */
+.energy-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: var(--color-surface-elevated);
+  border-radius: 50px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-accent);
+  box-shadow: var(--shadow-card);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.energy-chip .energy-ico {
+  font-size: 12px;
+  line-height: 1;
+}
+
 /* ─── LLM badge ───────────────────────────────────────── */
 .llm-badge {
   display: inline-flex;
