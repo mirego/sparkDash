@@ -17,8 +17,8 @@ const ENERGY_PATH =
 let _energyPath = ENERGY_PATH;
 /** Ignore gaps larger than this (spark offline / paused / just booted) — no backfill. */
 const MAX_GAP_MS = 60_000;
-/** Bound the file by pruning days older than this. */
-const KEEP_DAYS = 60;
+/** Bound the file by pruning days older than this (≈14 months so year facts hold). */
+const KEEP_DAYS = 400;
 /** Debounce between writes to disk. */
 const SAVE_DEBOUNCE_MS = 30_000;
 

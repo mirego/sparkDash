@@ -76,14 +76,26 @@ test("month aggregation groups by calendar month", () => {
   assert.ok(Math.abs(out[1].value - 43) < 0.01, `got ${out[1].value}`);
 });
 
+test("year aggregation groups by calendar year", () => {
+  const out = aggregate(SPAN, "year");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].date, "2026-01-01");
+  assert.equal(out[0].label, "2026");
+  // Total of SPAN = 91 (the week) + 5 + 7 = 103
+  assert.ok(Math.abs(out[0].value - 103) < 0.01, `got ${out[0].value}`);
+  // Per-spark sums across the whole span: anton + son-of-anton = 103
+  assert.ok(Math.abs(out[0].sparks.anton + out[0].sparks["son-of-anton"] - 103) < 0.01);
+});
+
 test("empty series yields empty buckets", () => {
   const out = aggregate([], "month");
   assert.deepEqual(out, []);
 });
 
-test("buildBuckets returns all three periods", () => {
+test("buildBuckets returns all four periods", () => {
   const b = buildBuckets(SPAN);
   assert.equal(b.day.length, 9);
   assert.equal(b.week.length, 2);
   assert.equal(b.month.length, 2);
+  assert.equal(b.year.length, 1);
 });

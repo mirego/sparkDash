@@ -62,6 +62,10 @@ export function aggregate(series, period) {
       key = iso(mon);
       date = key;
       label = `${pad(mon.getMonth() + 1)}/${pad(mon.getDate())}`;
+    } else if (period === "year") {
+      key = String(d.getFullYear());
+      date = `${key}-01-01`;
+      label = String(d.getFullYear());
     } else {
       key = monthKeyOf(d);
       date = `${key}-01`;
@@ -87,5 +91,6 @@ export function buildBuckets(series) {
     day: aggregate(series, "day"),
     week: aggregate(series, "week"),
     month: aggregate(series, "month"),
+    year: aggregate(series, "year"),
   };
 }

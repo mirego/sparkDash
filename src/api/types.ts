@@ -537,9 +537,10 @@ export interface EnergyBucket {
   sparks: Record<string, number>;
 }
 
-/** GPU energy history pre-aggregated into the three granularities. */
+/** GPU energy history pre-aggregated into the four granularities. */
 export interface EnergyReport {
   day: EnergyBucket[];
   week: EnergyBucket[];
   month: EnergyBucket[];
+  year: EnergyBucket[];
 }
