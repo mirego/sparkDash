@@ -483,6 +483,10 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   }
 
   const onlineCount = visibleSparks.filter((s) => s.online).length;
+  // Today's GPU energy across all visible sparks (Wh), server-accumulated.
+  const todayWh = visibleSparks.reduce((sum, s) => sum + (s.energyTodayWh ?? 0), 0);
+  const fmtWh = (wh: number): string =>
+    wh >= 1000 ? `${(wh / 1000).toFixed(2)} kWh` : `${Math.round(wh)} Wh`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
@@ -497,6 +501,12 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
                 <ActivityIcon className="h-3 w-3" /> Switch Model
               </button>
             </div>
+          )}
+          {todayWh > 0 && (
+            <span className="energy-chip" title="GPU energy consumed today (all Sparks, server-accumulated)">
+              <span className="energy-ico">⚡</span>
+              {fmtWh(todayWh)} today
+            </span>
           )}
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
         </div>
