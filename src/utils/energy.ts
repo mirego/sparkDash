@@ -5,12 +5,12 @@
 
 /**
  * Electricity rate, CAD/kWh. User is on a COMMERCIAL building on Hydro-Québec
- * Rate G (Small Power, 2026 book): 12.388¢/kWh first 15,090 kWh/mo, then
- * 9.534¢/kWh. A commercial building is above 15,090 kWh/mo, so the MARGINAL
- * rate (9.534¢) is what extra GPU draw costs. Fixed $15.426/mo access fee
- * and the $22.071/kW demand charge (only above 50 kW) don't scale with Wh.
+ * Rate G (Small Power, 2026 book): 12.388¢/kWh FIRST 15,090 kWh/mo, then
+ * 9.534¢/kWh beyond. We deliberately use the MAX tier (12.388¢) so the
+ * displayed cost is the worst case / ceiling. Fixed $15.426/mo access fee and
+ * $22.071/kW demand charge (only above 50 kW) don't scale with Wh.
  */
-export const PRICE_CAD_PER_KWH = 0.09534;
+export const PRICE_CAD_PER_KWH = 0.12388;
 
 /** Format Wh → human short string (auto-scales to kWh). */
 export function fmtEnergyWh(v: number): string {
