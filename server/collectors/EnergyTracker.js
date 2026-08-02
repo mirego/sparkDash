@@ -12,6 +12,8 @@ import { ROOT } from "../config.js";
 
 const ENERGY_PATH =
   process.env.GPU_WH_PATH || path.join(ROOT, "config", "gpu-wh.json");
+/** Mutable so tests can point saves at a temp file instead of real runtime data. */
+let _energyPath = ENERGY_PATH;
 /** Ignore gaps larger than this (spark offline / paused / just booted) — no backfill. */
 const MAX_GAP_MS = 60_000;
 /** Bound the file by pruning days older than this. */
@@ -23,6 +25,7 @@ let _state = { version: 1, daily: {} };
 /** sparkId → { ts, drawW } — the last power reading used for trapezoid integration. */
 let _last = new Map();
 let _lastSave = 0;
+let _flushTimer = null;
 
 /** Local calendar date key, e.g. "2026-08-01". */
 export function _getDateKey(nowMs) {
@@ -33,8 +36,8 @@ export function _getDateKey(nowMs) {
 
 function load() {
   try {
-    if (fs.existsSync(ENERGY_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(ENERGY_PATH, "utf8"));
+    if (fs.existsSync(_energyPath)) {
+      const parsed = JSON.parse(fs.readFileSync(_energyPath, "utf8"));
       if (parsed && typeof parsed.daily === "object") _state = parsed;
     }
   } catch {
@@ -47,11 +50,34 @@ function save() {
     const now = Date.now();
     if (now - _lastSave < SAVE_DEBOUNCE_MS) return;
     _lastSave = now;
-    fs.mkdirSync(path.dirname(ENERGY_PATH), { recursive: true });
-    fs.writeFileSync(ENERGY_PATH + ".tmp", JSON.stringify(_state, null, 2), "utf8");
-    fs.renameSync(ENERGY_PATH + ".tmp", ENERGY_PATH);
+    fs.mkdirSync(path.dirname(_energyPath), { recursive: true });
+    fs.writeFileSync(_energyPath + ".tmp", JSON.stringify(_state, null, 2), "utf8");
+    fs.renameSync(_energyPath + ".tmp", _energyPath);
   } catch (err) {
     console.error("[EnergyTracker] save failed:", err.message);
+  }
+}
+
+/** Force a write now, bypassing the debounce. Used on graceful shutdown. */
+export function flush() {
+  _lastSave = 0;
+  save();
+}
+
+/**
+ * Periodically flush to disk so a crash/restart loses at most one interval
+ * (instead of being bounded only by the debounce). Cleared via stopEnergyFlush.
+ * @param {number} [intervalMs=60_000]
+ */
+export function startEnergyFlush(intervalMs = 60_000) {
+  if (_flushTimer) return;
+  _flushTimer = setInterval(() => save(), intervalMs);
+}
+
+export function stopEnergyFlush() {
+  if (_flushTimer) {
+    clearInterval(_flushTimer);
+    _flushTimer = null;
   }
 }
 
@@ -62,10 +88,13 @@ function prune() {
   }
 }
 
-export function _resetForTest() {
+export function _resetForTest(path) {
   _state = { version: 1, daily: {} };
   _last = new Map();
   _lastSave = 0;
+  stopEnergyFlush();
+  // Point saves at a temp file so unit tests never touch real runtime data.
+  if (typeof path === "string") _energyPath = path;
 }
 
 /**

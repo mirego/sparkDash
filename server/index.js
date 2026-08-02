@@ -26,7 +26,12 @@ import {
   getActiveUsers,
   getKnownApiKeys,
 } from "./collectors/PerKeyUsageTracker.js";
-import { recordPower, getTodayWhBySpark } from "./collectors/EnergyTracker.js";
+import {
+  recordPower,
+  getTodayWhBySpark,
+  flush as flushEnergy,
+  startEnergyFlush,
+} from "./collectors/EnergyTracker.js";
 
 dotenv.config();
 
@@ -1623,6 +1628,7 @@ function restartBroadcast() {
 loadSettings();
 startBroadcast();
 startPerKeyTracking();
+startEnergyFlush();
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`[sparkDash] server listening on http://${BIND_HOST}:${PORT}`);
@@ -1644,6 +1650,7 @@ function shutdown(signal) {
     for (const m of monitors.values()) m.stop();
     monitors.clear();
     stopPerKeyTracking();
+    flushEnergy(); // persist final energy totals before exiting
   } catch (err) {
     console.error("[sparkDash] error during shutdown:", err.message);
   }

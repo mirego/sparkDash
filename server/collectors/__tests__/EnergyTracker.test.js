@@ -4,23 +4,38 @@
  * The tracker integrates per-spark GPU power.draw (W) into per-calendar-day
  * watt-hours. These tests cover the pure integration math: trapezoid
  * accumulation, the >60s gap guard (no backfill), midnight rollover, zero/
- * offline handling, and multi-spark summation for the fleet pill.
+ * offline handling, multi-spark summation, and forcing a disk flush.
+ *
+ * Each test points the tracker at a unique temp file (via _resetForTest(path))
+ * so unit tests never touch or corrupt the real config/gpu-wh.json.
  *
  * Uses node:test (shipped with Node 22) — no dependencies required.
  * Run: npm test
  */
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import { strict as assert } from "node:assert";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   _resetForTest,
   recordPower,
   getTodayWh,
   getTodayWhBySpark,
+  flush,
   _getDateKey,
 } from "../EnergyTracker.js";
 
+const TEMP = path.join(os.tmpdir(), `gpu-wh-test-${process.pid}.json`);
+
+beforeEach(() => {
+  _resetForTest(TEMP); // reset state AND redirect writes to the temp file
+  try {
+    fs.rmSync(TEMP, { force: true });
+  } catch { /* ignore */ }
+});
+
 test("records Wh using trapezoid integration", () => {
-  _resetForTest();
   const t0 = Date.UTC(2026, 7, 1, 0, 0, 0); // 2026-08-01T00:00:00Z
   recordPower("a", 100, t0);            // seed
   recordPower("a", 100, t0 + 2000);     // 100W * 2s
@@ -31,7 +46,6 @@ test("records Wh using trapezoid integration", () => {
 });
 
 test("does not backfill across a large gap", () => {
-  _resetForTest();
   const t0 = Date.UTC(2026, 7, 1, 0, 0, 0);
   recordPower("a", 100, t0);
   // 5-minute gap (>> 60s guard) at high draw — must NOT count
@@ -40,7 +54,6 @@ test("does not backfill across a large gap", () => {
 });
 
 test("rolls daily bucket over midnight", () => {
-  _resetForTest();
   // Local-time timestamps (new Date(y,m,d,...) interprets in local TZ), so steps
   // cross local midnight regardless of host timezone. First call is a seed.
   const seed = new Date(2026, 7, 1, 23, 59, 56).getTime(); // local 23:59:56 (seed)
@@ -57,7 +70,6 @@ test("rolls daily bucket over midnight", () => {
 });
 
 test("zero/offline power does not accumulate", () => {
-  _resetForTest();
   const t0 = Date.UTC(2026, 7, 1, 0, 0, 0);
   recordPower("a", 0, t0);
   recordPower("a", 0, t0 + 2000);
@@ -65,10 +77,20 @@ test("zero/offline power does not accumulate", () => {
 });
 
 test("sums multiple sparks for the fleet pill", () => {
-  _resetForTest();
   const t0 = Date.UTC(2026, 7, 1, 0, 0, 0);
   recordPower("a", 100, t0); recordPower("a", 100, t0 + 2000);
   recordPower("b", 200, t0); recordPower("b", 200, t0 + 2000);
   assert.ok(Math.abs(getTodayWh(t0 + 2000) - (300 * 2) / 3600) < 0.001);
   assert.deepEqual(Object.keys(getTodayWhBySpark(t0 + 2000)), ["a", "b"]);
+});
+
+test("flush forces accumulated data to disk", () => {
+  const t0 = Date.UTC(2026, 7, 1, 0, 0, 0);
+  recordPower("a", 100, t0); // seed
+  recordPower("a", 100, t0 + 2000); // accumulate
+  flush();
+  assert.ok(fs.existsSync(TEMP), "flush() should write the temp file");
+  const onDisk = JSON.parse(fs.readFileSync(TEMP, "utf8"));
+  const day = onDisk.daily[_getDateKey(t0)] || {};
+  assert.ok(day.a > 0, "flushed file should contain today's Wh for spark a");
 });
