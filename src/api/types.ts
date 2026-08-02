@@ -242,6 +242,8 @@ export interface SparkSnapshot {
   id: string;
   name: string;
   online: boolean;
+  /** Today's GPU energy consumption for this spark, in Wh (server-accumulated). */
+  energyTodayWh?: number;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;
   disabledDevices: string[];
