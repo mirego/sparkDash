@@ -26,6 +26,7 @@ import {
   getActiveUsers,
   getKnownApiKeys,
 } from "./collectors/PerKeyUsageTracker.js";
+import { recordPower, getTodayWhBySpark } from "./collectors/EnergyTracker.js";
 
 dotenv.config();
 
@@ -1538,6 +1539,18 @@ async function buildSnapshotPayload() {
   const proxyRunning = allActiveUsers._totalRunning || 0;
   const proxyWaiting = allActiveUsers._totalWaiting || 0;
   const sparks = orderedSnapshots();
+  // Feed each online spark's GPU power draw into the energy tracker (integrates
+  // into today's Wh), then attach today's per-spark Wh so the UI can render a
+  // fleet-wide pill. Runs every broadcast tick even when the payload is equal.
+  const nowMs = Date.now();
+  const todayWhBySpark = getTodayWhBySpark(nowMs);
+  for (const spark of sparks) {
+    if (spark.online) {
+      const draw = spark.metrics?.gpu?.power?.draw;
+      if (typeof draw === "number") recordPower(spark.id, draw, nowMs);
+    }
+    spark.energyTodayWh = todayWhBySpark[spark.id] || 0;
+  }
   // Attach active users to each LLM metrics entry so the SparkCard can show
   // which users have active/waiting requests right now. Also override the
   // vLLM requestsRunning/requestsWaiting with the auth-proxy's authoritative
