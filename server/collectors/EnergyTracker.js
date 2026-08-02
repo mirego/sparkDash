@@ -3,8 +3,9 @@
  * watt-hours (Wh), persisted to disk so totals survive restarts and accumulate
  * even while no browser is open (the broadcast loop feeds it every poll tick).
  *
- * Data stored in config/gpu-wh.json:
- *   { version: 1, daily: { "YYYY-MM-DD": { sparkId: wh } } }
+ * Data stored in config/gpu-wh.json — dates are the top-level keys, `version`
+ * is the only reserved key. Each date maps to per-Spark Wh:
+ *   { version: 1, "YYYY-MM-DD": { sparkId: wh } }
  */
 import fs from "fs";
 import path from "path";
@@ -21,7 +22,7 @@ const KEEP_DAYS = 60;
 /** Debounce between writes to disk. */
 const SAVE_DEBOUNCE_MS = 30_000;
 
-let _state = { version: 1, daily: {} };
+let _state = { version: 1 };
 /** sparkId → { ts, drawW } — the last power reading used for trapezoid integration. */
 let _last = new Map();
 let _lastSave = 0;
@@ -38,7 +39,16 @@ function load() {
   try {
     if (fs.existsSync(_energyPath)) {
       const parsed = JSON.parse(fs.readFileSync(_energyPath, "utf8"));
-      if (parsed && typeof parsed.daily === "object") _state = parsed;
+      if (parsed && typeof parsed === "object") {
+        // Migrate the old { daily: {...} } wrapper → dates at the top level.
+        if (parsed.daily && typeof parsed.daily === "object") {
+          const next = { version: parsed.version || 1 };
+          for (const [k, v] of Object.entries(parsed.daily)) next[k] = v;
+          _state = next;
+        } else {
+          _state = parsed;
+        }
+      }
     }
   } catch {
     /* corrupt or missing — start fresh */
@@ -82,14 +92,15 @@ export function stopEnergyFlush() {
 }
 
 function prune() {
-  const keys = Object.keys(_state.daily).sort();
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const keys = Object.keys(_state).filter((k) => DAY_RE.test(k)).sort();
   if (keys.length > KEEP_DAYS) {
-    for (const k of keys.slice(0, keys.length - KEEP_DAYS)) delete _state.daily[k];
+    for (const k of keys.slice(0, keys.length - KEEP_DAYS)) delete _state[k];
   }
 }
 
 export function _resetForTest(path) {
-  _state = { version: 1, daily: {} };
+  _state = { version: 1 };
   _last = new Map();
   _lastSave = 0;
   stopEnergyFlush();
@@ -110,8 +121,8 @@ export function recordPower(sparkId, drawW, nowMs = Date.now()) {
     const avgW = (prev.drawW + drawW) / 2;
     if (dtHours > 0) {
       const key = _getDateKey(nowMs);
-      if (!_state.daily[key]) _state.daily[key] = {};
-      _state.daily[key][sparkId] = (_state.daily[key][sparkId] || 0) + avgW * dtHours;
+      if (!_state[key]) _state[key] = {};
+      _state[key][sparkId] = (_state[key][sparkId] || 0) + avgW * dtHours;
     }
   }
   _last.set(sparkId, { ts: nowMs, drawW });
@@ -121,13 +132,18 @@ export function recordPower(sparkId, drawW, nowMs = Date.now()) {
 
 /** Total Wh across all sparks for the local calendar day of nowMs. */
 export function getTodayWh(nowMs = Date.now()) {
-  const bucket = _state.daily[_getDateKey(nowMs)] || {};
+  const bucket = _state[_getDateKey(nowMs)] || {};
   return Object.values(bucket).reduce((s, v) => s + v, 0);
 }
 
 /** Per-spark Wh map for the local calendar day of nowMs. */
 export function getTodayWhBySpark(nowMs = Date.now()) {
-  return { ...(_state.daily[_getDateKey(nowMs)] || {}) };
+  return { ...(_state[_getDateKey(nowMs)] || {}) };
 }
 
 load();
+
+/** Test hook — reload state from disk (used to exercise migration paths). */
+export function _reload() {
+  load();
+}

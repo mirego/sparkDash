@@ -23,6 +23,7 @@ import {
   getTodayWh,
   getTodayWhBySpark,
   flush,
+  _reload,
   _getDateKey,
 } from "../EnergyTracker.js";
 
@@ -84,13 +85,28 @@ test("sums multiple sparks for the fleet pill", () => {
   assert.deepEqual(Object.keys(getTodayWhBySpark(t0 + 2000)), ["a", "b"]);
 });
 
-test("flush forces accumulated data to disk", () => {
+test("flush forces accumulated data to disk with dates as top-level keys", () => {
   const t0 = Date.UTC(2026, 7, 1, 0, 0, 0);
   recordPower("a", 100, t0); // seed
   recordPower("a", 100, t0 + 2000); // accumulate
   flush();
   assert.ok(fs.existsSync(TEMP), "flush() should write the temp file");
   const onDisk = JSON.parse(fs.readFileSync(TEMP, "utf8"));
-  const day = onDisk.daily[_getDateKey(t0)] || {};
-  assert.ok(day.a > 0, "flushed file should contain today's Wh for spark a");
+  const day = onDisk[_getDateKey(t0)];
+  assert.ok(day && day.a > 0, "date should be a top-level key with today's Wh");
+  assert.equal(onDisk.daily, undefined, "no daily wrapper should remain");
+});
+
+test("migrates legacy { daily: {...} } wrapper to top-level dates", () => {
+  // Local noon gives a stable date key regardless of host TZ.
+  const localNoon = new Date(2026, 7, 1, 12, 0, 0).getTime();
+  const key = _getDateKey(localNoon);
+  fs.writeFileSync(TEMP, JSON.stringify({ version: 1, daily: { [key]: { a: 1.5 } } }));
+  _reload();
+  assert.equal(getTodayWh(localNoon), 1.5, "should read value after migrating wrapper");
+  flush();
+  const onDisk = JSON.parse(fs.readFileSync(TEMP, "utf8"));
+  assert.equal(onDisk.daily, undefined, "legacy wrapper should be dropped on write");
+  assert.ok(onDisk[key], "date should be a top-level key");
+  assert.equal(onDisk[key].a, 1.5);
 });
