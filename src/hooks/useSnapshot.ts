@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { SparkSnapshot, WsSnapshot } from "../api/types";
-import { ingestSnapshots } from "./metricsStore";
+import type { SparkSnapshot } from "../api/types";
+import { ingestSnapshots, ingestAlerts } from "./metricsStore";
 import { OVERVIEW_ID } from "../constants";
 
 const WS_URL = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`;
@@ -37,7 +37,7 @@ export function useSnapshot() {
 
     ws.onmessage = (ev) => {
       try {
-        const msg: WsSnapshot = JSON.parse(ev.data);
+        const msg = JSON.parse(ev.data);
         if (msg.type === "snapshot") {
           // Feed the central history store (8b) before notifying React state.
           ingestSnapshots(msg.sparks);
@@ -46,9 +46,12 @@ export function useSnapshot() {
           // is still valid (Overview is always valid).
           setActiveId((prev) => {
             if (prev === OVERVIEW_ID) return OVERVIEW_ID;
-            if (prev && msg.sparks.some((s) => s.id === prev)) return prev;
+            if (prev && (msg.sparks as SparkSnapshot[]).some((s) => s.id === prev)) return prev;
             return OVERVIEW_ID;
           });
+        } else if (msg.type === "alerts" && Array.isArray(msg.changed)) {
+          // Fleet health transitions pushed by the AlertMonitor → live feed.
+          ingestAlerts(msg.changed, msg.nowMs ?? Date.now());
         }
       } catch {}
     };

@@ -35,6 +35,19 @@ const historyTails = new Map<string, readonly number[]>();
 const sparkMap = new Map<string, SparkSnapshot>();
 const listeners = new Set<() => void>();
 
+// Fleet alert transitions pushed over the WS `alerts` channel (AlertMonitor).
+// Bounded ring (newest first) so the UI can render a live health-notification
+// feed without polling /api/alerts.
+export interface AlertEvent {
+  sparkId: string;
+  prevLevel: string;
+  level: string;
+  ts: number;
+  alerts: Array<{ id: string; level: string; label: string; detail: string }>;
+}
+const ALERT_EVENTS_MAX = 40;
+const alertEvents: AlertEvent[] = [];
+
 const EMPTY: readonly number[] = Object.freeze([] as number[]);
 
 // ─── localStorage persistence ─────────────────────────────
@@ -137,9 +150,21 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
     if (m.gpu) {
       pushHistory(`${s.id}:gpu.usage`, m.gpu.usage);
       pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature);
+      if (m.gpu.temperatures?.memory != null && Number.isFinite(m.gpu.temperatures.memory)) {
+        pushHistory(`${s.id}:gpu.memTemp`, m.gpu.temperatures.memory);
+      }
+      if (typeof m.gpu.power?.draw === "number") {
+        pushHistory(`${s.id}:gpu.power`, m.gpu.power.draw);
+      }
+      if (typeof m.gpu.vram?.percentage === "number") {
+        pushHistory(`${s.id}:gpu.vram`, m.gpu.vram.percentage);
+      }
     }
     if (m.cpu) {
       pushHistory(`${s.id}:cpu.usage`, m.cpu.usage);
+      if (m.cpu.temperature != null && Number.isFinite(m.cpu.temperature)) {
+        pushHistory(`${s.id}:cpu.temp`, m.cpu.temperature);
+      }
     }
     if (Array.isArray(m.llm)) {
       // Zip with snapshot.llmPorts so multi-port LLM series key distinctly.
@@ -223,10 +248,51 @@ export function useSpark(id: string): SparkSnapshot | undefined {
   );
 }
 
+/**
+ * Ingest a WS `alerts` message's changed transitions into the alert feed.
+ * Notifies subscribers so `useAlertEvents` re-renders.
+ */
+export function ingestAlerts(changed: Array<{
+  sparkId: string; prevLevel: string; level: string; ts?: number;
+  alerts: Array<{ id: string; level: string; label: string; detail: string }>;
+}>, nowMs = Date.now()): void {
+  if (!Array.isArray(changed) || changed.length === 0) return;
+  let mutated = false;
+  for (const c of changed) {
+    alertEvents.unshift({
+      sparkId: c.sparkId,
+      prevLevel: c.prevLevel,
+      level: c.level,
+      ts: typeof c.ts === "number" ? c.ts : nowMs,
+      alerts: c.alerts ?? [],
+    });
+    mutated = true;
+  }
+  if (alertEvents.length > ALERT_EVENTS_MAX) alertEvents.length = ALERT_EVENTS_MAX;
+  if (mutated) notify();
+}
+
+function getAlertEvents(): readonly AlertEvent[] {
+  return alertEvents;
+}
+
+/**
+ * Subscribe to the fleet alert-transition feed (newest first). Re-renders only
+ * when a new WS `alerts` transition is ingested.
+ */
+export function useAlertEvents(): readonly AlertEvent[] {
+  return useSyncExternalStore(
+    subscribeMetrics,
+    getAlertEvents,
+    () => EMPTY as unknown as readonly AlertEvent[]
+  );
+}
+
 /** Clear all cached state — used on hard reload paths / tests. */
 export function _resetStore(): void {
   history.clear();
   historyTails.clear();
   sparkMap.clear();
+  alertEvents.length = 0;
   try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
 }

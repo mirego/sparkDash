@@ -78,6 +78,10 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Power controls** | Graceful shutdown (SSH host script) and Wake-on-LAN; batch actions on Overview |
 | **Spark roles** | **Head** / **Worker** / **Standalone** — worker label + head link; standalone can disable LLM monitoring |
 | **Unified memory** | GB10 128 GB LPDDR5X pool (~273 GB/s), GPU/CPU split, bandwidth via `nvidia-smi dmon` |
+| **Health telemetry** | Passive-cooling (fan), memory-junction temperature, SM/memory clocks, power state, and ECC error counters per GPU; null-safe so a missing read shows “—” instead of a false 0 |
+| **CPU temperature** | Reads real hwmon/thermal temperature locally and over SSH (was previously a hardcoded 0°C), shown on the CPU panel |
+| **Fleet alerting** | Threshold-based alert engine over offline, GPU junction/memory temp, fan, ECC, OOM risk, disk free, and TTFT — colored per-Spark health badges, a fleet warning banner, a live WS alert feed, `/api/alerts` (+ history), and an optional outbound webhook (`ALERT_WEBHOOK_URL`) |
+| **Trending** | Server-fed history for GPU power, VRAM %, GPU memory temp and CPU temp on top of usage/temperature/token series |
 | **Themes** | Dark, light, cool white, OLED — neutral palettes, persisted in `localStorage` |
 | **Secrets** | SSH passwords AES-256-GCM encrypted; never in `sparks.json` or API responses |
 | **Docker-first** | Single privileged container for host metrics; prod and dev Compose files |
@@ -197,11 +201,32 @@ sparkDash/
 | POST | `/api/sparks/:id/llm-ports` | Add an LLM port (hot) |
 | DELETE | `/api/sparks/:id/llm-ports/:port` | Remove an LLM port (hot) |
 | PUT | `/api/sparks/:id/llm-port` | LLM port — backward-compat (hot) |
+| GET | `/api/alerts` | Current per-Spark alert state + transition history |
+| GET | `/api/alerts/history` | Alert transition history only |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
-| WS | `/ws` | Real-time metrics stream |
+| WS | `/ws` | Real-time metrics stream (`type: "snapshot"`) + fleet health transitions (`type: "alerts"`) |
 
 There is no authentication on the HTTP/WebSocket API. Run sparkDash only on a trusted network (or behind your own reverse proxy with auth).
+
+## Fleet health & alerting
+
+The server evaluates every Spark snapshot against the `DGX_SPARK` thermal/fan thresholds (previously dead constants) plus OOM / disk / TTFT / offline rules (`server/collectors/AlertMonitor.js`). Each snapshot carries a compact `health` object (`{ level, badges }`) used by the per-Spark **Health** panel and the Overview **fleet banner**. When a Spark's level transitions, the server pushes a WebSocket message `{ type: "alerts" }` (live feed) and records it in `/api/alerts/history`.
+
+Rules and their thresholds:
+
+| Badge | Warn | Critical |
+|-------|------|----------|
+| GPU junction temp | ≥ 85 °C | ≥ 95 °C |
+| GPU memory temp | ≥ 75 °C | ≥ 85 °C |
+| Fan (stalled under load) | stopped | stopped with > 20 % GPU usage |
+| ECC | ≥ 100 corrected | any uncorrected |
+| OOM risk | medium | high |
+| Disk free | ≥ 90 % used | ≥ 95 % used |
+| TTFT p95 | ≥ 1.0 s | ≥ 3.0 s |
+| Node | — | offline |
+
+Outbound notifications: set `ALERT_WEBHOOK_URL` to an HTTP(S) endpoint; the server POSTs a JSON payload on transitions into `warn`/`danger` and on recovery (deduped per Spark, 5-minute cooldown). Works with Pushover / generic webhook gateways. Without it, alerts remain visible in-dashboard.
 
 ---
 
@@ -234,6 +259,7 @@ Copy `.env.example` to `.env` if needed:
 | `POLL_INTERVAL_LLM` | `2000` | LLM probe poll (ms) |
 | `POLL_INTERVAL_BANDWIDTH` | `2000` | Memory bandwidth / dmon poll (ms) |
 | `POLL_INTERVAL_LIVENESS` | `5000` | Online/SSH liveness check (ms) |
+| `ALERT_WEBHOOK_URL` | _(empty)_ | Optional HTTP(S) endpoint for fleet health webhook notifications |
 | `SPARKDASH_SECRETS_KEY` | _(auto)_ | Passphrase or 64-char hex for secret encryption |
 | `HOST_PROC_PATH` | `/host/proc` | Host proc mount inside container |
 | `HOST_SYS_PATH` | `/host/sys` | Host sys mount |

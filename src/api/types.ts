@@ -78,8 +78,32 @@ export interface HardwareInfo {
 }
 
 // ─── GPU metrics ─────────────────────────────────────────
+/**
+ * Multi-zone thermal / cooling / reliability telemetry surfaced per-GPU.
+ * Fields are null when the reported value is [N/A] on the hardware — a null is
+ * rendered as "—" (unknown), never a misleading 0 (no-silent-failures rule).
+ */
+export interface HealthBadge {
+  id: string;
+  level: "ok" | "warn" | "danger";
+  /** Short label, e.g. "GPU junction", "Fan", "OOM risk". */
+  label: string;
+  /** Human-readable current value / detail, e.g. "77°C". */
+  detail: string;
+}
+
 export interface GpuMetrics {
   temperature: number;
+  /** Multi-zone thermal: memory-junction temperature (°C), null when N/A. */
+  temperatures?: { memory: number | null };
+  /** Fan speed; % or RPM depending on driver. null when N/A. */
+  fan?: number | null;
+  /** SM + memory clock rates (MHz). null when N/A/unified memory. */
+  clocks?: { sm: number | null; mem: number | null };
+  /** Power state, e.g. "P0"/"P8". null when N/A. */
+  pstate?: string | null;
+  /** Volatile ECC error counters. null when ECC disabled/unsupported. */
+  ecc?: { corrected: number | null; uncorrected: number | null };
   usage: number;
   power: {
     draw: number;
@@ -101,7 +125,8 @@ export interface GpuMetrics {
 // ─── CPU metrics ─────────────────────────────────────────
 export interface CpuMetrics {
   usage: number;
-  temperature: number;
+  /** °C. null when the host exposes no readable temperature source. */
+  temperature: number | null;
   draw: number;
   tdp: number;
 }
@@ -281,6 +306,16 @@ export interface SparkSnapshot {
   llmApiKeyPorts?: number[];
   hardware: HardwareInfo;
   metrics: SparkMetrics;
+  /**
+   * Compact per-Spark health summary computed server-side from DGX_SPARK
+   * thresholds (absent for older servers). `level` is the fleet-level
+   * classification; `badges` is one entry per monitored subsystem. Alerts are
+   * the badges with level !== "ok", presented highest-severity first.
+   */
+  health?: {
+    level: "ok" | "warn" | "danger";
+    badges: HealthBadge[];
+  };
 }
 
 // ─── WebSocket envelope ───────────────────────────────────
@@ -288,6 +323,22 @@ export interface WsSnapshot {
   type: "snapshot";
   sparks: SparkSnapshot[];
   refreshInterval: number;
+}
+
+/**
+ * Live fleet-alert push (type: "alerts"). Sent by the AlertMonitor whenever
+ * any Spark's health level transitions. `changed` lists the sparks that moved;
+ * `sparks` is the full current per-spark alert state.
+ */
+export interface WsAlertMessage {
+  type: "alerts";
+  changed: Array<{ sparkId: string; prevLevel: string; level: string; alerts: Array<{
+    id: string; level: string; label: string; detail: string;
+  }> }>;
+  sparks: Array<{ sparkId: string; level: "ok" | "warn" | "danger" | "unknown"; alerts: Array<{
+    id: string; level: string; label: string; detail: string;
+  }> }>;
+  nowMs: number;
 }
 
 // ─── API responses ────────────────────────────────────────

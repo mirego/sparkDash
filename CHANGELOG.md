@@ -7,6 +7,21 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.5.0] — 2026-08-02
+
+### Added
+- **GPU health telemetry** — fan, memory-junction temperature, SM/memory clocks, power state (P-state), and ECC error counters collected per GPU (local + SSH). Missing/[N/A] reads degrade to `null` and render as “—” instead of a misleading 0 (no-silent-failures rule).
+- **Fleet health & alerting** — server-side `AlertMonitor` evaluates every snapshot against the DGX_SPARK thermal/fan thresholds (previously dead constants) plus OOM / disk / TTFT / offline rules. Adds per-Spark `health` badges, an Overview fleet warning banner, a live WebSocket `alerts` channel, `GET /api/alerts` (+ history), and an optional outbound webhook (`ALERT_WEBHOOK_URL`, 5-min dedup).
+- **CPU temperature** — reads real hwmon/thermal temperature locally and over SSH (previously a hardcoded 0 °C); shown on the CPU panel, “—” when no readable source.
+- **Health panel** — per-Spark subsystem badges (junction/memory temp, fan, ECC, OOM, disk, TTFT) with overall Critical/Warning/Healthy status and a recent-alert feed.
+- **Expanded history** — GPU power, VRAM %, GPU memory temp, and CPU temp added to the client history store / sparklines.
+
+### Tests
+- `AlertMonitor.test.js` (20) — rule evaluation (temp/fan/ECC/OOM/disk/TTFT/offline), sorting, change detection, bounded history, webhook transitions + cooldown.
+- `SystemCollector.gpu.test.js` (6) — extended GPU line parsing, [N/A]→null degradation, P-state normalization, compute-apps parsing, default profile.
+
+---
+
 ## [1.4.4] — 2026-07-30
 
 ### Added

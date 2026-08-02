@@ -34,6 +34,7 @@ import {
   startEnergyFlush,
 } from "./collectors/EnergyTracker.js";
 import { buildBuckets } from "./collectors/EnergyAggregate.js";
+import { AlertMonitor, evaluateSparkHealth } from "./collectors/AlertMonitor.js";
 
 dotenv.config();
 
@@ -126,6 +127,10 @@ const registry = new SparkRegistry();
 // ─── Monitor map ─────────────────────────────────────────
 const monitors = new Map();
 
+// Fleets-wide alert engine. Constructed later (after `wss` exists) so its
+// onChange can push a WS `alerts` message; REST handlers read it directly.
+let alertMonitor = null;
+
 // ─── Start monitor for a Spark ───────────────────────────
 function startMonitor(spark) {
   if (monitors.has(spark.id)) return;
@@ -180,6 +185,18 @@ function clientKey(req) {
 // Never return SSH passwords in any response
 app.get("/api/sparks", (_req, res) => {
   res.json({ sparks: registry.publicSparks });
+});
+
+// ─── Fleet health / alerting ────────────────────────────
+app.get("/api/alerts", (_req, res) => {
+  res.json({
+    sparks: alertMonitor ? alertMonitor.getAlerts() : [],
+    history: alertMonitor ? alertMonitor.getHistory() : [],
+  });
+});
+
+app.get("/api/alerts/history", (_req, res) => {
+  res.json({ history: alertMonitor ? alertMonitor.getHistory() : [] });
 });
 
 // GPU energy history, pre-aggregated into day / week / month buckets (Wh).
@@ -1540,6 +1557,23 @@ wss.on("connection", async (ws) => {
   });
 });
 
+// ─── Fleet alert engine ─────────────────────────────────
+// Diffs each snapshot against the previous state; onChange pushes a WS `alerts`
+// message so open dashboard tabs get live health notifications without polling
+// /api/alerts. Optional outbound webhook is enabled with ALERT_WEBHOOK_URL.
+function broadcastAlerts(payload) {
+  try {
+    broadcastPayload(JSON.stringify({ type: "alerts", ...payload }));
+  } catch (err) {
+    console.error("[AlertMonitor] broadcast failed:", err.message);
+  }
+}
+
+alertMonitor = new AlertMonitor({
+  webhookUrl: process.env.ALERT_WEBHOOK_URL || "",
+  onChange: broadcastAlerts,
+});
+
 // ─── Broadcast snapshot (dynamic interval) ────────────────
 let broadcastTimer = null;
 let _lastBroadcastPayload = null;
@@ -1578,6 +1612,20 @@ async function buildSnapshotPayload() {
       }
     }
   }
+
+  // ── Fleet health / alerting ─────────────────────────────
+  // Attach compact per-Spark health badges (level + per-subsystem badge) so the
+  // UI can color junction/memory/fan/ecc/oom/disk/ttft without re-deriving the
+  // DGX_SPARK thresholds. The dedicated alert engine then diffs this against its
+  // prior state and pushes a WS `alerts` message / fires a webhook on change.
+  for (const spark of sparks) {
+    const health = evaluateSparkHealth(spark);
+    spark.health = { level: health.level, badges: health.badges };
+  }
+  if (alertMonitor) {
+    alertMonitor.update(sparks, Date.now());
+  }
+
   return JSON.stringify({
     type: "snapshot",
     sparks,

@@ -65,6 +65,25 @@ export function CpuPanel({ cpu, ram, sparkId, unifiedMemory }: CpuPanelProps) {
           {draw}W / {tdp}W
         </span>
       </div>
+      {(() => {
+        const temp = cpu?.temperature;
+        if (temp == null || !Number.isFinite(temp)) {
+          return (
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted">Temperature</span>
+              <span className="font-tabular text-[13px] text-muted" title="No readable temperature source on this host">—</span>
+            </div>
+          );
+        }
+        const tempColor =
+          temp > 70 ? "text-danger" : temp > 55 ? "text-warning" : "text-text";
+        return (
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted">Temperature</span>
+            <span className={`font-tabular text-[13px] ${tempColor}`}>{Math.round(temp)}°C</span>
+          </div>
+        );
+      })()}
 
       {(ramTotal > 0 || ram) && (
         <div className="space-y-2 border-t border-border pt-3">

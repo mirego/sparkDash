@@ -8,6 +8,7 @@ import { CpuPanel } from "./CpuPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { LlmPanel } from "./LlmPanel";
+import { HealthPanel } from "./HealthPanel";
 
 interface SparkPageProps {
   spark: SparkSnapshot;
@@ -94,6 +95,7 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-page-gap)" }}>
       <SparkHeader spark={spark} onEdit={onEdit} />
+      <HealthPanel spark={spark} />
       <div className="spark-page grid md:grid-cols-2" style={{ gap: "var(--density-page-gap)" }}>
         <GpuPanel gpu={metrics.gpu} sparkId={spark.id} temperatureUnit={temperatureUnit} />
         <CpuPanel cpu={metrics.cpu} ram={metrics.ram} sparkId={spark.id} unifiedMemory={metrics.unifiedMemory} />

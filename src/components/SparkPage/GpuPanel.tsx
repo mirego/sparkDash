@@ -120,6 +120,48 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit }: GpuPanelProps) {
         </div>
       )}
 
+      {/* Physical health telemetry: fan, clocks, pstate, memory temp, ECC */}
+      {(gpu?.fan != null || gpu?.clocks?.sm != null || gpu?.pstate != null || gpu?.temperatures?.memory != null || (gpu?.ecc?.corrected != null && gpu.ecc.corrected > 0) || (gpu?.ecc?.uncorrected != null && gpu.ecc.uncorrected > 0)) && (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-border pt-3 text-xs">
+          {gpu.fan != null && (
+            <div className="flex justify-between">
+              <span className="text-muted">Fan</span>
+              <span className="font-tabular text-text">{Math.round(gpu.fan)}%</span>
+            </div>
+          )}
+          {gpu.temperatures?.memory != null && (
+            <div className="flex justify-between">
+              <span className="text-muted">Mem temp</span>
+              <span className="font-tabular text-text">{Math.round(gpu.temperatures.memory)}°C</span>
+            </div>
+          )}
+          {gpu.pstate != null && (
+            <div className="flex justify-between">
+              <span className="text-muted">P-state</span>
+              <span className="font-tabular text-text">{gpu.pstate}</span>
+            </div>
+          )}
+          {gpu.clocks?.sm != null && (
+            <div className="flex justify-between">
+              <span className="text-muted">Clock</span>
+              <span className="font-tabular text-text">{gpu.clocks.sm} MHz</span>
+            </div>
+          )}
+          {gpu.ecc?.corrected != null && gpu.ecc.corrected > 0 && (
+            <div className="flex justify-between">
+              <span className="text-muted">ECC corr.</span>
+              <span className="font-tabular text-warning">{gpu.ecc.corrected}</span>
+            </div>
+          )}
+          {gpu.ecc?.uncorrected != null && gpu.ecc.uncorrected > 0 && (
+            <div className="flex justify-between">
+              <span className="text-muted">ECC uncorr.</span>
+              <span className="font-tabular text-danger">{gpu.ecc.uncorrected}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Top GPU processes by VRAM usage */}
       {gpu && gpu.processes && gpu.processes.length > 0 && (
         <div className="space-y-1.5 border-t border-border pt-3">

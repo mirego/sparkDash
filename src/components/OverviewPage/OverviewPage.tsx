@@ -491,6 +491,50 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
   );
 }
 
+/**
+ * Fleet-wide health banner. Aggregates per-Spark `health` (computed server-side
+ * from DGX_SPARK thresholds) into a single warning ribbon shown above the
+ * Spark cards: danger ≥ critical, else warn ≥ caution. Hidden when every online
+ * Spark is healthy (no silent noise).
+ */
+function FleetHealthBanner({ sparks }: { sparks: SparkSnapshot[] }) {
+  const online = sparks.filter((s) => s.online && s.health);
+  const danger = online.filter((s) => s.health!.level === "danger");
+  const warn = online.filter((s) => s.health!.level === "warn");
+  if (danger.length === 0 && warn.length === 0) return null;
+
+  const critical = danger.length > 0;
+  const header = critical
+    ? "Critical — action needed"
+    : "Warning";
+  const tone = critical
+    ? "border-danger/40 bg-danger/10 text-danger"
+    : "border-warning/40 bg-warning/10 text-warning";
+  const lines = [...danger, ...warn].map((s) => {
+    const alerts = (s.health?.badges ?? []).filter((b) => b.level !== "ok");
+    return { name: s.name, alerts };
+  });
+
+  return (
+    <div className={`flex flex-col gap-2 rounded-lg border p-3 ${tone}`}>
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 rounded-full ${critical ? "bg-danger" : "bg-warning"}`} />
+        <span className="text-xs font-semibold uppercase tracking-wide">{header}</span>
+        <span className="text-[11px] opacity-80">{danger.length + warn.length} of {online.length} online</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {lines.map((l) => (
+          <span key={l.name} className="inline-flex items-center gap-1.5 rounded bg-surface-elevated px-2 py-1 text-[11px]">
+            <span className="font-semibold text-text">{l.name}</span>
+            <span className="text-muted">·</span>
+            <span>{l.alerts.map((a) => a.label).join(", ")}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "celsius", onSelectSpark }: OverviewPageProps) {
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
   const [modelSwitchOpen, setModelSwitchOpen] = useState(false);
@@ -544,6 +588,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
         </div>
       </div>
+      <FleetHealthBanner sparks={visibleSparks} />
       <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
         {visibleSparks.map((spark) => (
           <SparkCard key={spark.id} spark={spark}

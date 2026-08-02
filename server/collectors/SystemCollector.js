@@ -5,6 +5,34 @@ import { normalizeMac, WOL_INTERFACE } from "../wol.js";
 import { sshExec } from "./ssh.js";
 
 /**
+ * Extended nvidia-smi GPU query for health telemetry.
+ *
+ * Adds passive-cooling (fan), multi-zone thermal (memory junction), clock
+ * rates, power state, and ECC error counters on top of the existing
+ * temperature/utilization/power fields. Field ORDER is significant —
+ * `_parseGpuLine` maps CSV columns to these names positionally.
+ *
+ * On GB10 some fields are N/A (e.g. `ecc.errors.*` when ECC isn't enabled,
+ * `clocks.mem` for unified memory) — every value is run through
+ * `_parseSmiNumber`/null-guards so a missing field degrades gracefully to
+ * `null` instead of reading as a false 0.
+ */
+const GPU_QUERY_FIELDS = [
+  "fan.speed",
+  "temperature.gpu",
+  "temperature.memory",
+  "utilization.gpu",
+  "power.draw",
+  "power.limit",
+  "clocks.sm",
+  "clocks.mem",
+  "pstate",
+  "ecc.errors.corrected.volatile.total",
+  "ecc.errors.uncorrected.volatile.total",
+];
+const GPU_QUERY = `--query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits`;
+
+/**
  * SystemCollector — collects hardware metrics for a Spark.
  * In Phase 2, this is the LOCAL path only (no SSH).
  * Remote path added in Phase 3.
@@ -129,14 +157,12 @@ export class SystemCollector {
 
   // ─── GPU helpers ─────────────────────────────────────────
   async _getGPUAll() {
-    const gpuOut = await this._nvidiaSmi(
-      "--query-gpu=temperature.gpu,utilization.gpu,power.draw,power.limit --format=csv,noheader,nounits"
-    );
+    const gpuOut = await this._nvidiaSmi(GPU_QUERY);
     const gpu = this._parseGpuLine(gpuOut);
     const vram = await this._queryNvidiaVram();
 
     // Estimate total system power: GPU draw + CPU draw + ~20W CX7/peripherals
-    let systemDraw = gpu.powerDraw;
+    let systemDraw = gpu.powerDraw || 0;
     try {
       const cpuPower = await this._getCPUPower();
       systemDraw += cpuPower.draw;
@@ -152,6 +178,12 @@ export class SystemCollector {
 
     return {
       temperature: gpu.temperature,
+      // Multi-zone thermal: junction (temperature.gpu) + memory-junction temps.
+      temperatures: { memory: gpu.temperatureMemory },
+      fan: gpu.fan,
+      clocks: { sm: gpu.clockSm, mem: gpu.clockMem },
+      pstate: gpu.pstate,
+      ecc: { corrected: gpu.eccCorrected, uncorrected: gpu.eccUncorrected },
       usage: gpu.usage,
       power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
       vram,
@@ -276,15 +308,37 @@ export class SystemCollector {
     return Number.isFinite(n) ? n : null;
   }
 
+  /**
+   * Parse the extended nvidia-smi GPU CSV line (see GPU_QUERY_FIELDS for order).
+   * Every column is null-guarded so a missing/[N/A] field degrades gracefully
+   * instead of reading as a false 0 — this is the "no silent failures" heart of
+   * the health telemetry: an absent fan or ECC read must stay null, not 0rpm / 0errors.
+   */
   _parseGpuLine(output) {
     const lines = output.trim().split("\n").filter(Boolean);
-    if (!lines[0]) return { temperature: 0, usage: 0, powerDraw: 0, powerLimit: 120 };
-    const parts = lines[0].split(",").map((s) => s.trim());
-    const temperature = parseFloat(parts[0]) || 0;
-    const usage = parseFloat(parts[1]) || 0;
-    const powerDraw = parseFloat(parts[2]) || 0;
-    const powerLimit = parseFloat(parts[3]) || 120;
-    return { temperature, usage, powerDraw, powerLimit };
+    const line = lines[0] || "";
+    const parts = line.split(",").map((s) => s.trim());
+    const num = (i) => this._parseSmiNumber(parts[i]);
+    const rawPstate = parts[8] != null ? String(parts[8]).trim() : "";
+    const pstate =
+      /^[0-9]+$/i.test(rawPstate)
+        ? `P${rawPstate}`
+        : /^\[?n\/a\]?$/i.test(rawPstate) || rawPstate === ""
+          ? null
+          : rawPstate;
+    return {
+      fan: num(0),                      // fan.speed (% or RPM; N/A on some SKUs)
+      temperature: num(1) ?? 0,         // temperature.gpu (junction)
+      temperatureMemory: num(2),        // temperature.memory (memory junction)
+      usage: num(3) ?? 0,               // utilization.gpu
+      powerDraw: num(4),                // power.draw (null when N/A) — no false 0
+      powerLimit: num(5) ?? 120,        // power.limit
+      clockSm: num(6),                  // clocks.sm (MHz)
+      clockMem: num(7),                 // clocks.mem (MHz)
+      pstate,                           // e.g. P0/P8, or null when unknown
+      eccCorrected: num(9),             // ecc.errors.corrected.volatile.total
+      eccUncorrected: num(10),          // ecc.errors.uncorrected.volatile.total
+    };
   }
 
   _parseComputeApps(output) {
@@ -379,7 +433,38 @@ export class SystemCollector {
       }
     } catch {}
 
-    return 0;
+    // No readable temperature source → null (not 0°C). A 0 read is indistinguishable
+    // from a genuinely cold host and violates the "no silent failures" rule; the UI
+    // renders null as "—" instead of a real cold value.
+    return null;
+  }
+
+  /**
+   * Read CPU temperature over SSH (remote Sparks). Mirrors the local hwmon/thermal
+   * walk using shell reads instead of direct sysfs access. Returns null when the
+   * remote host exposes no readable temperature source — NOT a fabricated 0.
+   * @returns {Promise<number | null>} degrees C, or null when unavailable.
+   */
+  async _getRemoteCpuTemperature() {
+    const script = [
+      // Wrapper that echoes only the first valid temp in °C across all zones.
+      `for z in /sys/class/thermal/thermal_zone*/temp; do [ -r "$z" ] || continue;`,
+      `  v=$(cat "$z" 2>/dev/null); [ -n "$v" ] && { d=$((v/1000)); [ "$d" -gt 0 ] && [ "$d" -lt 200 ] && { echo "$d"; exit 0; }; };`,
+      `done;`,
+      // Fallback: sensors (lm-sensors) first Core temp line, if installed.
+      `command -v sensors >/dev/null 2>&1 && sensors 2>/dev/null | grep -iEo 'Core [0-9]+: +[+-]?[0-9.]+' | head -1 || true`,
+    ].join(" ");
+    try {
+      const out = await sshExec(this.spark, script);
+      const trimmed = String(out).trim();
+      if (!trimmed) return null;
+      const m = trimmed.match(/[+-]?(\d+)(?:\.\d+)?/);
+      if (!m) return null;
+      const t = parseFloat(m[1]);
+      return Number.isFinite(t) && t > 0 && t < 200 ? t : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -812,7 +897,7 @@ export class SystemCollector {
   async _getRemoteGpu() {
     try {
       const cmd = [
-        "nvidia-smi --query-gpu=temperature.gpu,utilization.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null",
+        `nvidia-smi --query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits 2>/dev/null`,
         "echo '---'",
         "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null",
         "echo '---'",
@@ -875,6 +960,11 @@ export class SystemCollector {
 
       return {
         temperature: gpu.temperature,
+        temperatures: { memory: gpu.temperatureMemory },
+        fan: gpu.fan,
+        clocks: { sm: gpu.clockSm, mem: gpu.clockMem },
+        pstate: gpu.pstate,
+        ecc: { corrected: gpu.eccCorrected, uncorrected: gpu.eccUncorrected },
         usage: gpu.usage,
         power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
         vram: { used: usedMB, total: totalMB, percentage, available: availableMB },
@@ -905,13 +995,16 @@ export class SystemCollector {
       const usage = totalDiff > 0 ? Math.round((usedDiff / totalDiff) * 100) : 0;
       this.lastCpuStat = cpuStat;
 
+      // CPU temperature over SSH (null when no readable source — never a fake 0).
+      const temperature = await this._getRemoteCpuTemperature();
+
       // ARM/Neoverse power estimation
       const isArm = /CPU architecture:\s*[89]|aarch64|ARMv[89]|armv[89]/i.test(cpuinfoOut);
       const tdp = isArm ? 65 : 185;
       const idleWatts = tdp * 0.08;
       const draw = idleWatts + (tdp - idleWatts) * Math.min(usage / 100, 1);
 
-      return { usage, temperature: 0, draw: Math.round(draw * 10) / 10, tdp: Math.round(tdp) };
+      return { usage, temperature, draw: Math.round(draw * 10) / 10, tdp: Math.round(tdp) };
     } catch (err) {
       console.error(`[SystemCollector] Remote CPU error for ${this.spark.id}:`, err.message);
       return this._defaultCpu();
@@ -1279,6 +1372,11 @@ export class SystemCollector {
   _defaultGpu() {
     return {
       temperature: 0,
+      temperatures: { memory: null },
+      fan: null,
+      clocks: { sm: null, mem: null },
+      pstate: null,
+      ecc: { corrected: null, uncorrected: null },
       usage: 0,
       power: { draw: 0, limit: 120, systemDraw: 0 },
       vram: { used: 0, total: 0, percentage: 0, available: 0 },
@@ -1287,7 +1385,7 @@ export class SystemCollector {
   }
 
   _defaultCpu() {
-    return { usage: 0, temperature: 0, draw: 0, tdp: 0 };
+    return { usage: 0, temperature: null, draw: 0, tdp: 0 };
   }
 
   _defaultRam() {
