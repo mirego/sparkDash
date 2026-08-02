@@ -2,12 +2,10 @@ import { createPortal } from "react-dom";
 import { useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
-import { shutdownAllSparks, wakeAllSparks } from "../../api/client";
-import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { MetricBar } from "../ui/MetricBar";
 import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
-import { ActivityIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { ActivityIcon } from "../ui/icons";
 import { ModelPanel } from "../ModelPanel";
 import { ModelSwitchModal } from "../ModelSwitchModal";
 
@@ -466,45 +464,12 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
 
 export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "celsius", onSelectSpark }: OverviewPageProps) {
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
-  const [batchLoading, setBatchLoading] = useState(false);
-  const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [modelSwitchOpen, setModelSwitchOpen] = useState(false);
   const [dialogSparkId, setDialogSparkId] = useState<string | null>(null);
   const [dialogTab, setDialogTab] = useState<"gen" | "prefill">("gen");
   const [dialogTimeRange, setDialogTimeRange] = useState(30);
-  const [shutdownOpen, setShutdownOpen] = useState(false);
 
   const dialogSpark = dialogSparkId ? visibleSparks.find((s) => s.id === dialogSparkId) ?? null : null;
-
-  async function handleShutdownAll() {
-    const onlineCount = sparks.filter((s) => s.online).length;
-    if (onlineCount === 0) return;
-    setBatchLoading(true); setBatchMsg(null);
-    try {
-      const res = await shutdownAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok && !r.skipped).length;
-      const skipped = res.results.filter((r) => r.skipped).length;
-      const parts = [`${ok} shut down`];
-      if (fail) parts.push(`${fail} failed`);
-      if (skipped) parts.push(`${skipped} skipped`);
-      setBatchMsg({ text: parts.join(", "), tone: fail === 0 ? "ok" : "err" });
-    } catch (err: unknown) {
-      setBatchMsg({ text: err instanceof Error ? err.message : "Batch shutdown failed", tone: "err" });
-    } finally { setBatchLoading(false); setTimeout(() => setBatchMsg(null), 6000); }
-  }
-
-  async function handleWakeAll() {
-    setBatchLoading(true); setBatchMsg(null);
-    try {
-      const res = await wakeAllSparks();
-      const ok = res.results.filter((r) => r.ok).length;
-      const fail = res.results.filter((r) => !r.ok).length;
-      setBatchMsg({ text: fail === 0 ? `${ok} wake packet(s) sent` : `${ok} sent, ${fail} failed`, tone: fail === 0 ? "ok" : "err" });
-    } catch (err: unknown) {
-      setBatchMsg({ text: err instanceof Error ? err.message : "Batch wake failed", tone: "err" });
-    } finally { setBatchLoading(false); setTimeout(() => setBatchMsg(null), 6000); }
-  }
 
   if (visibleSparks.length === 0) {
     const allOffline = hideOffline && sparks.length > 0;
@@ -524,19 +489,8 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       <div className="flex flex-wrap items-end justify-between gap-6">
         <h1 className="font-normal leading-tight tracking-tight text-text-strong" style={{ fontSize: "var(--density-overview-title)" }}>Overview</h1>
         <div className="flex items-center gap-3">
-          {batchMsg && <span className={`text-[11px] ${batchMsg.tone === "ok" ? "text-success" : "text-danger"}`}>{batchMsg.text}</span>}
           {sparks.length > 0 && (
             <div className="flex items-center gap-1.5">
-              <button type="button" onClick={() => void handleWakeAll()} disabled={batchLoading}
-                title="Wake all Sparks that have a MAC configured (WoL)"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50">
-                <PowerOnIcon className="h-3 w-3" /> Wake All
-              </button>
-              <button type="button" onClick={() => setShutdownOpen(true)} disabled={batchLoading || !sparks.some((s) => s.online)}
-                title="Shut down all online Sparks"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-danger/20 hover:text-danger transition-colors disabled:opacity-50">
-                <PowerOffIcon className="h-3 w-3" /> Shutdown All
-              </button>
               <button type="button" onClick={() => setModelSwitchOpen(true)}
                 title="Switch the model running on the fleet"
                 className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-accent/20 hover:text-accent transition-colors">
@@ -564,13 +518,6 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         dialogTimeRange={dialogTimeRange} setDialogTimeRange={setDialogTimeRange}
         onClose={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }} />
       }
-      <ConfirmShutdownDialog
-        open={shutdownOpen}
-        title="All Sparks"
-        description={`Gracefully shut down all ${sparks.filter((s) => s.online).length} online Spark(s)? Offline nodes will be skipped.`}
-        onConfirm={handleShutdownAll}
-        onClose={() => setShutdownOpen(false)}
-      />
     </div>
   );
 }
