@@ -3,10 +3,11 @@
  * the energy modal (all-time boxes).
  */
 
-/** Approximate blended retail price of electricity in Montreal, QC
- * (Hydro-Québec, Res. Rate D), CAD/kWh. Rough all-in figure — adjust freely.
+/**
+ * Residential electricity price in Montreal, QC (Hydro-Québec, Res. Rate D),
+ * CAD/kWh — the user's Hydro-Québec rate is 11.142c/kWh.
  */
-export const PRICE_CAD_PER_KWH = 0.10;
+export const PRICE_CAD_PER_KWH = 0.11142;
 
 /** Format Wh → human short string (auto-scales to kWh). */
 export function fmtEnergyWh(v: number): string {
