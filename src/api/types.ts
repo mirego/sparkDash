@@ -524,3 +524,22 @@ export interface ShowcaseStartResponse {
   sessionId: string;
   status: "running";
 }
+
+/** One aggregated energy bucket (Wh), e.g. a day, an ISO week, or a month. */
+export interface EnergyBucket {
+  /** Period start date as "YYYY-MM-DD" (day itself / week's Monday / month's 1st). */
+  date: string;
+  /** Short display label, e.g. "08/02" (day/week) or "Aug" (month). */
+  label: string;
+  /** Total Wh across all Sparks for this period. */
+  value: number;
+  /** Per-Spark Wh for this period. */
+  sparks: Record<string, number>;
+}
+
+/** GPU energy history pre-aggregated into the three granularities. */
+export interface EnergyReport {
+  day: EnergyBucket[];
+  week: EnergyBucket[];
+  month: EnergyBucket[];
+}

@@ -8,6 +8,7 @@ import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsSto
 import { ActivityIcon } from "../ui/icons";
 import { ModelPanel } from "../ModelPanel";
 import { ModelSwitchModal } from "../ModelSwitchModal";
+import { EnergyModal } from "../EnergyModal";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -465,6 +466,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
 export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "celsius", onSelectSpark }: OverviewPageProps) {
   const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
   const [modelSwitchOpen, setModelSwitchOpen] = useState(false);
+  const [energyOpen, setEnergyOpen] = useState(false);
   const [dialogSparkId, setDialogSparkId] = useState<string | null>(null);
   const [dialogTab, setDialogTab] = useState<"gen" | "prefill">("gen");
   const [dialogTimeRange, setDialogTimeRange] = useState(30);
@@ -503,10 +505,12 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
             </div>
           )}
           {todayWh > 0 && (
-            <span className="energy-chip" title="GPU energy consumed today (all Sparks, server-accumulated)">
+            <button type="button" onClick={() => setEnergyOpen(true)} className="energy-chip"
+              title="GPU energy consumed today (all Sparks) — click for daily/weekly/monthly history"
+              style={{ border: "none", cursor: "pointer" }}>
               <span className="energy-ico">⚡</span>
               {fmtWh(todayWh)} today
-            </span>
+            </button>
           )}
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
         </div>
@@ -522,6 +526,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       <ModelPanel />
       <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}
         currentModel={null} />
+      {energyOpen && <EnergyModal onClose={() => setEnergyOpen(false)} />}
       {/* Token throughput dialog overlay */}
       {dialogSpark != null && <TokenDialog spark={dialogSpark}
         dialogTab={dialogTab} setDialogTab={setDialogTab}

@@ -731,6 +731,9 @@ input[type="checkbox"] {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.energy-chip:hover {
+  background: var(--color-surface-hover);
+}
 .energy-chip .energy-ico {
   font-size: 12px;
   line-height: 1;

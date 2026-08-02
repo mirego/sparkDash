@@ -1,6 +1,7 @@
 import type {
   DecodeBenchJob,
   DecodeBenchListResponse,
+  EnergyReport,
   LlmMetrics,
   Settings,
   ShowcaseListResponse,
@@ -42,6 +43,11 @@ export function fetchSparkMetrics(id: string): Promise<{
   metrics?: { llm?: LlmMetrics[] };
 }> {
   return apiFetch(`/api/sparks/${id}/metrics`);
+}
+
+/** GPU energy history pre-aggregated into day / week / month buckets. */
+export function fetchEnergyHistory(): Promise<EnergyReport> {
+  return apiFetch("/api/energy");
 }
 
 export function addSpark(config: SparkConfig): Promise<{ success: boolean; spark: SparkConfig }> {
