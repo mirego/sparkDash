@@ -14,7 +14,6 @@ const PERIODS: { id: Period; label: string }[] = [
 
 /** Max bars shown per period (the most recent N). */
 const WINDOW: Record<Period, number> = { day: 30, week: 16, month: 12, year: 8 };
-const PERIOD_LABEL: Record<Period, string> = { day: "days", week: "weeks", month: "months", year: "years" };
 
 /**
  * Approximate blended retail price of electricity in Montreal, QC
@@ -61,11 +60,9 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const buckets = report ? report[period] : [];
-  const periodTotal = buckets.reduce((s, b) => s + b.value, 0);
-  const periodCount = buckets.length;
   // All-time = sum of all daily buckets (GPU draw across all Sparks, retention-bound).
   const allTimeWh = report ? report.day.reduce((s, b) => s + b.value, 0) : 0;
+  const buckets = report ? report[period] : [];
 
   const buttonStyle = (active: boolean): React.CSSProperties => ({
     borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 500, border: "none", cursor: "pointer",
@@ -82,8 +79,6 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
   const tileLabel: React.CSSProperties = { fontSize: 9, letterSpacing: ".05em", color: "var(--color-muted, #888)", whiteSpace: "nowrap" };
   const tileValue: React.CSSProperties = { fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
 
-  const periodNoun = periodCount === 1 ? PERIOD_LABEL[period].replace(/s$/, "") : PERIOD_LABEL[period];
-
   return (
     <div style={{ position: "fixed", zIndex: 99999, inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)" }}
       onClick={onClose}>
@@ -92,13 +87,10 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px", flexShrink: 0 }}>
           <div style={{ minWidth: 0 }}>
             <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: "var(--color-text-strong, #fff)" }}>⚡ GPU Energy</h2>
-            <p style={{ margin: "2px 0 0", fontSize: 11, color: "var(--color-muted, #888)" }}>
-              {loading ? "Loading…" : report ? `${periodTotal === 0 ? "No" : fmtEnergyWh(periodTotal)} across ${periodCount} ${periodNoun} · ≈ ${fmtCost(periodTotal)} (GPU draw)` : ""}
-            </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
             <div style={tileStyle} title="Total GPU energy consumed (all Sparks, retention-bound)">
-              <span style={tileLabel}>CONSUMED · ALL TIME</span>
+              <span style={tileLabel}>ALL TIME</span>
               <span style={{ ...tileValue, color: "var(--color-accent, #e8a830)" }}>{fmtEnergyWh(allTimeWh)}</span>
             </div>
             <div style={tileStyle} title={`Approximate price @ ~${(PRICE_CAD_PER_KWH * 100).toFixed(1)}¢/kWh (Hydro-Québec, Montreal)`}>

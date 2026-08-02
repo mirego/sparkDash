@@ -73,9 +73,7 @@ export function EnergyBarChart({ buckets, window = Infinity }: {
               </span>
             ))}
           </span>
-        ) : (
-          <span className="text-muted">{n} period{n !== 1 ? "s" : ""} · hover a bar</span>
-        )}
+        ) : null}
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ height: "auto", maxHeight: 240 }}
         onMouseLeave={() => setHover(null)} role="img" aria-label="GPU energy bar chart">
