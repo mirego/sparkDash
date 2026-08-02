@@ -141,6 +141,20 @@ export function getTodayWhBySpark(nowMs = Date.now()) {
   return { ...(_state[_getDateKey(nowMs)] || {}) };
 }
 
+/**
+ * Full daily energy history, sorted ascending by date.
+ * @returns {{ date: string, total: number, sparks: Record<string, number> }[]}
+ */
+export function getEnergyHistory() {
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const dates = Object.keys(_state).filter((k) => DAY_RE.test(k)).sort();
+  return dates.map((date) => {
+    const sparks = { ...(_state[date] || {}) };
+    const total = Object.values(sparks).reduce((s, v) => s + v, 0);
+    return { date, total, sparks };
+  });
+}
+
 load();
 
 /** Test hook — reload state from disk (used to exercise migration paths). */

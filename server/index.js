@@ -29,9 +29,11 @@ import {
 import {
   recordPower,
   getTodayWhBySpark,
+  getEnergyHistory,
   flush as flushEnergy,
   startEnergyFlush,
 } from "./collectors/EnergyTracker.js";
+import { buildBuckets } from "./collectors/EnergyAggregate.js";
 
 dotenv.config();
 
@@ -178,6 +180,11 @@ function clientKey(req) {
 // Never return SSH passwords in any response
 app.get("/api/sparks", (_req, res) => {
   res.json({ sparks: registry.publicSparks });
+});
+
+// GPU energy history, pre-aggregated into day / week / month buckets (Wh).
+app.get("/api/energy", (_req, res) => {
+  res.json(buildBuckets(getEnergyHistory()));
 });
 
 // Ephemeral connectivity test — does not persist or start a monitor
