@@ -54,6 +54,13 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
     return () => { cancelled = true; };
   }, []);
 
+  // Close on Escape (no explicit close button; backdrop click also closes).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const buckets = report ? report[period] : [];
   const periodTotal = buckets.reduce((s, b) => s + b.value, 0);
   const periodCount = buckets.length;
@@ -65,6 +72,15 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
     background: active ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
     color: active ? "#fff" : "var(--color-muted, #888)",
   });
+
+  // Small metric tile for the top-right boxes.
+  const tileStyle: React.CSSProperties = {
+    display: "flex", flexDirection: "column", gap: 2, minWidth: 84, padding: "6px 12px",
+    borderRadius: 8, background: "var(--color-surface-hover, #303030)",
+    border: "1px solid var(--color-border, #353535)", textAlign: "right" as const,
+  };
+  const tileLabel: React.CSSProperties = { fontSize: 9, letterSpacing: ".05em", color: "var(--color-muted, #888)", whiteSpace: "nowrap" };
+  const tileValue: React.CSSProperties = { fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
 
   const periodNoun = periodCount === 1 ? PERIOD_LABEL[period].replace(/s$/, "") : PERIOD_LABEL[period];
 
@@ -80,14 +96,15 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
               {loading ? "Loading…" : report ? `${periodTotal === 0 ? "No" : fmtEnergyWh(periodTotal)} across ${periodCount} ${periodNoun} · ≈ ${fmtCost(periodTotal)} (GPU draw)` : ""}
             </p>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 10, color: "var(--color-muted, #888)" }}>All time · approx.</div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--color-accent, #e8a830)", whiteSpace: "nowrap" }}>{fmtEnergyWh(allTimeWh)}</div>
-              <div style={{ fontSize: 10, color: "var(--color-muted, #888)" }}>≈ {fmtCost(allTimeWh)}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+            <div style={tileStyle} title="Total GPU energy consumed (all Sparks, retention-bound)">
+              <span style={tileLabel}>CONSUMED · ALL TIME</span>
+              <span style={{ ...tileValue, color: "var(--color-accent, #e8a830)" }}>{fmtEnergyWh(allTimeWh)}</span>
             </div>
-            <button type="button" onClick={onClose}
-              style={{ background: "none", border: "none", color: "var(--color-muted, #888)", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>✕</button>
+            <div style={tileStyle} title={`Approximate price @ ~${(PRICE_CAD_PER_KWH * 100).toFixed(1)}¢/kWh (Hydro-Québec, Montreal)`}>
+              <span style={tileLabel}>APPROX. PRICE</span>
+              <span style={{ ...tileValue, color: "var(--color-text-strong, #fff)" }}>{fmtCost(allTimeWh)}</span>
+            </div>
           </div>
         </div>
         <div style={{ padding: "0 20px 20px", overflow: "auto", flex: 1 }}>
