@@ -9,6 +9,7 @@ import { ActivityIcon } from "../ui/icons";
 import { ModelPanel } from "../ModelPanel";
 import { ModelSwitchModal } from "../ModelSwitchModal";
 import { EnergyModal } from "../EnergyModal";
+import { fmtEnergyWh, fmtCost } from "../../utils/energy";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -487,8 +488,6 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const onlineCount = visibleSparks.filter((s) => s.online).length;
   // Today's GPU energy across all visible sparks (Wh), server-accumulated.
   const todayWh = visibleSparks.reduce((sum, s) => sum + (s.energyTodayWh ?? 0), 0);
-  const fmtWh = (wh: number): string =>
-    wh >= 1000 ? `${(wh / 1000).toFixed(2)} kWh` : `${Math.round(wh)} Wh`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
@@ -509,7 +508,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
               title="GPU energy consumed today (all Sparks) — click for daily/weekly/monthly history"
               style={{ border: "none", cursor: "pointer" }}>
               <span className="energy-ico">⚡</span>
-              {fmtWh(todayWh)} today
+              {fmtEnergyWh(todayWh)} / {fmtCost(todayWh)} today
             </button>
           )}
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchEnergyHistory } from "../api/client";
 import type { EnergyReport } from "../api/types";
-import { EnergyBarChart, fmtEnergyWh } from "./EnergyBarChart";
+import { EnergyBarChart } from "./EnergyBarChart";
+import { fmtEnergyWh, fmtCost, PRICE_CAD_PER_KWH } from "../utils/energy";
 
 type Period = "day" | "week" | "month" | "year";
 
@@ -14,24 +15,6 @@ const PERIODS: { id: Period; label: string }[] = [
 
 /** Max bars shown per period (the most recent N). */
 const WINDOW: Record<Period, number> = { day: 30, week: 16, month: 12, year: 8 };
-
-/**
- * Approximate blended retail price of electricity in Montreal, QC
- * (Hydro-Québec, Res. Rate D), CAD/kWh. Rough all-in figure — adjust freely.
- */
-const PRICE_CAD_PER_KWH = 0.10;
-
-/** Format a Wh amount as an approximate CAD cost. */
-function fmtCost(wh: number): string {
-  const cost = (wh / 1000) * PRICE_CAD_PER_KWH;
-  const digits = cost < 1 && cost > 0 ? 3 : 2;
-  return new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency: "CAD",
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  }).format(cost);
-}
 
 /**
  * GPU energy history modal — opens from the ⚡ pill. Fetches /api/energy on

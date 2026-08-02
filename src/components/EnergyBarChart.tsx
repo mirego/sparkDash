@@ -1,10 +1,8 @@
 import { useState } from "react";
 import type { EnergyBucket } from "../api/types";
+import { fmtEnergyWh } from "../utils/energy";
 
-/** Format Wh → human short string (auto-scales to kWh). */
-export function fmtEnergyWh(v: number): string {
-  return v >= 1000 ? `${(v / 1000).toFixed(2)} kWh` : `${Math.round(v)} Wh`;
-}
+export { fmtEnergyWh };
 
 /** Compact axis label: 35 → "35", 3500 → "3.5k". */
 function compact(v: number): string {
