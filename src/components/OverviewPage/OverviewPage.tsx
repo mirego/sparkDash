@@ -499,7 +499,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
               title="GPU energy consumed today (all Sparks) — click for daily/weekly/monthly history"
               style={{ border: "none", cursor: "pointer" }}>
               <span className="energy-ico">⚡</span>
-              {fmtEnergyWh(todayWh)} / {fmtCost(todayWh)} today
+              {fmtEnergyWh(todayWh)} / {fmtCost(todayWh)}
             </button>
           )}
         </div>
