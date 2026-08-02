@@ -492,7 +492,17 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
       <div className="flex flex-wrap items-end justify-between gap-6">
-        <h1 className="font-normal leading-tight tracking-tight text-text-strong" style={{ fontSize: "var(--density-overview-title)" }}>Overview</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="font-normal leading-tight tracking-tight text-text-strong" style={{ fontSize: "var(--density-overview-title)" }}>Overview</h1>
+          {todayWh > 0 && (
+            <button type="button" onClick={() => setEnergyOpen(true)} className="energy-chip"
+              title="GPU energy consumed today (all Sparks) — click for daily/weekly/monthly history"
+              style={{ border: "none", cursor: "pointer" }}>
+              <span className="energy-ico">⚡</span>
+              {fmtEnergyWh(todayWh)} / {fmtCost(todayWh)} today
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           {sparks.length > 0 && (
             <div className="flex items-center gap-1.5">
@@ -502,14 +512,6 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
                 <ActivityIcon className="h-3 w-3" /> Switch Model
               </button>
             </div>
-          )}
-          {todayWh > 0 && (
-            <button type="button" onClick={() => setEnergyOpen(true)} className="energy-chip"
-              title="GPU energy consumed today (all Sparks) — click for daily/weekly/monthly history"
-              style={{ border: "none", cursor: "pointer" }}>
-              <span className="energy-ico">⚡</span>
-              {fmtEnergyWh(todayWh)} / {fmtCost(todayWh)} today
-            </button>
           )}
           <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
         </div>
