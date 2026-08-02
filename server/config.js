@@ -19,6 +19,15 @@ const TOKEN_LIFETIMES_PATH =
 const SECRETS_KEY_PATH =
   process.env.SECRETS_KEY_PATH || path.join(ROOT, "config", ".secrets-key");
 
+/** Generated fleet model registry (produced by the control-plane fleet-sync.py).
+ *  May be absent at startup — ModelRegistry tolerates a missing file and polls
+ *  for it to appear. See config/model-registry.json. */
+const MODEL_REGISTRY_PATH =
+  process.env.MODEL_REGISTRY_PATH || path.join(ROOT, "config", "model-registry.json");
+/** Persisted runtime state for ModelRegistry (registry + union with live probes). */
+const MODEL_REGISTRY_STATE_PATH = process.env.MODEL_REGISTRY_STATE_PATH ||
+  path.join(ROOT, "config", "model-registry-state.json");
+
 // ─── LLM probe timeout ──────────────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
 const SSH_CONNECT_TIMEOUT = 5; // seconds
@@ -80,6 +89,8 @@ export {
   SPARKS_SECRETS_PATH,
   SECRETS_KEY_PATH,
   TOKEN_LIFETIMES_PATH,
+  MODEL_REGISTRY_PATH,
+  MODEL_REGISTRY_STATE_PATH,
   LLM_PROBE_TIMEOUT_MS,
   SSH_CONNECT_TIMEOUT,
   POLL_INTERVAL_GPU,

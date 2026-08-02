@@ -10,6 +10,7 @@ import { ModelPanel } from "../ModelPanel";
 import { ModelSwitchModal } from "../ModelSwitchModal";
 import { EnergyModal } from "../EnergyModal";
 import { InferenceHealthPanel } from "./InferenceHealthPanel";
+import { ModelFleetPanel } from "../ModelFleet/ModelFleetPanel";
 import { fmtEnergyWh, fmtCost } from "../../utils/energy";
 
 interface OverviewPageProps {
@@ -599,6 +600,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       </div>
       <ModelPanel />
       <InferenceHealthPanel sparks={visibleSparks} />
+      <ModelFleetPanel enabled={true} />
       <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}
         currentModel={null} />
       {energyOpen && <EnergyModal onClose={() => setEnergyOpen(false)} />}

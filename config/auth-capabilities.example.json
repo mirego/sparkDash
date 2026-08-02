@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "generated_ts": "2026-08-02T12:50:20-0400",
+  "capabilities": {
+    "default": [
+      "deepseek-v4-flash-0731",
+      "laguna-s-2.1"
+    ],
+    "long-context": [
+      "qwen3.6-35b-a3b-q8",
+      "laguna-s-2.1"
+    ]
+  },
+  "alias_to_id": {
+    "deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "deepseek-v4-flash-dspark": "deepseek-v4-flash-0731",
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
+    "DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
+    "claude-deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "laguna-s-2.1": "laguna-s-2.1",
+    "poolside/Laguna-S-2.1-NVFP4": "laguna-s-2.1",
+    "qwen3.6-35b-a3b-q8": "qwen3.6-35b-a3b-q8",
+    "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf": "qwen3.6-35b-a3b-q8",
+    "Qwen3.6-35B-A3B-UD-Q8_K_XL": "qwen3.6-35b-a3b-q8",
+    "/home/gilfoyle/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf": "qwen3.6-35b-a3b-q8",
+    "/home/gilfoyle/llmModels/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf": "qwen3.6-35b-a3b-q8",
+    "/home/gilfoyle/llmModels/models/qwen3.6-35b-a3b-q8.gguf": "qwen3.6-35b-a3b-q8",
+    "qwen3.6-35b-a3b-nvfp4": "qwen3.6-35b-a3b-nvfp4",
+    "unsloth/Qwen3.6-35B-A3B-NVFP4": "qwen3.6-35b-a3b-nvfp4",
+    "Qwen3.6-35B-A3B-NVFP4": "qwen3.6-35b-a3b-nvfp4"
+  }
+}

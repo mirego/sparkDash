@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "generated_ts": "2026-08-02T12:50:20-0400",
+  "backends": [
+    {
+      "name": "deepseek-v4-flash-0731@A:8888",
+      "model_id": "deepseek-v4-flash-0731",
+      "base_url": "http://127.0.0.1:8888/v1",
+      "engine": "vllm",
+      "node": "A",
+      "port": 8888
+    },
+    {
+      "name": "deepseek-v4-flash-0731@B:8888",
+      "model_id": "deepseek-v4-flash-0731",
+      "base_url": "http://192.168.100.11:8888/v1",
+      "engine": "vllm",
+      "node": "B",
+      "port": 8888
+    },
+    {
+      "name": "laguna-s-2.1@A:8891",
+      "model_id": "laguna-s-2.1",
+      "base_url": "http://127.0.0.1:8891/v1",
+      "engine": "vllm",
+      "node": "A",
+      "port": 8891
+    },
+    {
+      "name": "laguna-s-2.1@B:8891",
+      "model_id": "laguna-s-2.1",
+      "base_url": "http://192.168.100.11:8891/v1",
+      "engine": "vllm",
+      "node": "B",
+      "port": 8891
+    },
+    {
+      "name": "qwen3.6-35b-a3b-q8@A:8892",
+      "model_id": "qwen3.6-35b-a3b-q8",
+      "base_url": "http://127.0.0.1:8892/v1",
+      "engine": "llama",
+      "node": "A",
+      "port": 8892
+    },
+    {
+      "name": "qwen3.6-35b-a3b-nvfp4@B:8893",
+      "model_id": "qwen3.6-35b-a3b-nvfp4",
+      "base_url": "http://192.168.100.11:8893/v1",
+      "engine": "vllm",
+      "node": "B",
+      "port": 8893
+    },
+    {
+      "name": "qwen3.6-35b-a3b-nvfp4@A:8893",
+      "model_id": "qwen3.6-35b-a3b-nvfp4",
+      "base_url": "http://127.0.0.1:8893/v1",
+      "engine": "vllm",
+      "node": "A",
+      "port": 8893
+    }
+  ]
+}

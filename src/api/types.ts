@@ -342,6 +342,67 @@ export interface WsAlertMessage {
 }
 
 // ─── API responses ────────────────────────────────────────
+// ─── Model fleet (multi-model registry) ─────────────────
+export interface ModelHealth {
+  level: "green" | "yellow" | "red";
+  healthy: number;
+  required: number;
+  total: number;
+}
+
+export interface ModelReplica {
+  node: string;
+  host: string;
+  port: number;
+  host_port: string;
+  pin: string;
+  healthy: boolean | null;
+}
+
+export interface ModelUsageUser {
+  clientIp: string;
+  label: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  lastSeen: number;
+}
+
+export interface ModelUsage {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  lastSeen: number;
+  users: ModelUsageUser[];
+}
+
+export interface FleetModel {
+  id: string;
+  aliases: string[];
+  capability: string[];
+  engine: string;
+  recipe: string;
+  weights: string;
+  quantization: string;
+  hbm_gb: number;
+  tensor_parallel: number;
+  min_healthy: number;
+  health: ModelHealth;
+  replicas: ModelReplica[];
+  usage: ModelUsage;
+}
+
+export interface ModelFleetResponse {
+  ts: number;
+  source: string | null;
+  registryLoaded: boolean;
+  registryError: string | null;
+  routing: { aliases?: Record<string, string[]> };
+  models: FleetModel[];
+}
+
 export interface Settings {
   pollIntervalMs: number;
   defaultLlmPort: number;

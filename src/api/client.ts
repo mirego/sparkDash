@@ -3,6 +3,7 @@ import type {
   DecodeBenchListResponse,
   EnergyReport,
   LlmMetrics,
+  ModelFleetResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -354,4 +355,10 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+// ─── Model fleet (multi-model registry) ─────────────────
+/** Per-model fleet: registry + live health badges + coalesced per-user usage. */
+export function fetchModelFleet(): Promise<ModelFleetResponse> {
+  return apiFetch("/api/models/fleet");
 }

@@ -1,0 +1,3 @@
+# placement guard: full-registry working set does not fit
+# model 'laguna-s-2.1' (hbm 46GB) does not fit on node A: 90GB used against 120GB budget. Remove a co-located model or lower hbm_gb.
+# Use switch-model with a named working set (deepseek alone, or deepseek + one co-model that fits this node).
