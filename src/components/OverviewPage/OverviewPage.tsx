@@ -9,6 +9,7 @@ import { ActivityIcon } from "../ui/icons";
 import { ModelPanel } from "../ModelPanel";
 import { ModelSwitchModal } from "../ModelSwitchModal";
 import { EnergyModal } from "../EnergyModal";
+import { InferenceHealthPanel } from "./InferenceHealthPanel";
 import { fmtEnergyWh, fmtCost } from "../../utils/energy";
 
 interface OverviewPageProps {
@@ -200,12 +201,14 @@ function ScrubChart({ data, color, label, pollIntervalMs, secondaryData, seconda
 }
 
 /** Token throughput dialog — proper component so hooks work. */
-function TokenDialog({ spark, dialogTab, setDialogTab, dialogTimeRange, setDialogTimeRange, onClose }: {
+function TokenDialog({ spark, dialogTab, setDialogTab, dialogTimeRange, setDialogTimeRange, dialogOverlay, setDialogOverlay, onClose }: {
   spark: SparkSnapshot;
   dialogTab: "gen" | "prefill";
   setDialogTab: (t: "gen" | "prefill") => void;
   dialogTimeRange: number;
   setDialogTimeRange: (m: number) => void;
+  dialogOverlay: "running" | "waiting" | "ttft";
+  setDialogOverlay: (o: "running" | "waiting" | "ttft") => void;
   onClose: () => void;
 }) {
   const llmArr = spark.metrics.llm;
@@ -262,7 +265,19 @@ function TokenDialog({ spark, dialogTab, setDialogTab, dialogTimeRange, setDialo
                   </button>
                 ))}
               </div>
-              <DialogChart sparkId={spark.id} portKey={portKey} tab={dialogTab} maxSamples={dialogTimeRange * 30} />
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <span style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-muted, #888)" }}>Overlay</span>
+                {(["running", "waiting", "ttft"] as const).map((o) => (
+                  <button key={o} type="button" onClick={() => setDialogOverlay(o)}
+                    title={o === "ttft" ? "Time-to-first-token p95 (s)" : o === "waiting" ? "Requests waiting for their first byte" : "Requests actively streaming"}
+                    style={{ borderRadius: 4, padding: "2px 8px", fontSize: 10, fontWeight: 500, border: "none", cursor: "pointer",
+                      background: dialogOverlay === o ? "var(--color-accent, #e8a830)" : "var(--color-surface-hover, #303030)",
+                      color: dialogOverlay === o ? "#fff" : "var(--color-muted, #888)" }}>
+                    {o === "ttft" ? "TTFT (s)" : o}
+                  </button>
+                ))}
+              </div>
+              <DialogChart sparkId={spark.id} portKey={portKey} tab={dialogTab} maxSamples={dialogTimeRange * 30} overlay={dialogOverlay} />
             </div>
           )}
         </div>
@@ -272,24 +287,36 @@ function TokenDialog({ spark, dialogTab, setDialogTab, dialogTimeRange, setDialo
 }
 
 /** Mounted at OverviewPage level (no portal) — useMetricsHistory is safe. */
-function DialogChart({ sparkId, portKey, tab, maxSamples }: {
+function DialogChart({ sparkId, portKey, tab, maxSamples, overlay }: {
   sparkId: string;
   portKey: string;
   tab: "gen" | "prefill";
   maxSamples: number;
+  overlay: "running" | "waiting" | "ttft";
 }) {
   const color = tab === "gen" ? "var(--color-accent)" : "var(--color-warning)";
   const label = tab === "gen" ? "gen tok/s" : "prefill tok/s";
   const data = useMetricsHistory(sparkId, `llm${portKey}.${tab === "gen" ? "tps" : "prefill"}`);
-  const runningRaw = useMetricsHistory(sparkId, `llm${portKey}.running`);
   const sliced = data.length > maxSamples ? data.slice(-maxSamples) : data;
-  const runningSliced = runningRaw.length > maxSamples ? runningRaw.slice(-maxSamples) : runningRaw;
+
+  // Secondary overlay: requests-running, requests-waiting, or TTFT p95 (s).
+  const secKey =
+    overlay === "running" ? "running" : overlay === "waiting" ? "waiting" : "ttft";
+  const secRaw = useMetricsHistory(sparkId, `llm${portKey}.${secKey}`);
+  const secSliced = secRaw.length > maxSamples ? secRaw.slice(-maxSamples) : secRaw;
+  const secLabel =
+    overlay === "running" ? "req running" : overlay === "waiting" ? "req waiting" : "TTFT s";
+  const secColor =
+    overlay === "running" ? "var(--color-info, #60a5fa)"
+    : overlay === "waiting" ? "var(--color-warning, #e0a838)"
+    : "var(--color-danger, #e5594d)";
+
   return (
     <div>
       <ScrubChart data={sliced} color={color} label={label} pollIntervalMs={2000}
-        secondaryData={tab === "gen" ? runningSliced : undefined}
-        secondaryColor="var(--color-info, #60a5fa)"
-        secondaryLabel="req running" />
+        secondaryData={secSliced.length ? secSliced : undefined}
+        secondaryColor={secColor}
+        secondaryLabel={secLabel} />
       <p className="mt-2 text-[10px] text-muted">{sliced.length} samples · Hover to inspect</p>
     </div>
   );
@@ -471,6 +498,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
   const [dialogSparkId, setDialogSparkId] = useState<string | null>(null);
   const [dialogTab, setDialogTab] = useState<"gen" | "prefill">("gen");
   const [dialogTimeRange, setDialogTimeRange] = useState(30);
+  const [dialogOverlay, setDialogOverlay] = useState<"running" | "waiting" | "ttft">("running");
 
   const dialogSpark = dialogSparkId ? visibleSparks.find((s) => s.id === dialogSparkId) ?? null : null;
 
@@ -521,10 +549,11 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
           <SparkCard key={spark.id} spark={spark}
             headSparkName={spark.workerHeadId ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null : null}
             temperatureUnit={temperatureUnit} onSelect={onSelectSpark}
-            onOpenDialog={(id) => { setDialogSparkId(id); setDialogTab("gen"); setDialogTimeRange(30); }} />
+            onOpenDialog={(id) => { setDialogSparkId(id); setDialogTab("gen"); setDialogTimeRange(30); setDialogOverlay("running"); }} />
         ))}
       </div>
       <ModelPanel />
+      <InferenceHealthPanel sparks={visibleSparks} />
       <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}
         currentModel={null} />
       {energyOpen && <EnergyModal onClose={() => setEnergyOpen(false)} />}
@@ -532,7 +561,8 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
       {dialogSpark != null && <TokenDialog spark={dialogSpark}
         dialogTab={dialogTab} setDialogTab={setDialogTab}
         dialogTimeRange={dialogTimeRange} setDialogTimeRange={setDialogTimeRange}
-        onClose={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); }} />
+        dialogOverlay={dialogOverlay} setDialogOverlay={setDialogOverlay}
+        onClose={() => { setDialogSparkId(null); setDialogTab("gen"); setDialogTimeRange(30); setDialogOverlay("running"); }} />
       }
     </div>
   );

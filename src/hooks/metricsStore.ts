@@ -151,6 +151,9 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
         pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps);
         if (llm.requestsRunning != null) pushHistory(`${s.id}:llm${portKey}.running`, Math.round(llm.requestsRunning));
+        if (llm.requestsWaiting != null) pushHistory(`${s.id}:llm${portKey}.waiting`, Math.round(llm.requestsWaiting));
+        if (llm.ttftP95Seconds != null) pushHistory(`${s.id}:llm${portKey}.ttft`, llm.ttftP95Seconds);
+        if (llm.preemptionsTotal != null) pushHistory(`${s.id}:llm${portKey}.preemptions`, llm.preemptionsTotal);
       }
     }
   }

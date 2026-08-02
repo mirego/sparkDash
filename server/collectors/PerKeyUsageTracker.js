@@ -496,7 +496,18 @@ export async function getActiveUsers() {
       totalRunning += active;
       const total = waiting + active;
       if (total > 0) {
-        users.push({ label, requests: total, waiting: waiting > 0, inputBytes });
+        users.push({
+          label,
+          requests: total,
+          /** True when the user has any request not yet receiving its first response byte. */
+          waiting: waiting > 0,
+          /** Distinct waiting (throttled, pre-first-byte) request count. */
+          waitingCount: waiting,
+          /** Distinct active (streaming) request count — these occupy GPU slots. */
+          activeCount: active,
+          /** Cumulative prompt bytes forwarded to the upstream for this user. */
+          inputBytes,
+        });
       }
     }
     // Attach aggregated counts so the snapshot can use them

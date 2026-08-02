@@ -112,6 +112,8 @@ export class LlmProbe {
     this.maxRequestsRunning = 0;
     this.totalRequests = null;
     this.ttftP95Seconds = null;
+    /** Recent (rolling-window) mean TTFT in seconds — lifetime mean can mask overload. */
+    this.ttftMeanSeconds = null;
     this.preemptionsTotal = null; // cumulative counter
     /** Prefix cache hit rate 0–1 (hits/queries). */
     this.prefixCacheHitRate = null;
@@ -121,6 +123,14 @@ export class LlmProbe {
     this.itlP95Seconds = null;
     /** Speculative/MTP acceptance rate 0–1 (accepted/drafted). */
     this.mtpAcceptanceRate = null;
+
+    // Rolling TTFT window: cumulative histogram deltas pushed per poll into a
+    // bounded ring buffer. p95/mean are computed only from *recent* samples so
+    // a stale overload burst doesn't pin the banner for the process lifetime.
+    this._ttftWindow = []; // {ts, buckets:[{upper,count}], total, sum}
+    this._ttftWindowMs = 5 * 60 * 1000; // 5 min lookback
+    this._ttftMinSamples = 5;
+    this._prevTtftHist = null; // {buckets, total, sum} from previous poll
 
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
@@ -264,11 +274,14 @@ export class LlmProbe {
     this.maxRequestsRunning = 0;
     this.totalRequests = null;
     this.ttftP95Seconds = null;
+    this.ttftMeanSeconds = null;
     this.preemptionsTotal = null;
     this.prefixCacheHitRate = null;
     this.e2eP95Seconds = null;
     this.itlP95Seconds = null;
     this.mtpAcceptanceRate = null;
+    this._ttftWindow = [];
+    this._prevTtftHist = null;
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
   }
@@ -437,9 +450,12 @@ export class LlmProbe {
           this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
 
           const ttftHist = this._parseVllmHistogram(txt, "vllm:time_to_first_token_seconds");
-          const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
+          const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
+          this._pushTtftWindow(ttftHist, ttftSum);
+          const t = this._recentTtft();
           // Round to 3 decimals so WS snapshots stay stable (avoids float jitter)
-          this.ttftP95Seconds = ttftP95 == null ? null : Math.round(ttftP95 * 1000) / 1000;
+          this.ttftP95Seconds = t.p95 == null ? null : Math.round(t.p95 * 1000) / 1000;
+          this.ttftMeanSeconds = t.mean == null ? null : Math.round(t.mean * 1000) / 1000;
 
           const e2eHist = this._parseVllmHistogram(txt, "vllm:e2e_request_latency_seconds");
           const e2eP95 = this._histogramQuantile(e2eHist.buckets, e2eHist.total, 0.95);
@@ -612,6 +628,81 @@ export class LlmProbe {
     return null;
   }
 
+  /**
+   * Feed a new cumulative TTFT histogram snapshot into the rolling window.
+   * Computes the delta since the previous poll (only *new* finished requests)
+   * and appends it to a bounded ring buffer. Call before _recentTtft() so the
+   * window reflects this poll's samples.
+   */
+  _pushTtftWindow(hist, sum) {
+    const now = Date.now();
+    const cur = {
+      buckets: hist && Array.isArray(hist.buckets) ? hist.buckets : [],
+      total: (hist && hist.total != null) ? hist.total : 0,
+      sum: typeof sum === "number" && Number.isFinite(sum) ? sum : 0,
+    };
+
+    if (this._prevTtftHist) {
+      const prev = this._prevTtftHist;
+      const deltaCount = cur.total - prev.total;
+      // Delta per bucket: current minus previous cumulative count for the same `le`.
+      const prevByUpper = new Map(prev.buckets.map((b) => [b.upper, b.count]));
+      const deltaBuckets = cur.buckets
+        .map((b) => ({
+          upper: b.upper,
+          count: Math.max(0, b.count - (prevByUpper.get(b.upper) || 0)),
+        }))
+        .filter((b) => b.count > 0);
+      const deltaSum = Math.max(0, cur.sum - prev.sum);
+      if (deltaCount > 0) {
+        this._ttftWindow.push({
+          ts: now,
+          buckets: deltaBuckets,
+          total: deltaCount,
+          sum: deltaSum,
+        });
+      }
+    }
+    this._prevTtftHist = cur;
+
+    // Prune samples older than the lookback window.
+    const cutoff = now - this._ttftWindowMs;
+    while (this._ttftWindow.length && this._ttftWindow[0].ts < cutoff) {
+      this._ttftWindow.shift();
+    }
+  }
+
+  /**
+   * Aggregate the rolling window into a single histogram and compute p95 + mean.
+   * Returns { p95, mean } (seconds) or nulls when there aren't enough recent
+   * samples or the quantile falls in the +Inf bucket.
+   */
+  _recentTtft() {
+    if (this._ttftWindow.length === 0) return { p95: null, mean: null };
+    const total = this._ttftWindow.reduce((s, e) => s + e.total, 0);
+    const sum = this._ttftWindow.reduce((s, e) => s + e.sum, 0);
+    if (total < this._ttftMinSamples) return { p95: null, mean: null };
+
+    // Sum bucket counts across all window entries (same `le` edges), then
+    // convert to CUMULATIVE counts (Prometheus style) — _histogramQuantile
+    // expects each bucket's count to include all samples up to that `le`.
+    const agg = new Map();
+    for (const e of this._ttftWindow) {
+      for (const b of e.buckets) {
+        agg.set(b.upper, (agg.get(b.upper) || 0) + b.count);
+      }
+    }
+    const sorted = Array.from(agg, ([upper, count]) => ({ upper, count })).sort((a, b) => a.upper - b.upper);
+    let running = 0;
+    const buckets = sorted.map((b) => {
+      running += b.count;
+      return { upper: b.upper, count: running };
+    });
+    const p95 = this._histogramQuantile(buckets, total, 0.95);
+    const mean = sum > 0 && total > 0 ? sum / total : null;
+    return { p95, mean };
+  }
+
   _getSlotDecoded(slot) {
     // Some llama.cpp builds nest n_decoded inside next_token[0]
     if (slot.n_decoded != null) {
@@ -711,6 +802,7 @@ export class LlmProbe {
       maxRequestsRunning: this.maxRequestsRunning,
       totalRequests: this.totalRequests,
       ttftP95Seconds: this.ttftP95Seconds,
+      ttftMeanSeconds: this.ttftMeanSeconds,
       preemptionsTotal: this.preemptionsTotal,
       prefixCacheHitRate: this.prefixCacheHitRate,
       e2eP95Seconds: this.e2eP95Seconds,
@@ -741,6 +833,7 @@ export class LlmProbe {
       maxRequestsRunning: 0,
       totalRequests: null,
       ttftP95Seconds: null,
+      ttftMeanSeconds: null,
       preemptionsTotal: null,
       prefixCacheHitRate: null,
       e2eP95Seconds: null,

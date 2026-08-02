@@ -186,8 +186,10 @@ export interface LlmMetrics {
   requestsRunning?: number | null;
   /** vLLM waiting request count. null when unavailable. */
   requestsWaiting?: number | null;
-  /** vLLM time-to-first-token p95 in seconds. null when unavailable. */
+  /** vLLM time-to-first-token p95 in seconds (recent rolling window). null when unavailable. */
   ttftP95Seconds?: number | null;
+  /** vLLM time-to-first-token mean in seconds (recent rolling window). null when unavailable. */
+  ttftMeanSeconds?: number | null;
   /** vLLM cumulative preemption count. null when unavailable. */
   preemptionsTotal?: number | null;
   /** vLLM prefix-cache hit rate (hits/queries, 0–1). null when unavailable. */
@@ -203,7 +205,17 @@ export interface LlmMetrics {
    * auth-proxy in real-time. Each entry includes whether the user has any
    * requests still waiting for their first response byte.
    */
-  activeUsers?: Array<{ label: string; requests: number; waiting: boolean }>;
+  activeUsers?: Array<{
+    label: string;
+    requests: number;
+    waiting: boolean;
+    /** Distinct waiting (throttled, pre-first-byte) request count. */
+    waitingCount?: number;
+    /** Distinct active (streaming) request count — these occupy GPU slots. */
+    activeCount?: number;
+    /** Cumulative prompt bytes forwarded to the upstream for this user. */
+    inputBytes?: number;
+  }>;
   /**
    * Observational exposure hint from unauthenticated probe reachability +
    * configured target host scope. null when auth status is unknown.
