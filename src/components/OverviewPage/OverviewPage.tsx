@@ -2,11 +2,11 @@ import { createPortal } from "react-dom";
 import { useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
+import { enginePhaseLabel, decodeSaturationHint, formatWaitReason, waitReasonDetail } from "../../utils/health";
 import { MetricBar } from "../ui/MetricBar";
 import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { ActivityIcon } from "../ui/icons";
-import { ModelPanel } from "../ModelPanel";
 import { ModelSwitchModal } from "../ModelSwitchModal";
 import { EnergyModal } from "../EnergyModal";
 import { InferenceHealthPanel } from "./InferenceHealthPanel";
@@ -422,9 +422,34 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                 {llm.kvCacheUsage != null && <SpecBadge label="KV Cache" value={`${(llm.kvCacheUsage * 100).toFixed(0)}%`} />}
                 {llm.totalInputTokens != null && llm.totalInputTokens > 0 && <SpecBadge label="Total Input" value={fmtCompact(llm.totalInputTokens)} />}
                 {llm.totalOutputTokens != null && llm.totalOutputTokens > 0 && <SpecBadge label="Total Output" value={fmtCompact(llm.totalOutputTokens)} />}
+                {llm.enginePhase && <SpecBadge label="Phase" value={enginePhaseLabel(llm.enginePhase)} />}
+                {llm.genTpsPerRunning != null && llm.requestsRunning != null && llm.requestsRunning > 0 && (
+                  <SpecBadge label="t/s·stream" value={llm.genTpsPerRunning.toFixed(1)} />
+                )}
               </div>
             </div>
           )}
+          {/* Decode-saturation callout: high GPU util + crawl gen */}
+          {llm && (() => {
+            const hint = decodeSaturationHint({
+              gpuUsage: usage,
+              generationTps: llm.generationTps,
+              prefillTps: llm.prefillTps,
+              requestsRunning: llm.requestsRunning,
+              decodeBound: llm.decodeBound,
+              enginePhase: llm.enginePhase,
+            });
+            if (!hint) return null;
+            const tone = hint.level === "danger"
+              ? "border-danger/40 bg-danger/10 text-danger"
+              : "border-warning/40 bg-warning/10 text-warning";
+            return (
+              <div className={`mt-3 rounded-md border px-2.5 py-2 text-[10px] leading-snug ${tone}`} title={hint.detail}>
+                <div className="font-semibold uppercase tracking-wide">{hint.label}</div>
+                <div className="mt-0.5 opacity-90">{hint.detail}</div>
+              </div>
+            );
+          })()}
           {/* Token throughput sparklines */}
           {llm && (
             <button type="button" onClick={() => onOpenDialog?.(spark.id)}
@@ -453,30 +478,132 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                 </div>
               </div>
               <div className="mt-2 flex flex-col items-center gap-1 text-[10px]">
-                {llm.requestsRunning != null && (
-                  <span className="inline-flex items-center gap-1">
-                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${llm.requestsRunning > 0 ? "bg-success" : "bg-muted"}`} />
-                    <span className="font-medium text-text-strong">{Math.round(llm.requestsRunning)}</span>
-                    <span className="text-muted">active{llm.requestsRunning !== 1 ? "s" : ""}</span>
-                  </span>
-                )}
-                {llm.requestsWaiting != null && llm.requestsWaiting > 0 && (
-                  <span className="inline-flex items-center gap-1">
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-warning" />
-                    <span className="font-medium text-text-strong">{Math.round(llm.requestsWaiting)}</span>
-                    <span className="text-muted">waiting</span>
-                  </span>
-                )}
-                {/* Active users (by X-User header) with in-flight requests */}
-                {llm.activeUsers && llm.activeUsers.length > 0 && (
-                  <span className="mt-1 flex -space-x-1 flex-wrap items-center gap-1">
-                    {llm.activeUsers.slice(0, 4).map((u) => (
-                      <span key={u.label}
-                        className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium ${u.waiting ? 'bg-warning/15 text-warning' : 'bg-success/15 text-success'}`}
-                        title={`${u.label} \\u00b7 ${u.requests} in-flight request${u.requests !== 1 ? "s" : ""}${u.waiting ? " (waiting)" : " (active)"}`}>
-                        {u.label}
+                {/* Engine batch truth (vLLM) */}
+                {(llm.engineRequestsRunning != null || llm.requestsRunning != null) && (
+                  <span
+                    className="inline-flex flex-wrap items-center justify-center gap-1"
+                    title="vLLM scheduler: requests in the model batch (run) vs accepted but not scheduled (wait)"
+                  >
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${(llm.engineRequestsRunning ?? llm.requestsRunning ?? 0) > 0 ? "bg-success" : "bg-muted"}`} />
+                    <span className="font-medium text-text-strong">
+                      {Math.round(llm.engineRequestsRunning ?? llm.requestsRunning ?? 0)} run
+                    </span>
+                    <span className="text-muted">·</span>
+                    <span className={`font-medium ${(llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0) > 0 ? "text-warning" : "text-text-strong"}`}>
+                      {Math.round(llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0)} wait
+                    </span>
+                    {llm.engineWaitReason && (llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0) > 0 && (
+                      <span
+                        className="rounded bg-warning/15 px-1 py-0.5 text-[9px] font-medium text-warning"
+                        title={waitReasonDetail(llm.engineWaitReason)}
+                      >
+                        {formatWaitReason(llm.engineWaitReason)}
                       </span>
-                    ))}
+                    )}
+                    <span className="text-muted">engine</span>
+                  </span>
+                )}
+                {/* Proxy first-byte phase (who) */}
+                {((llm.proxyRequestsRunning ?? 0) > 0 || (llm.proxyRequestsWaiting ?? 0) > 0) && (
+                  <span
+                    className="inline-flex flex-wrap items-center justify-center gap-1"
+                    title="Auth-proxy: streaming = ≥1 response byte; waiting = accepted, no first byte yet (queue or prefill). Not the same clock as engine run/wait."
+                  >
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${(llm.proxyRequestsRunning ?? 0) > 0 ? "bg-accent" : "bg-muted"}`} />
+                    <span className="font-medium text-text-strong">{Math.round(llm.proxyRequestsRunning ?? 0)} stream</span>
+                    <span className="text-muted">·</span>
+                    <span className={`font-medium ${(llm.proxyRequestsWaiting ?? 0) > 0 ? "text-warning" : "text-text-strong"}`}>
+                      {Math.round(llm.proxyRequestsWaiting ?? 0)} pre-byte
+                    </span>
+                    <span className="text-muted">proxy</span>
+                  </span>
+                )}
+                {(() => {
+                  // Engine-only hint; who/status lives in pills below.
+                  const raw = llm.queueHint || "";
+                  const engineOnly = raw
+                    .replace(/\s*Clients:[^.]*\./g, "")
+                    .trim();
+                  if (!engineOnly) return null;
+                  return (
+                    <span
+                      className="mt-0.5 max-w-[240px] text-center text-[9px] leading-snug text-warning/90"
+                      title={engineOnly}
+                    >
+                      {engineOnly}
+                    </span>
+                  );
+                })()}
+                {llm.activeUsers && llm.activeUsers.length > 0 && (
+                  <span className="mt-1 flex flex-wrap items-center justify-center gap-1">
+                    {llm.activeUsers.slice(0, 4).map((u) => {
+                      const streamN = u.activeCount ?? (u.waiting ? 0 : u.requests);
+                      const waitN = u.waitingCount ?? (u.waiting ? u.requests : 0);
+                      const fmtK = (n: number | null | undefined) => {
+                        if (n == null || !Number.isFinite(Number(n))) return null;
+                        const v = Number(n);
+                        if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
+                        return String(Math.round(v));
+                      };
+                      const inL = fmtK(u.promptEstTokens);
+                      const outL = fmtK(u.completionEstTokens) ?? "0";
+                      const maxL = fmtK(u.maxTokens);
+                      const cacheL = fmtK(u.cachedTokens);
+                      const cachePct =
+                        u.cacheHitPct != null && Number.isFinite(Number(u.cacheHitPct))
+                          ? `${Math.round(Number(u.cacheHitPct))}%`
+                          : null;
+                      const inBits =
+                        inL == null
+                          ? null
+                          : cacheL != null
+                            ? `in ${inL} (${cacheL} cached${cachePct ? ` · ${cachePct}` : ""})`
+                            : `in ${inL}`;
+                      const outBits =
+                        maxL != null
+                          ? `out ${outL} / max ${maxL}`
+                          : u.completionEstTokens != null || u.promptEstTokens != null
+                            ? `out ${outL}`
+                            : null;
+                      const ioBits = [inBits, outBits].filter(Boolean).join(" · ");
+                      const state = u.waiting
+                        ? waitN > 0 && streamN > 0
+                          ? "pre-byte + streaming"
+                          : "pre-byte (no first token yet)"
+                        : "streaming";
+                      const reqLines = (u.openRequests || [])
+                        .map((r) => {
+                          const pi = fmtK(r.promptEstTokens);
+                          const co = fmtK(r.completionEstTokens);
+                          const ca = fmtK(r.cachedTokens);
+                          const cp =
+                            r.cacheHitPct != null && Number.isFinite(Number(r.cacheHitPct))
+                              ? `${Math.round(Number(r.cacheHitPct))}%`
+                              : null;
+                          const inPart =
+                            ca != null
+                              ? `in ${pi ?? "?"} (${ca} cached${cp ? ` · ${cp}` : ""})`
+                              : `in ${pi ?? "?"}`;
+                          return `${r.phase} ${inPart} · out ${co ?? "0"}${r.maxTokens != null ? ` / max ${fmtK(r.maxTokens)}` : ""} · ${r.ageSec ?? "?"}s`;
+                        })
+                        .join(" | ");
+                      return (
+                        <span
+                          key={u.label}
+                          className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                            u.waiting
+                              ? "bg-warning/15 text-warning"
+                              : "bg-success/15 text-success"
+                          }`}
+                          title={`${u.label} · ${state}${streamN ? ` · ${streamN} stream` : ""}${waitN ? ` · ${waitN} pre-byte` : ""} · ${u.requests} in-flight${ioBits ? ` · ${ioBits}` : ""}${reqLines ? `\n${reqLines}` : ""}`}
+                        >
+                          <span>{u.label}</span>
+                          {ioBits ? (
+                            <span className="font-tabular opacity-80">{ioBits}</span>
+                          ) : null}
+                        </span>
+                      );
+                    })}
                     {llm.activeUsers.length > 4 && (
                       <span className="text-[9px] text-muted">+{llm.activeUsers.length - 4} more</span>
                     )}
@@ -598,7 +725,6 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
             onOpenDialog={(id) => { setDialogSparkId(id); setDialogTab("gen"); setDialogTimeRange(30); setDialogOverlay("running"); }} />
         ))}
       </div>
-      <ModelPanel />
       <InferenceHealthPanel sparks={visibleSparks} />
       <ModelFleetPanel enabled={true} />
       <ModelSwitchModal open={modelSwitchOpen} onClose={() => setModelSwitchOpen(false)}

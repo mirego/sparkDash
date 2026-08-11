@@ -179,6 +179,19 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         if (llm.requestsWaiting != null) pushHistory(`${s.id}:llm${portKey}.waiting`, Math.round(llm.requestsWaiting));
         if (llm.ttftP95Seconds != null) pushHistory(`${s.id}:llm${portKey}.ttft`, llm.ttftP95Seconds);
         if (llm.preemptionsTotal != null) pushHistory(`${s.id}:llm${portKey}.preemptions`, llm.preemptionsTotal);
+        if (llm.kvCacheUsage != null) pushHistory(`${s.id}:llm${portKey}.kv`, llm.kvCacheUsage);
+        if (llm.itlP95Seconds != null) pushHistory(`${s.id}:llm${portKey}.itl`, llm.itlP95Seconds);
+        if (llm.genTpsPerRunning != null) pushHistory(`${s.id}:llm${portKey}.tpsPerRun`, llm.genTpsPerRunning);
+        // Encode phase as ordinal for sparklines: DOWN0 IDLE1 QUEUED2 PREFILL3 DECODE4 SLOW5
+        if (llm.enginePhase) {
+          const phaseMap: Record<string, number> = {
+            DOWN: 0, IDLE: 1, QUEUED: 2, PREFILL: 3, DECODE: 4, SLOW_DECODE: 5,
+          };
+          const ord = phaseMap[llm.enginePhase];
+          if (ord != null) pushHistory(`${s.id}:llm${portKey}.phase`, ord);
+        }
+        if (llm.decodeBound) pushHistory(`${s.id}:llm${portKey}.decodeBound`, 1);
+        else if (llm.available) pushHistory(`${s.id}:llm${portKey}.decodeBound`, 0);
       }
     }
   }

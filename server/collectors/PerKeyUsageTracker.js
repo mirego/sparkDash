@@ -482,13 +482,21 @@ export async function getActiveUsers() {
       signal: AbortSignal.timeout(2000),
     });
     if (!resp.ok) return [];
-    const result = await resp.json();
-    // Result format: { prefix: { waiting: N, active: M } }
+    const payload = await resp.json();
+    // Envelope: { users: { prefix: {...} }, recent: [...] }
+    // Legacy flat map still supported.
+    const result =
+      payload && typeof payload === "object" && payload.users && typeof payload.users === "object"
+        ? payload.users
+        : payload;
+    const recentRaw = Array.isArray(payload?.recent) ? payload.recent : [];
     // Return flat list with status + overall running/waiting counts
     const users = [];
     let totalRunning = 0;
     let totalWaiting = 0;
     for (const [label, counts] of Object.entries(result)) {
+      if (label.startsWith("_")) continue;
+      if (!counts || typeof counts !== "object") continue;
       const waiting = counts.waiting || 0;
       const active = counts.active || 0;
       const inputBytes = counts.inputBytes || 0;
@@ -496,6 +504,7 @@ export async function getActiveUsers() {
       totalRunning += active;
       const total = waiting + active;
       if (total > 0) {
+        const reqs = Array.isArray(counts.requests) ? counts.requests : [];
         users.push({
           label,
           requests: total,
@@ -505,14 +514,58 @@ export async function getActiveUsers() {
           waitingCount: waiting,
           /** Distinct active (streaming) request count — these occupy GPU slots. */
           activeCount: active,
-          /** Cumulative prompt bytes forwarded to the upstream for this user. */
+          /** Cumulative prompt bytes forwarded to the upstream for this user (lifetime). */
           inputBytes,
+          /** Live sum of estimated prompt tokens across open requests. */
+          promptEstTokens: counts.promptEstTokens ?? null,
+          /** Live sum of estimated/official completion tokens across open requests. */
+          completionEstTokens: counts.completionEstTokens ?? null,
+          /** Prefix-cache hits (usage.prompt_tokens_details.cached_tokens). */
+          cachedTokens: counts.cachedTokens ?? null,
+          cacheHitPct: counts.cacheHitPct ?? null,
+          /** Sum of max_tokens on open requests (budget, not produced). */
+          maxTokens: counts.maxTokens ?? null,
+          /** Model id from the newest open request body. */
+          model: counts.model ?? null,
+          /** Per-open-request detail from auth-proxy. */
+          openRequests: reqs.map((r) => ({
+            id: r.id,
+            phase: r.phase,
+            model: r.model ?? null,
+            maxTokens: r.maxTokens ?? null,
+            promptEstTokens: r.promptEstTokens ?? null,
+            completionEstTokens: r.completionEstTokens ?? null,
+            cachedTokens: r.cachedTokens ?? null,
+            cacheHitPct: r.cacheHitPct ?? null,
+            promptSource: r.promptSource ?? null,
+            completionSource: r.completionSource ?? null,
+            ageSec: r.ageSec ?? null,
+            ttftSec: r.ttftSec ?? null,
+          })),
         });
       }
     }
     // Attach aggregated counts so the snapshot can use them
     users._totalRunning = totalRunning;
     users._totalWaiting = totalWaiting;
+    users._recentRequests = recentRaw.map((r) => ({
+      id: r.id,
+      user: r.user,
+      phase: r.phase,
+      model: r.model ?? null,
+      maxTokens: r.maxTokens ?? null,
+      promptEstTokens: r.promptEstTokens ?? null,
+      completionEstTokens: r.completionEstTokens ?? null,
+      cachedTokens: r.cachedTokens ?? null,
+      cacheHitPct: r.cacheHitPct ?? null,
+      promptSource: r.promptSource ?? null,
+      completionSource: r.completionSource ?? null,
+      ageSec: r.ageSec ?? null,
+      ttftSec: r.ttftSec ?? null,
+      durationSec: r.durationSec ?? null,
+      finishedAt: r.finishedAt ?? null,
+      path: r.path ?? null,
+    }));
     return users.sort((a, b) => b.requests - a.requests);
   } catch (err) {
     return [];

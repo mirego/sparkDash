@@ -5,6 +5,7 @@ import { Sparkline } from "../ui/Sparkline";
 import { Panel } from "../ui/Panel";
 import { BotIcon, GearIcon, InfoIcon } from "../ui/icons";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
+import { enginePhaseLabel, formatWaitReason, waitReasonDetail } from "../../utils/health";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 
 interface LlmPanelProps {
@@ -23,7 +24,7 @@ const VLLM_METRIC_INFO = {
   kvCache:
     "Fraction of the engine’s KV cache memory currently in use (0–100%). High values (≥80%) mean little room for new or long contexts and often lead to queuing or preemptions.",
   requests:
-    "Run = requests actively generating on the GPU. Wait = accepted but not yet scheduled (capacity or constraints). Growing wait with high KV cache usually means the server is overloaded.",
+    "ENGINE run/wait from vLLM: Run = in a model batch on the GPU. Wait = accepted but not scheduled. Reason chips (capacity/deferred) come from num_requests_waiting_by_reason. Proxy stream/pre-byte is a different clock (first response byte) — see Queue strip.",
   ttftP95:
     "95th percentile time-to-first-token from vLLM’s history of requests: how long “slow” requests wait until the first output token. Spikes mean queueing, long prefills, or cold paths—not average decode speed.",
   preempts:
@@ -36,6 +37,14 @@ const VLLM_METRIC_INFO = {
     "95th percentile inter-token latency (time between successive output tokens) from vLLM’s history. Spikes mean decode stalls or contention; lower is smoother streaming.",
   mtpAccept:
     "Lifetime speculative / MTP acceptance rate (accepted draft tokens ÷ drafted tokens). Higher means speculative decoding is paying off; — when speculation is off or unused.",
+  waitReason:
+    "vLLM waiting_by_reason: capacity = no free scheduling slot (usually another job on the GPU); deferred = transient KV/LoRA/transfer block. Separate from proxy pre-first-byte waiting.",
+  enginePhase:
+    "What the engine is doing right now: Idle, Prefill (eating prompt), Decode (generating tokens), Slow decode (generation crawling under fat KV/concurrency), Queued, or Down. Slow decode with high GPU util is busy work — not a frozen card.",
+  tpsPerRun:
+    "Generation tok/s divided by running requests — approximate per-stream feel. Total gen can look healthy while each client crawls.",
+  itlImplied:
+    "1 ÷ ITL p95 — tok/s implied by inter-token latency alone. When this and gen tok/s are both low, decode is expensive.",
 } as const;
 
 /** Backend badge — neutral surfaces with a single accent dot. No blue/purple. */
@@ -475,6 +484,166 @@ export function LlmPanel({
             </div>
           </div>
 
+          {llm && (llm.enginePhase || llm.decodeBound) && (
+            <div
+              className={`rounded-md border px-2.5 py-2 text-[11px] ${
+                llm.enginePhase === "SLOW_DECODE" || llm.decodeBound
+                  ? "border-warning/40 bg-warning/10 text-warning"
+                  : llm.enginePhase === "DOWN"
+                    ? "border-danger/40 bg-danger/10 text-danger"
+                    : llm.enginePhase === "PREFILL"
+                      ? "border-accent/30 bg-accent/10 text-accent"
+                      : "border-border bg-surface-elevated text-text"
+              }`}
+              title="Engine phase from run/wait, prefill vs gen tok/s, KV, ITL, MTP — not GPU clocks alone"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold uppercase tracking-wide">
+                  {enginePhaseLabel(llm.enginePhase)}
+                  {llm.decodeBound ? " · decode-bound" : ""}
+                </span>
+                {llm.genTpsPerRunning != null && (
+                  <span className="font-tabular text-text">
+                    {llm.genTpsPerRunning.toFixed(1)} t/s·stream
+                  </span>
+                )}
+              </div>
+              {(llm.enginePhase === "SLOW_DECODE" || llm.decodeBound) && (
+                <p className="mt-1 text-[10px] leading-snug opacity-90">
+                  GPU can sit near 100% while gen tok/s looks ~0: each new token still attends a large live KV.
+                  This is slow generation, not an idle hang.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Dual queue: engine reason + proxy who */}
+          {llm && (llm.queueHint || llm.engineWaitReason || (llm.proxyRequestsWaiting ?? 0) > 0 || (llm.proxyRequestsRunning ?? 0) > 0) && (
+            <div
+              className={`rounded-md border px-2.5 py-2 text-[11px] ${
+                (llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0) > 0 || (llm.proxyRequestsWaiting ?? 0) > 0
+                  ? "border-warning/40 bg-warning/10 text-warning"
+                  : "border-border bg-surface-elevated text-text"
+              }`}
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="font-semibold uppercase tracking-wide text-[10px]">Queue</span>
+                <span className="font-tabular text-text">
+                  Engine {Math.round(llm.engineRequestsRunning ?? llm.requestsRunning ?? 0)} run / {Math.round(llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0)} wait
+                </span>
+                {llm.engineWaitReason && (llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0) > 0 && (
+                  <span
+                    className="rounded bg-warning/20 px-1.5 py-0.5 text-[10px] font-medium"
+                    title={waitReasonDetail(llm.engineWaitReason)}
+                  >
+                    {formatWaitReason(llm.engineWaitReason)}
+                  </span>
+                )}
+                {((llm.proxyRequestsRunning ?? 0) > 0 || (llm.proxyRequestsWaiting ?? 0) > 0) && (
+                  <span
+                    className="font-tabular text-text"
+                    title="Auth-proxy first-byte clock — not vLLM batch size"
+                  >
+                    · Proxy {Math.round(llm.proxyRequestsRunning ?? 0)} stream / {Math.round(llm.proxyRequestsWaiting ?? 0)} pre-byte
+                  </span>
+                )}
+              </div>
+              {(() => {
+                const raw = llm.queueHint || "";
+                const engineOnly = raw.replace(/\s*Clients:[^.]*\./g, "").trim();
+                if (!engineOnly) return null;
+                return (
+                  <p className="mt-1 text-[10px] leading-snug text-text opacity-90">{engineOnly}</p>
+                );
+              })()}
+              {llm.activeUsers && llm.activeUsers.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {llm.activeUsers.slice(0, 8).map((u) => {
+                      const streamN = u.activeCount ?? (u.waiting ? 0 : u.requests);
+                      const waitN = u.waitingCount ?? (u.waiting ? u.requests : 0);
+                      const fmtK = (n: number | null | undefined) => {
+                        if (n == null || !Number.isFinite(Number(n))) return null;
+                        const v = Number(n);
+                        if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
+                        return String(Math.round(v));
+                      };
+                      const inL = fmtK(u.promptEstTokens);
+                      const outL = fmtK(u.completionEstTokens) ?? "0";
+                      const maxL = fmtK(u.maxTokens);
+                      const cacheL = fmtK(u.cachedTokens);
+                      const cachePct =
+                        u.cacheHitPct != null && Number.isFinite(Number(u.cacheHitPct))
+                          ? `${Math.round(Number(u.cacheHitPct))}%`
+                          : null;
+                      const inBits =
+                        inL == null
+                          ? null
+                          : cacheL != null
+                            ? `in ${inL} (${cacheL} cached${cachePct ? ` · ${cachePct}` : ""})`
+                            : `in ${inL}`;
+                      const outBits =
+                        maxL != null
+                          ? `out ${outL} / max ${maxL}`
+                          : u.completionEstTokens != null || u.promptEstTokens != null
+                            ? `out ${outL}`
+                            : null;
+                      const ioBits = [inBits, outBits].filter(Boolean).join(" · ");
+                      const state = u.waiting
+                        ? waitN > 0 && streamN > 0
+                          ? "pre-byte + streaming"
+                          : "pre-byte (no first token yet)"
+                        : "streaming";
+                      const reqLines = (u.openRequests || [])
+                        .map((r) => {
+                          const pi = fmtK(r.promptEstTokens);
+                          const co = fmtK(r.completionEstTokens);
+                          const ca = fmtK(r.cachedTokens);
+                          const cp =
+                            r.cacheHitPct != null && Number.isFinite(Number(r.cacheHitPct))
+                              ? `${Math.round(Number(r.cacheHitPct))}%`
+                              : null;
+                          const inPart =
+                            ca != null
+                              ? `in ${pi ?? "?"} (${ca} cached${cp ? ` · ${cp}` : ""})`
+                              : `in ${pi ?? "?"}`;
+                          return `${r.phase} ${inPart} · out ${co ?? "0"}${r.maxTokens != null ? ` / max ${fmtK(r.maxTokens)}` : ""} · ${r.ageSec ?? "?"}s`;
+                        })
+                        .join(" | ");
+                      return (
+                        <span
+                          key={u.label}
+                          className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                            u.waiting
+                              ? "bg-warning/15 text-warning"
+                              : "bg-success/15 text-success"
+                          }`}
+                          title={`${u.label} · ${state}${streamN ? ` · ${streamN} stream` : ""}${waitN ? ` · ${waitN} pre-byte` : ""} · ${u.requests} in-flight${ioBits ? ` · ${ioBits}` : ""}${reqLines ? `\n${reqLines}` : ""}`}
+                        >
+                          <span>{u.label}</span>
+                          {ioBits ? (
+                            <span className="font-tabular opacity-80">{ioBits}</span>
+                          ) : null}
+                        </span>
+                      );
+                    })}
+                </div>
+              )}
+              {llm.waitingByReason && Object.keys(llm.waitingByReason).length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {Object.entries(llm.waitingByReason).map(([reason, n]) => (
+                    <span
+                      key={reason}
+                      className="rounded border border-border px-1 py-0.5 font-tabular text-[9px] text-muted"
+                      title={waitReasonDetail(reason)}
+                    >
+                      {reason}: {Math.round(Number(n) || 0)}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-4 gap-2 border-t border-border pt-3">
             <div className="space-y-0.5">
               <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
@@ -580,15 +749,16 @@ export function LlmPanel({
               <div className="space-y-0.5">
                 <MetricInfoTip
                   id="requests"
-                  label="Requests"
+                  label="Engine"
                   text={VLLM_METRIC_INFO.requests}
                   openId={metricInfoId}
                   setOpenId={setMetricInfoId}
                   align="right"
                 />
                 <div className="font-tabular text-sm text-text">
-                  {llm.requestsRunning != null && llm.requestsWaiting != null
-                    ? `${Math.round(llm.requestsRunning)} run / ${Math.round(llm.requestsWaiting)} wait`
+                  {(llm.engineRequestsRunning ?? llm.requestsRunning) != null &&
+                  (llm.engineRequestsWaiting ?? llm.requestsWaiting) != null
+                    ? `${Math.round(llm.engineRequestsRunning ?? llm.requestsRunning ?? 0)} run / ${Math.round(llm.engineRequestsWaiting ?? llm.requestsWaiting ?? 0)} wait`
                     : "—"}
                 </div>
               </div>
@@ -676,6 +846,58 @@ export function LlmPanel({
                   {llm.mtpAcceptanceRate != null
                     ? `${(llm.mtpAcceptanceRate * 100).toFixed(1)}%`
                     : "—"}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {llm?.backend === "vllm" && (
+            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-3">
+              <div className="space-y-0.5">
+                <MetricInfoTip
+                  id="tpsPerRun"
+                  label="t/s per stream"
+                  text={VLLM_METRIC_INFO.tpsPerRun}
+                  openId={metricInfoId}
+                  setOpenId={setMetricInfoId}
+                />
+                <div className={`font-tabular text-sm ${
+                  llm.genTpsPerRunning != null && llm.genTpsPerRunning < 4
+                    ? "text-warning"
+                    : "text-text"
+                }`}>
+                  {llm.genTpsPerRunning != null ? llm.genTpsPerRunning.toFixed(2) : "—"}
+                </div>
+              </div>
+              <div className="space-y-0.5">
+                <MetricInfoTip
+                  id="itlImplied"
+                  label="ITL ⇒ t/s"
+                  text={VLLM_METRIC_INFO.itlImplied}
+                  openId={metricInfoId}
+                  setOpenId={setMetricInfoId}
+                />
+                <div className="font-tabular text-sm text-text">
+                  {llm.itlImpliedTps != null ? llm.itlImpliedTps.toFixed(2) : "—"}
+                </div>
+              </div>
+              <div className="space-y-0.5">
+                <MetricInfoTip
+                  id="enginePhase"
+                  label="Phase"
+                  text={VLLM_METRIC_INFO.enginePhase}
+                  openId={metricInfoId}
+                  setOpenId={setMetricInfoId}
+                  align="right"
+                />
+                <div className={`font-tabular text-sm ${
+                  llm.enginePhase === "SLOW_DECODE" || llm.decodeBound
+                    ? "text-warning"
+                    : llm.enginePhase === "DOWN"
+                      ? "text-danger"
+                      : "text-text"
+                }`}>
+                  {enginePhaseLabel(llm.enginePhase)}
                 </div>
               </div>
             </div>

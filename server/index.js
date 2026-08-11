@@ -93,11 +93,6 @@ setTimeout(() => refreshModelFleet().catch(() => {}), 500);
  *   - Lowercasing
  *
  * Examples:
- *   "qwen3.6-35b-a3b-q8" → "qwen3.6-35b-a3b-q8"
- *   "/home/gilfoyle/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf"
- *     → "qwen3.6-35b-a3b-ud-q8_k_xl"
- *   "mimo-v2.5" → "mimo-v2.5"
- *   "MiMo-V2.5-NVFP4" → "mimo-v2.5"
  *   "deepseek-v4-flash-dspark" → "deepseek-v4-flash"
  *   "DeepSeek V4 Flash DSpark" → "deepseek-v4-flash"
  *   "laguna-s-2.1" → "laguna-s-2.1"
@@ -1124,6 +1119,66 @@ function readCpaStatus() {
   return null;
 }
 
+/**
+ * Resolve the currently-served model from LIVE probe data, falling back to the
+ * legacy CPA status file (written by the retired sync-live-models.py) when no
+ * live data is available yet (e.g. sparkDash started before the first LLM poll).
+ *
+ * Live source of truth: each SparkMonitor's LlmProbe polls /v1/models and keeps
+ * the served model id. Prefer the local spark (anton) at the default LLM port
+ * (:8888) — that's the shared TP=2 head.
+ */
+function resolveLiveCurrentModel() {
+  // 1) Live probe truth (antoni/any spark with an active probe).
+  for (const snap of orderedSnapshots()) {
+    if (!Array.isArray(snap?.metrics?.llm)) continue;
+    for (const llm of snap.metrics.llm) {
+      if (llm?.available && llm?.modelId) {
+        return llm.modelId;
+      }
+    }
+  }
+  // 2) Legacy CPA status file (fossil of the retired sync-live-models.py).
+  return readCpaStatus()?.probe?.[0]?.ids?.[0] || null;
+}
+
+/**
+ * Map a live served model id (full registry id from /v1/models) to the short
+ * id used by the dashboard's model switch menu. Falls back to normalizing so
+ * unknown models degrade gracefully.
+ */
+function switchIdForServedId(servedId) {
+  if (!servedId) return null;
+  const known = getAvailableModels().map((m) => m.id);
+  // Already a dashboard switch id → use it directly.
+  if (known.includes(servedId)) return servedId;
+  // Canonical registry id (from /v1/models) → dashboard switch id.
+  const EXPLICIT = {
+    "deepseek-v4-flash-0731": "dspark",
+    "deepseek-v4-flash-dspark": "dspark",
+    "inkling-small": "inkling",
+    "laguna-s-2.1": "laguna",
+  };
+  if (EXPLICIT[servedId]) return EXPLICIT[servedId];
+  // Resolve through the registry, then map the model id to a switch id.
+  const reg = modelRegistry.registry;
+  const model = Array.isArray(reg?.models)
+    ? reg.models.find(
+        (m) =>
+          m.id === servedId ||
+          (Array.isArray(m.aliases) && m.aliases.includes(servedId)),
+      )
+    : null;
+  if (model) {
+    if (known.includes(model.id)) return model.id;
+    const mapped = EXPLICIT[model.id];
+    if (mapped) return mapped;
+  }
+  // Degenerate: infer by normalizing against known switch ids.
+  const norm = normalizeModelName(servedId);
+  return known.find((k) => normalizeModelName(k) === norm) || servedId;
+}
+
 /** Run switch-model.sh status and return parsed output. */
 function readSwitchStatus() {
   return new Promise((resolve) => {
@@ -1160,10 +1215,9 @@ function findModelInfo(modelId, availableModels) {
 function getAvailableModels() {
   return [
     { id: "dspark", name: "DeepSeek V4 Flash DSpark", type: "shared", desc: "2-node TP=2 · 1M context", maxConcurrency: 6 },
+    { id: "inkling", name: "Inkling Small NVFP4", type: "shared", desc: "2-node TP=2 SGLang · DeepSeek draft", maxConcurrency: 4 },
     { id: "laguna", name: "Laguna S 2.1 NVFP4", type: "dual", desc: "Both Sparks, least-queue", maxConcurrency: 4 },
     { id: "laguna-anton", name: "Laguna S 2.1 (anton only)", type: "single", desc: "Single node", maxConcurrency: 2 },
-    { id: "qwen", name: "Qwen3.6 Q8", type: "dual", desc: "Both Sparks, least-queue", maxConcurrency: 4 },
-    { id: "qwen-anton", name: "Qwen3.6 Q8 (anton only)", type: "single", desc: "Single node", maxConcurrency: 2 },
   ];
 }
 
@@ -1172,8 +1226,10 @@ app.get("/api/models/status", async (_req, res) => {
     readSwitchStatus(),
     Promise.resolve(readCpaStatus()),
   ]);
+  const liveServed = resolveLiveCurrentModel();
   res.json({
-    current: cpaData?.probe?.[0]?.ids?.[0] || null,
+    current: switchIdForServedId(liveServed),
+    currentServedId: liveServed,
     cpa: cpaData,
     switchScript: switchStatus,
     available: getAvailableModels(),
@@ -1230,8 +1286,10 @@ app.post("/api/models/refresh", async (_req, res) => {
     readSwitchStatus(),
     Promise.resolve(readCpaStatus()),
   ]);
+  const liveServed = resolveLiveCurrentModel();
   res.json({
-    current: cpaData?.probe?.[0]?.ids?.[0] || null,
+    current: switchIdForServedId(liveServed),
+    currentServedId: liveServed,
     cpa: cpaData,
     switchScript: switchStatus,
     available: getAvailableModels(),
@@ -1388,7 +1446,7 @@ app.get("/api/models/usage", async (_req, res) => {
   models.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0) || a.name.localeCompare(b.name));
 
   // Attach per-key usage data (top users) to each model
-  const currentModelId = (await Promise.resolve(readCpaStatus()))?.probe?.[0]?.ids?.[0] || null;
+  const currentModelId = switchIdForServedId(resolveLiveCurrentModel());
   const allModelUsers = getAllModelUsers();
 
   for (const m of models) {
@@ -1474,6 +1532,7 @@ app.get("/api/models/fleet", async (_req, res) => {
     registryLoaded: modelRegistry.hasRegistry,
     registryError: modelRegistry.error || null,
     routing: modelRegistry.registry?.routing || {},
+    currentServedId: resolveLiveCurrentModel(),
     models,
   });
 });
@@ -1671,18 +1730,28 @@ async function buildSnapshotPayload() {
     }
     spark.energyTodayWh = todayWhBySpark[spark.id] || 0;
   }
-  // Attach active users to each LLM metrics entry so the SparkCard can show
-  // which users have active/waiting requests right now. Also override the
-  // vLLM requestsRunning/requestsWaiting with the auth-proxy's authoritative
-  // counts, so the "2 actives" / "1 waiting" labels are in sync with badges.
+  // Attach active users from auth-proxy /inflight (first-byte phase).
+  // Do NOT overwrite vLLM requestsRunning/requestsWaiting — those are engine
+  // batch truth. Proxy totals live in proxyRequestsRunning/Waiting so the UI
+  // can show both and explain queue reasons without fighting the flight recorder.
   for (const spark of sparks) {
     if (Array.isArray(spark.metrics?.llm)) {
       for (const llm of spark.metrics.llm) {
         llm.activeUsers = allActiveUsers;
-        if (proxyRunning > 0 || proxyWaiting > 0) {
-          llm.requestsRunning = proxyRunning;
-          llm.requestsWaiting = proxyWaiting;
+        llm.recentRequests = allActiveUsers._recentRequests || [];
+        llm.proxyRequestsRunning = proxyRunning;
+        llm.proxyRequestsWaiting = proxyWaiting;
+        // Preserve engine gauges under explicit names (probe already sets them;
+        // re-assert so older snapshots stay honest if something else touched run/wait).
+        if (llm.engineRequestsRunning == null && llm.requestsRunning != null) {
+          llm.engineRequestsRunning = llm.requestsRunning;
         }
+        if (llm.engineRequestsWaiting == null && llm.requestsWaiting != null) {
+          llm.engineRequestsWaiting = llm.requestsWaiting;
+        }
+        // Who is waiting/streaming is shown as activeUsers pills in the UI —
+        // do not append a "Clients: …" sentence to queueHint (flickers and duplicates).
+        // queueHint stays engine-only (capacity/deferred/KV/decode-bound).
       }
     }
   }

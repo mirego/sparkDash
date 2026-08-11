@@ -7,6 +7,12 @@ Format: version sections are listed newest first.
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **OOM risk redefined** — now driven by *remaining* unified memory instead of utilization. Because vLLM targets high GPU-memory utilization, a healthy model-loaded box sat at ~90–94% used, so the old percentage-based alarm (medium >95%, high >97%) was a constant false positive. OOM risk now fires only when **less than 1 GB of unified memory remains** (`oomRiskFor` takes available MB; threshold `< 1024 MB` → `high`, otherwise `low`). Applies to local + SSH collectors, the AlertMonitor rule/messages, the fleet README table, and the `medium` tier was removed from the frontend types and OOM badge.
+- **Model Fleet status tags simplified** — the per-row tag is now coarse and live/down based: the currently-served model shows a green `live` tag (replacing the old replica-health text such as `Degraded`), and every inactive model shows `down`. The redundant name-adjacent `live` chip was folded into this single status tag.
+
 ## [1.5.0] — 2026-08-02
 
 ### Added

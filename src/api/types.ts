@@ -181,7 +181,7 @@ export interface UnifiedMemoryMetrics {
   used: number;
   available: number;
   percentage: number;
-  oomRisk: "low" | "medium" | "high";
+  oomRisk: "low" | "high";
   bandwidth: {
     current: number;
     peak: number;
@@ -226,10 +226,71 @@ export interface LlmMetrics {
   /** vLLM speculative/MTP acceptance rate (accepted/drafted, 0–1). null when unavailable. */
   mtpAcceptanceRate?: number | null;
   /**
+   * Engine phase for decode-bound diagnosis:
+   * IDLE | PREFILL | DECODE | SLOW_DECODE | QUEUED | DOWN
+   */
+  enginePhase?: "IDLE" | "PREFILL" | "DECODE" | "SLOW_DECODE" | "QUEUED" | "DOWN" | string | null;
+  /** generationTps / max(running,1) — per-stream feel. */
+  genTpsPerRunning?: number | null;
+  /** 1 / itlP95Seconds when ITL available. */
+  itlImpliedTps?: number | null;
+  /**
+   * True when the engine looks decode-bound (low gen / high ITL / elevated KV)
+   * with prefill quiet. Pair with GPU util for “busy GPU, 0 tok/s”.
+   */
+  decodeBound?: boolean;
+  /**
+   * vLLM num_requests_waiting_by_reason breakdown, e.g. { capacity: 1, deferred: 0 }.
+   * null when the series is missing.
+   */
+  waitingByReason?: Record<string, number> | null;
+  /** Dominant engine wait reason: capacity | deferred | mixed | … */
+  engineWaitReason?: string | null;
+  /**
+   * Human one-liner: engine queue reason + live KV + who is waiting/streaming
+   * at the auth-proxy. null when nothing interesting.
+   */
+  queueHint?: string | null;
+  /** Engine-native running count (vLLM batch). Same as requestsRunning after fix. */
+  engineRequestsRunning?: number | null;
+  /** Engine-native waiting count (vLLM scheduler queue). */
+  engineRequestsWaiting?: number | null;
+  /**
+   * Auth-proxy: requests that have received ≥1 response byte (streaming).
+   * Different clock from engine run — do not treat as GPU batch size.
+   */
+  proxyRequestsRunning?: number | null;
+  /**
+   * Auth-proxy: accepted but no first response byte yet (upstream queue or prefill).
+   */
+  proxyRequestsWaiting?: number | null;
+  /**
    * Users with active or waiting (in-flight) requests, reported by the
    * auth-proxy in real-time. Each entry includes whether the user has any
    * requests still waiting for their first response byte.
    */
+  /**
+   * Last N completed requests from auth-proxy (newest first), with full I/O.
+   * Shown in Inference Health when the in-flight list is empty or alongside it.
+   */
+  recentRequests?: Array<{
+    id: string;
+    user: string;
+    phase?: string;
+    model?: string | null;
+    maxTokens?: number | null;
+    promptEstTokens?: number | null;
+    completionEstTokens?: number | null;
+    cachedTokens?: number | null;
+    cacheHitPct?: number | null;
+    promptSource?: string | null;
+    completionSource?: string | null;
+    ageSec?: number | null;
+    ttftSec?: number | null;
+    durationSec?: number | null;
+    finishedAt?: number | null;
+    path?: string | null;
+  }>;
   activeUsers?: Array<{
     label: string;
     requests: number;
@@ -240,6 +301,30 @@ export interface LlmMetrics {
     activeCount?: number;
     /** Cumulative prompt bytes forwarded to the upstream for this user. */
     inputBytes?: number;
+    /** Live estimated prompt tokens (open requests). */
+    promptEstTokens?: number | null;
+    /** Live estimated/official completion tokens (open requests). */
+    completionEstTokens?: number | null;
+    /** Prefix-cache hit tokens from usage.prompt_tokens_details.cached_tokens. */
+    cachedTokens?: number | null;
+    cacheHitPct?: number | null;
+    /** Sum of max_tokens on open requests. */
+    maxTokens?: number | null;
+    model?: string | null;
+    openRequests?: Array<{
+      id: string;
+      phase: string;
+      model?: string | null;
+      maxTokens?: number | null;
+      promptEstTokens?: number | null;
+      completionEstTokens?: number | null;
+      cachedTokens?: number | null;
+      cacheHitPct?: number | null;
+      promptSource?: string | null;
+      completionSource?: string | null;
+      ageSec?: number | null;
+      ttftSec?: number | null;
+    }>;
   }>;
   /**
    * Observational exposure hint from unauthenticated probe reachability +
@@ -362,6 +447,7 @@ export interface ModelReplica {
 export interface ModelUsageUser {
   clientIp: string;
   label: string;
+  apiKeyPrefix?: string | null;
   requests: number;
   promptTokens: number;
   completionTokens: number;
@@ -400,6 +486,7 @@ export interface ModelFleetResponse {
   registryLoaded: boolean;
   registryError: string | null;
   routing: { aliases?: Record<string, string[]> };
+  currentServedId: string | null;
   models: FleetModel[];
 }
 

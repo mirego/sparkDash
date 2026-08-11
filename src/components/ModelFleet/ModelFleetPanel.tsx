@@ -1,17 +1,10 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState } from "react";
 import type { FleetModel, ModelFleetResponse } from "../../api/types";
 import { fetchModelFleet } from "../../api/client";
 
-const LEVEL_COLOR: Record<string, string> = {
-  green: "var(--color-success, #4dbf91)",
-  yellow: "var(--color-warning, #e0a838)",
-  red: "var(--color-danger, #e5594d)",
-};
-
-const LEVEL_TEXT: Record<string, string> = {
-  green: "Healthy",
-  yellow: "Degraded",
-  red: "Down",
+const STATUS_COLOR = {
+  live: "var(--color-success, #4dbf91)",
+  down: "var(--color-danger, #e5594d)",
 };
 
 function fmtTokens(n: number): string {
@@ -25,24 +18,34 @@ function fmtCount(n: number): string {
   return Number.isFinite(n) ? `${n}` : "—";
 }
 
-function badge(level: string): CSSProperties {
-  const c = LEVEL_COLOR[level] || LEVEL_COLOR.red;
-  return {
-    background: `color-mix(in srgb, ${c} 16%, transparent)`,
-    color: c,
-    border: `1px solid ${c}`,
-  };
+function fmtAgo(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
+  return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-function HealthBadge({ level, healthy, total }: { level: string; healthy: number; total: number }) {
+/**
+ * Status tag for a fleet row: the currently-served model is `live`, every
+ * other (inactive) model is `down`. Deliberately coarse — only one model is
+ * /served at a time, so the rest are simply not live.
+ */
+function StatusBadge({ isLive }: { isLive: boolean }) {
+  const key = isLive ? "live" : "down";
+  const c = STATUS_COLOR[key];
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold"
-      style={badge(level)}
-      title={`${healthy}/${total} replica(s) healthy (need ${healthy} minimum)`}
+      className="shrink-0 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+      style={{
+        background: `color-mix(in srgb, ${c} 16%, transparent)`,
+        color: c,
+        border: `1px solid ${c}`,
+      }}
+      title={isLive ? "Currently loaded / served on the fleet" : "Not the currently served model"}
     >
-      <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: LEVEL_COLOR[level] || LEVEL_COLOR.red }} />
-      {LEVEL_TEXT[level] || level}
+      <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: c }} />
+      {key}
     </span>
   );
 }
@@ -132,16 +135,21 @@ export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
 
       {data && data.models.length > 0 && (
         <div className="flex flex-col gap-2">
-          {data.models.map((m) => <ModelRow key={m.id} model={m} />)}
+          {data.models.map((m) => <ModelRow key={m.id} model={m} isLive={isLiveModel(m, data.currentServedId)} />)}
         </div>
       )}
     </div>
   );
 }
 
-function ModelRow({ model }: { model: FleetModel }) {
+function isLiveModel(model: FleetModel, currentServedId: string | null): boolean {
+  if (!currentServedId) return false;
+  if (model.id === currentServedId) return true;
+  return !!model.aliases && model.aliases.includes(currentServedId);
+}
+
+function ModelRow({ model, isLive }: { model: FleetModel; isLive: boolean }) {
   const [expanded, setExpanded] = useState(false);
-  const h = model.health;
   const u = model.usage;
   return (
     <div className="rounded border border-border bg-surface-hover/30">
@@ -173,7 +181,7 @@ function ModelRow({ model }: { model: FleetModel }) {
               {fmtTokens(u?.promptTokens || 0)} / {fmtTokens(u?.completionTokens || 0)}
             </div>
           </div>
-          <HealthBadge level={h?.level || "red"} healthy={h?.healthy ?? 0} total={h?.total ?? 0} />
+          <StatusBadge isLive={isLive} />
         </div>
       </button>
 
@@ -204,14 +212,22 @@ function ModelRow({ model }: { model: FleetModel }) {
 
           {u && u.users && u.users.length > 0 ? (
             <div>
-              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">Per-user usage</div>
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">All Users</div>
               <div className="flex flex-col gap-1">
-                {u.users.slice(0, 5).map((usr) => (
-                  <div key={usr.label} className="flex items-center gap-2 rounded bg-surface-hover/40 px-2 py-1 text-[11px]">
-                    <span className="min-w-0 flex-1 truncate font-mono text-text-strong">{usr.label}</span>
+                {u.users.map((usr) => (
+                  <div key={usr.label || usr.clientIp} className="flex items-center gap-2 rounded bg-surface-hover/40 px-2 py-1 text-[11px]">
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-text-strong"
+                      title={usr.apiKeyPrefix ? `API key: ${usr.apiKeyPrefix}-***` : undefined}
+                    >
+                      {usr.apiKeyPrefix || usr.label}
+                    </span>
                     <span className="text-muted">{fmtCount(usr.requests)} req</span>
-                    <span className="font-tabular text-text-strong">{fmtTokens(usr.promptTokens)}</span>
-                    <span className="font-tabular text-muted">→ {fmtTokens(usr.completionTokens)}</span>
+                    <span className="font-tabular text-text-strong" title="Input tokens">{fmtTokens(usr.promptTokens)} in</span>
+                    <span className="font-tabular text-accent" title="Output tokens">→ {fmtTokens(usr.completionTokens)} out</span>
+                    {usr.lastSeen > 0 && (
+                      <span className="hidden text-[9px] text-muted sm:inline">{fmtAgo(usr.lastSeen)}</span>
+                    )}
                   </div>
                 ))}
               </div>

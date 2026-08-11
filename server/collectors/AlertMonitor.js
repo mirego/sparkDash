@@ -108,13 +108,9 @@ export function evaluateSparkHealth(spark) {
     push("ecc", "danger", "ECC", `${Math.round(gpu.ecc.uncorrected)} uncorrected`);
   }
 
-  // ── OOM risk (unified-memory pressure) ──────────────────
-  if (spark.online === true && um.oomRisk) {
-    if (um.oomRisk === "high") {
-      push("oom", "danger", "OOM risk", "Unified memory ≥ high pressure");
-    } else if (um.oomRisk === "medium") {
-      push("oom", "warn", "OOM risk", "Unified memory at medium pressure");
-    }
+  // ── OOM risk (remaining unified memory < 1 GB) ──────────
+  if (spark.online === true && um.oomRisk === "high") {
+    push("oom", "danger", "OOM risk", "Less than 1 GB unified memory remaining");
   }
 
   // ── Disk free (non-disabled mounts) ─────────────────────

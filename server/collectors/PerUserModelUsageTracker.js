@@ -68,6 +68,7 @@ export function aggregateByCanonicalModel(allModelUsers, registry) {
         agg.users.set(user.label, {
           clientIp: user.clientIp || "",
           label: user.label || user.clientIp || "unknown",
+          apiKeyPrefix: user.apiKeyPrefix || null,
           requests: 0,
           promptTokens: 0,
           completionTokens: 0,
@@ -81,6 +82,7 @@ export function aggregateByCanonicalModel(allModelUsers, registry) {
       u.completionTokens += user.completionTokens || 0;
       u.totalTokens += user.totalTokens || 0;
       u.lastSeen = Math.max(u.lastSeen || 0, user.lastSeen || 0);
+      if (user.apiKeyPrefix && !u.apiKeyPrefix) u.apiKeyPrefix = user.apiKeyPrefix;
     }
     agg.lastSeen = Math.max(agg.lastSeen, data.users?.reduce?.((m, u) => Math.max(m, u.lastSeen || 0), 0) || 0);
     // promptTokens are per-user; derive model-level from user aggregates

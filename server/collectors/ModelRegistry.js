@@ -184,17 +184,21 @@ export class ModelRegistry {
     this._path = regPath;
     this._registry = null;
     this._error = null;
+    this._mtimeMs = 0;
     this._reload();
   }
 
   _reload() {
     try {
       if (fs.existsSync(this._path)) {
+        const st = fs.statSync(this._path);
         const raw = fs.readFileSync(this._path, "utf8");
         this._registry = JSON.parse(raw);
         this._error = null;
+        this._mtimeMs = st.mtimeMs;
       } else {
         this._registry = null;
+        this._mtimeMs = 0;
       }
     } catch (err) {
       this._registry = null;
@@ -202,7 +206,22 @@ export class ModelRegistry {
     }
   }
 
+  /** Hot-reload when fleet_sync rewrites model-registry.json (no container restart). */
+  _reloadIfChanged() {
+    try {
+      if (!fs.existsSync(this._path)) {
+        if (this._registry != null) this._reload();
+        return;
+      }
+      const st = fs.statSync(this._path);
+      if (st.mtimeMs !== this._mtimeMs) this._reload();
+    } catch {
+      // keep cached registry
+    }
+  }
+
   get registry() {
+    this._reloadIfChanged();
     return this._registry;
   }
 
@@ -222,6 +241,7 @@ export class ModelRegistry {
 
   /** True when registry is loaded. */
   get hasRegistry() {
+    this._reloadIfChanged();
     return Array.isArray(this._registry?.models) && this._registry.models.length > 0;
   }
 }

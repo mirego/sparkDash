@@ -55,6 +55,40 @@
       ]
     },
     {
+      "id": "inkling-small",
+      "aliases": [
+        "thinkingmachines/Inkling-Small-NVFP4",
+        "Inkling-Small-NVFP4",
+        "claude-inkling-small"
+      ],
+      "capability": [
+        "general"
+      ],
+      "engine": "vllm",
+      "recipe": "Inkling-Small-NVFP4-DGX-Spark",
+      "weights": "hf://thinkingmachines/Inkling-Small-NVFP4",
+      "quantization": "nvfp4",
+      "hbm_gb": 128.0,
+      "tensor_parallel": 2,
+      "min_healthy": 1,
+      "node_ports": [
+        {
+          "node": "A",
+          "host": "127.0.0.1",
+          "port": 8888,
+          "pin": "anton",
+          "host_port": "127.0.0.1:8888"
+        },
+        {
+          "node": "B",
+          "host": "192.168.100.11",
+          "port": 8888,
+          "pin": "son-of-anton",
+          "host_port": "192.168.100.11:8888"
+        }
+      ]
+    },
+    {
       "id": "laguna-s-2.1",
       "aliases": [
         "poolside/Laguna-S-2.1-NVFP4"
@@ -85,69 +119,6 @@
           "host_port": "192.168.100.11:8891"
         }
       ]
-    },
-    {
-      "id": "qwen3.6-35b-a3b-q8",
-      "aliases": [
-        "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
-        "Qwen3.6-35B-A3B-UD-Q8_K_XL",
-        "/home/gilfoyle/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
-        "/home/gilfoyle/llmModels/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
-        "/home/gilfoyle/llmModels/models/qwen3.6-35b-a3b-q8.gguf"
-      ],
-      "capability": [
-        "general",
-        "long-context"
-      ],
-      "engine": "llama",
-      "recipe": "Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe",
-      "weights": "",
-      "quantization": "q8",
-      "hbm_gb": 44.0,
-      "tensor_parallel": 1,
-      "min_healthy": 1,
-      "node_ports": [
-        {
-          "node": "A",
-          "host": "127.0.0.1",
-          "port": 8892,
-          "pin": "anton",
-          "host_port": "127.0.0.1:8892"
-        }
-      ]
-    },
-    {
-      "id": "qwen3.6-35b-a3b-nvfp4",
-      "aliases": [
-        "unsloth/Qwen3.6-35B-A3B-NVFP4",
-        "Qwen3.6-35B-A3B-NVFP4"
-      ],
-      "capability": [
-        "general"
-      ],
-      "engine": "vllm",
-      "recipe": "Unsloth-Qwen3.6-35b-NVFP4-DGX-Spark",
-      "weights": "",
-      "quantization": "nvfp4",
-      "hbm_gb": 44.0,
-      "tensor_parallel": 1,
-      "min_healthy": 1,
-      "node_ports": [
-        {
-          "node": "B",
-          "host": "192.168.100.11",
-          "port": 8893,
-          "pin": "son-of-anton",
-          "host_port": "192.168.100.11:8893"
-        },
-        {
-          "node": "A",
-          "host": "127.0.0.1",
-          "port": 8893,
-          "pin": "anton",
-          "host_port": "127.0.0.1:8893"
-        }
-      ]
     }
   ],
   "routing": {
@@ -157,7 +128,6 @@
         "laguna-s-2.1"
       ],
       "long-context": [
-        "qwen3.6-35b-a3b-q8",
         "laguna-s-2.1"
       ]
     }
@@ -168,17 +138,12 @@
     "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
     "DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
     "claude-deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "inkling-small": "inkling-small",
+    "thinkingmachines/Inkling-Small-NVFP4": "inkling-small",
+    "Inkling-Small-NVFP4": "inkling-small",
+    "claude-inkling-small": "inkling-small",
     "laguna-s-2.1": "laguna-s-2.1",
-    "poolside/Laguna-S-2.1-NVFP4": "laguna-s-2.1",
-    "qwen3.6-35b-a3b-q8": "qwen3.6-35b-a3b-q8",
-    "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf": "qwen3.6-35b-a3b-q8",
-    "Qwen3.6-35B-A3B-UD-Q8_K_XL": "qwen3.6-35b-a3b-q8",
-    "/home/gilfoyle/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf": "qwen3.6-35b-a3b-q8",
-    "/home/gilfoyle/llmModels/Qwen3.6-35B-A3B-UD-Q8_K_XL_DGX-Spark-Recipe/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf": "qwen3.6-35b-a3b-q8",
-    "/home/gilfoyle/llmModels/models/qwen3.6-35b-a3b-q8.gguf": "qwen3.6-35b-a3b-q8",
-    "qwen3.6-35b-a3b-nvfp4": "qwen3.6-35b-a3b-nvfp4",
-    "unsloth/Qwen3.6-35B-A3B-NVFP4": "qwen3.6-35b-a3b-nvfp4",
-    "Qwen3.6-35B-A3B-NVFP4": "qwen3.6-35b-a3b-nvfp4"
+    "poolside/Laguna-S-2.1-NVFP4": "laguna-s-2.1"
   },
   "capability_to_models": {
     "default": [
@@ -186,7 +151,6 @@
       "laguna-s-2.1"
     ],
     "long-context": [
-      "qwen3.6-35b-a3b-q8",
       "laguna-s-2.1"
     ]
   }

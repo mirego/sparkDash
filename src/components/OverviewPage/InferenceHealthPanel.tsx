@@ -43,6 +43,22 @@ function fmtRate(r: number): string {
   return r < 10 ? r.toFixed(2) : r.toFixed(0);
 }
 
+function fmtTok(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
+  return String(Math.round(v));
+}
+
+function fmtDur(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(Number(s))) return "—";
+  const v = Number(s);
+  if (v < 60) return `${v.toFixed(v < 10 ? 1 : 0)}s`;
+  const m = Math.floor(v / 60);
+  const r = Math.round(v % 60);
+  return `${m}m${r.toString().padStart(2, "0")}s`;
+}
+
 /** One spark's preemption + TTFT row. Uses history hooks, so lives at panel level (no portal). */
 function SparkPreemptionRow({ spark }: { spark: SparkSnapshot }) {
   const llm = pickLlm(spark);
@@ -102,6 +118,14 @@ export function InferenceHealthPanel({ sparks }: { sparks: SparkSnapshot[] }) {
   const fleetUsers = useMemo(() => {
     const source = onlineWithLlm.find((s) => pickLlm(s)?.activeUsers?.length);
     return source ? (pickLlm(source)?.activeUsers ?? []) : [];
+  }, [onlineWithLlm]);
+
+  const recentRequests = useMemo(() => {
+    const source =
+      onlineWithLlm.find((s) => (pickLlm(s)?.recentRequests?.length ?? 0) > 0) ??
+      onlineWithLlm[0];
+    const list = source ? (pickLlm(source)?.recentRequests ?? []) : [];
+    return list.slice(0, 5);
   }, [onlineWithLlm]);
 
   const fleetRunning = fleetUsers.reduce((s, u) => s + normCount(u.activeCount), 0);
@@ -165,19 +189,47 @@ export function InferenceHealthPanel({ sparks }: { sparks: SparkSnapshot[] }) {
         </div>
       </div>
 
-      {/* C: in-flight leaderboard */}
-      {fleetUsers.length > 0 ? (
-        <div className="mb-4">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted">In-Flight Users · active streams occupy GPU slots</div>
-          <div className="flex flex-col gap-1.5">
+      {/* C: in-flight leaderboard + last 5 completed */}
+      <div className="mb-4">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted">
+          {fleetUsers.length > 0
+            ? "In-Flight Users · active streams occupy GPU slots"
+            : "Recent Requests · last 5 completed (auth-proxy)"}
+        </div>
+
+        {fleetUsers.length > 0 ? (
+          <div className="mb-3 flex flex-col gap-1.5">
             {sortedUsers.map((u) => {
               const act = normCount(u.activeCount);
               const wait = normCount(u.waitingCount);
               const isHog = act > 0;
               const isVictim = wait > 0;
+              const inL = fmtTok(u.promptEstTokens);
+              const outL = fmtTok(u.completionEstTokens);
+              const maxL = u.maxTokens != null ? fmtTok(u.maxTokens) : null;
+              const cacheL = u.cachedTokens != null ? fmtTok(u.cachedTokens) : null;
+              const cachePct =
+                u.cacheHitPct != null && Number.isFinite(Number(u.cacheHitPct))
+                  ? `${Math.round(Number(u.cacheHitPct))}%`
+                  : null;
+              const inPart =
+                inL !== "—"
+                  ? cacheL && cacheL !== "—"
+                    ? `in ${inL} (${cacheL} cached${cachePct ? ` · ${cachePct}` : ""})`
+                    : `in ${inL}`
+                  : null;
+              const io =
+                inPart || outL !== "—"
+                  ? `${inPart ?? "in —"} · out ${outL}${maxL && maxL !== "—" ? ` / max ${maxL}` : ""}`
+                  : null;
               return (
                 <div key={u.label} className="flex items-center gap-3 rounded border border-border bg-surface-hover/30 px-3 py-1.5">
                   <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-text-strong">{u.label}</span>
+                  {io && (
+                    <span className="hidden font-tabular text-[10px] text-muted sm:inline" title="Live prompt / completion estimates">
+                      {io}
+                    </span>
+                  )}
                   <span
                     className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${isHog ? "bg-success/15 text-success" : "bg-surface-hover text-muted"}`}
                     title="Actively streaming requests (occupying GPU slots)"
@@ -197,12 +249,84 @@ export function InferenceHealthPanel({ sparks }: { sparks: SparkSnapshot[] }) {
               );
             })}
           </div>
-        </div>
-      ) : (
-        <div className="mb-4 rounded border border-dashed border-border px-3 py-4 text-center text-xs text-muted">
-          No in-flight requests. When traffic flows, active-streaming vs waiting users appear here.
-        </div>
-      )}
+        ) : null}
+
+        {/* Always show last 5 completed when available */}
+        {recentRequests.length > 0 ? (
+          <div className={fleetUsers.length > 0 ? "mt-1" : ""}>
+            {fleetUsers.length > 0 && (
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
+                Last 5 completed
+              </div>
+            )}
+            <div className="flex flex-col gap-1">
+              {recentRequests.map((r) => {
+                const inL = fmtTok(r.promptEstTokens);
+                const outL = fmtTok(r.completionEstTokens);
+                const maxL = r.maxTokens != null ? fmtTok(r.maxTokens) : null;
+                const cacheL = r.cachedTokens != null ? fmtTok(r.cachedTokens) : null;
+                const cachePct =
+                  r.cacheHitPct != null && Number.isFinite(Number(r.cacheHitPct))
+                    ? `${Math.round(Number(r.cacheHitPct))}%`
+                    : null;
+                const src =
+                  r.completionSource === "usage" || r.promptSource === "usage"
+                    ? "usage"
+                    : "est";
+                return (
+                  <div
+                    key={r.id}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-border/80 bg-surface px-3 py-1.5"
+                    title={[
+                      r.model || "",
+                      r.path || "",
+                      `ttft ${r.ttftSec != null ? `${r.ttftSec}s` : "—"}`,
+                      r.cachedTokens != null
+                        ? `cache ${cacheL} (${cachePct ?? "?"} of prompt)`
+                        : "cache n/a",
+                      `id ${r.id}`,
+                      src,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  >
+                    <span className="w-14 shrink-0 font-mono text-xs font-medium text-text-strong">
+                      {r.user}
+                    </span>
+                    <span className="min-w-0 flex-1 font-tabular text-[11px] text-text">
+                      in {inL}
+                      {cacheL && cacheL !== "—" ? (
+                        <span className="text-muted">
+                          {" "}
+                          ({cacheL} cached{cachePct ? ` · ${cachePct}` : ""})
+                        </span>
+                      ) : null}
+                      <span className="text-muted"> · </span>
+                      out {outL}
+                      {maxL && maxL !== "—" ? (
+                        <span className="text-muted"> / max {maxL}</span>
+                      ) : null}
+                    </span>
+                    <span className="shrink-0 font-tabular text-[10px] text-muted" title="Total duration">
+                      {fmtDur(r.durationSec)}
+                    </span>
+                    <span
+                      className="shrink-0 rounded bg-surface-hover px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted"
+                      title={src === "usage" ? "Official usage from stream" : "chars÷4 estimate"}
+                    >
+                      {src}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : fleetUsers.length === 0 ? (
+          <div className="rounded border border-dashed border-border px-3 py-4 text-center text-xs text-muted">
+            No in-flight or recent requests. After traffic flows, the last 5 completed calls appear here with in / out / max.
+          </div>
+        ) : null}
+      </div>
 
       {/* D: per-spark preemption + TTFT */}
       {onlineWithLlm.length > 0 ? (

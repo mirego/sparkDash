@@ -57,3 +57,88 @@ export function preemptionHealth(rate: number): HealthLevel {
 export function normCount(n: number | undefined | null): number {
   return typeof n === "number" && Number.isFinite(n) ? n : 0;
 }
+
+
+/** Engine phase labels for decode-bound diagnosis. */
+export type EnginePhase = "IDLE" | "PREFILL" | "DECODE" | "SLOW_DECODE" | "QUEUED" | "DOWN" | string;
+
+export function enginePhaseLabel(phase: EnginePhase | null | undefined): string {
+  switch (phase) {
+    case "IDLE": return "Idle";
+    case "PREFILL": return "Prefill";
+    case "DECODE": return "Decode";
+    case "SLOW_DECODE": return "Slow decode";
+    case "QUEUED": return "Queued";
+    case "DOWN": return "Down";
+    default: return phase ? String(phase) : "—";
+  }
+}
+
+/**
+ * Combined GPU+engine story for “util high, gen ~0”.
+ * Returns null when no interesting signal.
+ */
+export function decodeSaturationHint(opts: {
+  gpuUsage?: number | null;
+  generationTps?: number | null;
+  prefillTps?: number | null;
+  requestsRunning?: number | null;
+  decodeBound?: boolean | null;
+  enginePhase?: EnginePhase | null;
+}): { level: HealthLevel; label: string; detail: string } | null {
+  const util = opts.gpuUsage ?? 0;
+  const gen = opts.generationTps ?? 0;
+  const pref = opts.prefillTps ?? 0;
+  const run = opts.requestsRunning ?? 0;
+  const bound = !!opts.decodeBound || opts.enginePhase === "SLOW_DECODE";
+  if (bound && util >= 70 && gen < 5 && run >= 1) {
+    return {
+      level: "danger",
+      label: "Decode saturated",
+      detail: `GPU ${Math.round(util)}% busy while generation is ${gen.toFixed(1)} tok/s with ${Math.round(run)} running — long-context decode, not idle hang.`,
+    };
+  }
+  if (bound) {
+    return {
+      level: "warn",
+      label: "Slow decode",
+      detail: `Engine phase slow-decode · gen ${gen.toFixed(1)} tok/s · prefill ${pref.toFixed(1)} · run ${Math.round(run)}.`,
+    };
+  }
+  if (util >= 85 && gen < 2 && pref < 5 && run >= 1) {
+    return {
+      level: "warn",
+      label: "Busy GPU, low gen",
+      detail: `GPU ${Math.round(util)}% with gen ${gen.toFixed(1)} tok/s — likely decode-bound even if phase not flagged yet.`,
+    };
+  }
+  return null;
+}
+
+
+/** Map vLLM waiting_by_reason label to short UI text. */
+export function formatWaitReason(reason: string | null | undefined): string {
+  if (!reason) return "—";
+  switch (reason) {
+    case "capacity": return "capacity";
+    case "deferred": return "deferred";
+    case "mixed": return "mixed";
+    default: return String(reason);
+  }
+}
+
+/** Detail sentence for engine wait reason. */
+export function waitReasonDetail(reason: string | null | undefined): string {
+  switch (reason) {
+    case "capacity":
+      return "Waiting for scheduling capacity — another request holds the batch/slot.";
+    case "deferred":
+      return "Deferred by a transient constraint (KV transfer, LoRA budget, blocked status).";
+    case "mixed":
+      return "Multiple wait reasons at once (capacity + deferred).";
+    default:
+      return reason
+        ? `Engine wait reason: ${reason}.`
+        : "No engine wait reason series.";
+  }
+}

@@ -124,6 +124,37 @@ export class LlmProbe {
     /** Speculative/MTP acceptance rate 0–1 (accepted/drafted). */
     this.mtpAcceptanceRate = null;
 
+    /**
+     * Engine phase for decode-bound diagnosis (not GPU clocks).
+     * IDLE | PREFILL | DECODE | SLOW_DECODE | QUEUED | DOWN
+     */
+    this.enginePhase = "DOWN";
+    /** generationTps / max(running,1) — what each stream feels like. */
+    this.genTpsPerRunning = null;
+    /** Implied tok/s from ITL p95: 1/itlSeconds when ITL available. */
+    this.itlImpliedTps = null;
+    /**
+     * True when running work looks decode-bound: low gen, elevated KV or multi-run,
+     * high ITL, prefill quiet. Pair with host GPU util in the UI for the
+     * full "96% util / 0 tok/s" story.
+     */
+    this.decodeBound = false;
+    this.waitingByReason = null;
+    this.engineWaitReason = null;
+    this.queueHint = null;
+    /**
+     * vLLM waiting breakdown from num_requests_waiting_by_reason.
+     * { capacity: N, deferred: N, other?: N } — null when series missing.
+     */
+    this.waitingByReason = null;
+    /** Short engine wait reason label: capacity | deferred | mixed | null */
+    this.engineWaitReason = null;
+    /**
+     * Human one-liner combining engine wait reason + live KV + proxy who.
+     * Filled in snapshot after classify; may be refined by index.js with proxy.
+     */
+    this.queueHint = null;
+
     // Rolling TTFT window: cumulative histogram deltas pushed per poll into a
     // bounded ring buffer. p95/mean are computed only from *recent* samples so
     // a stale overload burst doesn't pin the banner for the process lifetime.
@@ -395,8 +426,10 @@ export class LlmProbe {
       } catch {}
     }
 
-    // Single /metrics fetch: tok/s + slots/sleep (vLLM exposes max_model_len via /v1/models)
-    if (!isSglang) {
+    // /metrics fetch: vLLM always; SGLang when launched with --enable-metrics
+    // (get_server_info rarely exposes cumulative token counters).
+    {
+
       try {
         const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
         if (metricsRes.ok) {
@@ -407,23 +440,75 @@ export class LlmProbe {
           // re-prefill cache hits that inflate the count ~240x for DSpark.
           const computeRe = new RegExp(`^vllm:prompt_tokens_by_source_total\\{[^}]*source="local_compute"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`, "m");
           const computeMatch = txt.match(computeRe);
-          const promptTokens = computeMatch ? parseFloat(computeMatch[1]) : null;
           const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
-          if (promptTokens != null && genTokens != null) {
+          // SGLang (--enable-metrics): sglang:prompt_tokens_total / generation_tokens_total
+          // (and a few historical aliases). Prefer these when vLLM series absent.
+          let promptTokensSgl = null;
+          let genTokensSgl = null;
+          if (isSglang || (promptTokensRaw == null && genTokens == null) || txt.includes("sglang:")) {
+            promptTokensSgl =
+              this._getSglangMetric(txt, "prompt_tokens_total") ??
+              this._getSglangMetric(txt, "num_prompt_tokens_total") ??
+              this._getSglangMetric(txt, "prompt_tokens");
+            genTokensSgl =
+              this._getSglangMetric(txt, "generation_tokens_total") ??
+              this._getSglangMetric(txt, "num_generation_tokens_total") ??
+              this._getSglangMetric(txt, "generation_tokens") ??
+              this._getSglangMetric(txt, "completion_tokens_total");
+          }
+          const promptTokensVllm = computeMatch ? parseFloat(computeMatch[1]) : null;
+          // Prefer vLLM local_compute when present; else SGLang counters; else raw vLLM prompt total.
+          const promptTokens =
+            promptTokensVllm != null
+              ? promptTokensVllm
+              : promptTokensSgl != null
+                ? promptTokensSgl
+                : promptTokensRaw;
+          const genTokensFinal = genTokens != null ? genTokens : genTokensSgl;
+          if (promptTokens != null && genTokensFinal != null) {
             const deltaIn = promptTokens - this.lastTokenCounts.input;
-            const deltaOut = genTokens - this.lastTokenCounts.output;
+            const deltaOut = genTokensFinal - this.lastTokenCounts.output;
             this.lastTokenCounts.input = promptTokens;
-            this.lastTokenCounts.output = genTokens;
-            this.totalOutputTokens = genTokens;
+            this.lastTokenCounts.output = genTokensFinal;
+            this.totalOutputTokens = genTokensFinal;
             this.totalInputTokens = promptTokens;
-            this._accumulateTokens(promptTokens, genTokens);
+            this._accumulateTokens(promptTokens, genTokensFinal);
+            // Cumulative counters often only advance at request end on SGLang.
             if (dtSec > 0 && dtSec < 10) {
               this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
               this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
             }
           }
 
-          const running = this._getVllmMetric(txt, "num_requests_running");
+          // SGLang realtime series update on each log interval during prefill/decode.
+          // Prefer these for live prefill/gen tok/s while a request is in flight.
+          if (isSglang || txt.includes("sglang:realtime_tokens_total")) {
+            const rtPrefill =
+              this._getSglangLabeledSum(txt, "realtime_tokens_total", "mode", "prefill_compute") +
+              this._getSglangLabeledSum(txt, "realtime_tokens_total", "mode", "prefill_cache");
+            const rtDecode = this._getSglangLabeledSum(txt, "realtime_tokens_total", "mode", "decode");
+            if (!this._sglangRealtime) this._sglangRealtime = { prefill: 0, decode: 0 };
+            const dPref = rtPrefill - this._sglangRealtime.prefill;
+            const dDec = rtDecode - this._sglangRealtime.decode;
+            this._sglangRealtime.prefill = rtPrefill;
+            this._sglangRealtime.decode = rtDecode;
+            if (dtSec > 0 && dtSec < 10) {
+              if (dDec > 0) {
+                this.generationTps = Math.max(0, Math.round((dDec / dtSec) * 100) / 100);
+              }
+              if (dPref > 0) {
+                this.prefillTps = Math.max(0, Math.round((dPref / dtSec) * 100) / 100);
+              }
+            }
+          }
+
+          let running = this._getVllmMetric(txt, "num_requests_running");
+          if (running == null) {
+            running =
+              this._getSglangMetric(txt, "num_running_reqs") ??
+              this._getSglangMetric(txt, "num_requests_running") ??
+              this._getSglangMetric(txt, "running_requests");
+          }
           // Keep requestsRunning in sync with other vLLM tiles (null when missing)
           this.requestsRunning = running;
           if (running != null) {
@@ -438,7 +523,14 @@ export class LlmProbe {
           }
 
           // vLLM inference performance (same /metrics body — no extra HTTP)
-          this.requestsWaiting = this._getVllmMetric(txt, "num_requests_waiting");
+          this.requestsWaiting =
+            this._getVllmMetric(txt, "num_requests_waiting") ??
+            this._getSglangMetric(txt, "num_queue_reqs") ??
+            this._getSglangMetric(txt, "num_requests_waiting") ??
+            this._getSglangMetric(txt, "waiting_requests");
+          // Waiting reason breakdown (vLLM): capacity | deferred | …
+          this.waitingByReason = this._parseWaitingByReason(txt);
+          this.engineWaitReason = this._summarizeWaitReason(this.waitingByReason);
           // Total completed requests — sum across all finished_reason labels
           const reqRe = /^vllm:request_success_total\{[^}]*\}\s+([\d.eE+-]+)\s*$/m;
           const reqMatch = txt.match(new RegExp(reqRe.source, "gm"));
@@ -780,7 +872,172 @@ export class LlmProbe {
     return { level, auth, scope, label, detail };
   }
 
+
+  /**
+   * Classify engine phase + decode-bound flag from live probe fields.
+   * Call at the end of successful probes and before snapshot.
+   *
+   * Heuristic (fleet-tuned):
+   *   DOWN     — probe unreachable / auth closed
+   *   IDLE     — run=0 wait=0
+   *   QUEUED   — run=0 wait>0
+   *   PREFILL  — run>=1 and prefillTps dominates generation
+   *   SLOW_DECODE — run>=1, prefill quiet, gen low or ITL high, KV/run elevated
+   *   DECODE   — run>=1, prefill quiet, gen flowing
+   */
+
+  /**
+   * Parse vllm:num_requests_waiting_by_reason{reason="…"} gauges.
+   * Returns { capacity, deferred, … } or null if no series found.
+   */
+  _parseWaitingByReason(body) {
+    if (!body) return null;
+    const re = /^vllm:num_requests_waiting_by_reason\{([^}]*)\}\s+([0-9.eE+-]+)\s*$/gm;
+    const out = {};
+    let m;
+    let found = false;
+    while ((m = re.exec(body)) !== null) {
+      const labels = m[1];
+      const val = parseFloat(m[2]);
+      if (Number.isNaN(val)) continue;
+      const rm = /reason="([^"]+)"/.exec(labels);
+      const reason = rm ? rm[1] : "unknown";
+      out[reason] = (out[reason] || 0) + val;
+      found = true;
+    }
+    if (!found) {
+      const bare = this._getVllmMetric(body, "num_requests_waiting_by_reason");
+      if (bare == null) return null;
+      return { unknown: bare };
+    }
+    return out;
+  }
+
+  /** Pick a single label from waitingByReason map. */
+  _summarizeWaitReason(byReason) {
+    if (!byReason || typeof byReason !== "object") return null;
+    const entries = Object.entries(byReason)
+      .map(([k, v]) => [k, Number(v) || 0])
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1]);
+    if (entries.length === 0) return null;
+    if (entries.length === 1) return entries[0][0];
+    const rest = entries.slice(1).reduce((s, [, v]) => s + v, 0);
+    if (rest > 0) return "mixed";
+    return entries[0][0];
+  }
+
+  /**
+   * Build engine-side queue hint (proxy who is added later in index.js).
+   */
+  _buildQueueHint() {
+    const run = this.requestsRunning == null ? 0 : Number(this.requestsRunning);
+    const wait = this.requestsWaiting == null ? 0 : Number(this.requestsWaiting);
+    const kv = this.kvCacheUsage;
+    const reason = this.engineWaitReason;
+    if (wait <= 0) {
+      if (run >= 1 && kv != null && kv >= 0.15 && this.decodeBound) {
+        return `Engine busy: ${Math.round(run)} running with live KV ${(kv * 100).toFixed(0)}% (decode-bound).`;
+      }
+      return null;
+    }
+    const reasonTxt =
+      reason === "capacity"
+        ? "capacity (no free scheduling slot)"
+        : reason === "deferred"
+          ? "deferred (KV/LoRA/transfer constraint)"
+          : reason === "mixed"
+            ? "mixed engine constraints"
+            : reason
+              ? String(reason)
+              : "unspecified";
+    const kvTxt =
+      kv != null && kv > 0
+        ? ` · live KV ${(kv * 100).toFixed(0)}%`
+        : "";
+    const runTxt = run >= 1 ? `${Math.round(run)} running ahead` : "nothing running (engine ramp)";
+    return `Engine queue: ${Math.round(wait)} waiting — ${reasonTxt} · ${runTxt}${kvTxt}.`;
+  }
+
+  _classifyEnginePhase() {
+    const metricsLive = this.serverIsOpenAI !== null && this.authOpen !== false;
+    const run = this.requestsRunning;
+    const wait = this.requestsWaiting;
+    const gen = Number(this.generationTps) || 0;
+    const pref = Number(this.prefillTps) || 0;
+    const kv = this.kvCacheUsage;
+    const itl = this.itlP95Seconds;
+    const mtp = this.mtpAcceptanceRate;
+
+    this.genTpsPerRunning = null;
+    this.itlImpliedTps = null;
+    this.decodeBound = false;
+
+    if (!metricsLive) {
+      this.enginePhase = "DOWN";
+      return;
+    }
+
+    const runN = run == null ? 0 : Number(run);
+    const waitN = wait == null ? 0 : Number(wait);
+    if (run != null && runN >= 1) {
+      this.genTpsPerRunning = Math.round((gen / Math.max(runN, 1)) * 100) / 100;
+    }
+    if (itl != null && itl > 0 && Number.isFinite(itl)) {
+      this.itlImpliedTps = Math.round((1 / itl) * 100) / 100;
+    }
+
+    if (runN <= 0 && waitN <= 0) {
+      this.enginePhase = "IDLE";
+      return;
+    }
+    if (runN <= 0 && waitN > 0) {
+      this.enginePhase = "QUEUED";
+      return;
+    }
+
+    const prefillDominant = pref >= 20 && pref > gen * 3;
+    if (prefillDominant) {
+      this.enginePhase = "PREFILL";
+      return;
+    }
+
+    const itlHigh = itl != null && itl >= 0.2;
+    const genLow = gen < 8;
+    const genCrawl = gen < 2.5;
+    const kvElevated = kv != null && kv >= 0.12;
+    const multi = runN >= 2;
+    const mtpSoft = mtp != null && mtp < 0.45;
+    const perStreamLow =
+      this.genTpsPerRunning != null && this.genTpsPerRunning < 4;
+
+    const slow =
+      runN >= 1 &&
+      pref < 30 &&
+      (genLow || itlHigh || perStreamLow) &&
+      (kvElevated || multi || mtpSoft || genCrawl || itlHigh);
+
+    if (slow) {
+      this.enginePhase = "SLOW_DECODE";
+      this.decodeBound = true;
+      return;
+    }
+
+    if (runN >= 1 && pref < 30) {
+      this.enginePhase = "DECODE";
+      if (genCrawl && (kvElevated || multi)) {
+        this.decodeBound = true;
+        this.enginePhase = "SLOW_DECODE";
+      }
+      return;
+    }
+
+    this.enginePhase = pref >= gen ? "PREFILL" : "DECODE";
+  }
+
   _getSnapshot() {
+    this._classifyEnginePhase();
+    this.queueHint = this._buildQueueHint();
     const metricsLive = this.serverIsOpenAI !== null && this.authOpen !== false;
     return {
       available: metricsLive,
@@ -808,6 +1065,16 @@ export class LlmProbe {
       e2eP95Seconds: this.e2eP95Seconds,
       itlP95Seconds: this.itlP95Seconds,
       mtpAcceptanceRate: this.mtpAcceptanceRate,
+      enginePhase: this.enginePhase,
+      genTpsPerRunning: this.genTpsPerRunning,
+      itlImpliedTps: this.itlImpliedTps,
+      decodeBound: this.decodeBound,
+      waitingByReason: this.waitingByReason,
+      engineWaitReason: this.engineWaitReason,
+      queueHint: this.queueHint,
+      /** Engine-native run/wait (never overwritten by proxy). */
+      engineRequestsRunning: this.requestsRunning,
+      engineRequestsWaiting: this.requestsWaiting,
       posture: this._buildPosture(),
       error: this.error,
     };
@@ -839,10 +1106,80 @@ export class LlmProbe {
       e2eP95Seconds: null,
       itlP95Seconds: null,
       mtpAcceptanceRate: null,
+      enginePhase: "DOWN",
+      genTpsPerRunning: null,
+      itlImpliedTps: null,
+      decodeBound: false,
+      waitingByReason: null,
+      engineWaitReason: null,
+      queueHint: null,
+      engineRequestsRunning: null,
+      engineRequestsWaiting: null,
       posture: this._buildPosture(),
       error: this.error,
     };
   }
+
+  /**
+   * SGLang Prometheus counter/gauge (enable with --enable-metrics).
+   * Series are usually `sglang:<name>` or bare `<name>`; try both.
+   */
+  _getSglangMetric(body, name) {
+    const bare = name.replace(/^sglang:/, "");
+    const candidates = [`sglang:${bare}`, bare];
+    for (const n of candidates) {
+      const v = this._getVllmMetric(body, n);
+      if (v != null && !Number.isNaN(v)) return v;
+    }
+    // labeled series: sglang:prompt_tokens_total{...} 123 — sum labels
+    const esc = bare.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const reAll = new RegExp(
+      `^(?:sglang:)?${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`,
+      "gm",
+    );
+    const matches = body.match(reAll);
+    if (!matches || matches.length === 0) return null;
+    let sum = 0;
+    let any = false;
+    for (const line of matches) {
+      const mm = line.match(/([\d.eE+-]+)\s*$/);
+      if (!mm) continue;
+      const v = parseFloat(mm[1]);
+      if (!Number.isNaN(v)) {
+        sum += v;
+        any = true;
+      }
+    }
+    return any ? sum : null;
+  }
+
+  /**
+   * Sum SGLang prometheus series matching name + one label=value filter.
+   * Returns 0 when no lines match (so deltas from 0 work on first sighting).
+   */
+  _getSglangLabeledSum(body, name, label, value) {
+    const bare = name.replace(/^sglang:/, "");
+    const escName = bare.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escLab = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escVal = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(
+      `^(?:sglang:)?${escName}\\{[^}]*${escLab}="${escVal}"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`,
+      "gm",
+    );
+    let sum = 0;
+    let any = false;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const v = parseFloat(m[1]);
+      if (!Number.isNaN(v)) {
+        sum += v;
+        any = true;
+      }
+    }
+    return any ? sum : 0;
+  }
+
+
 
   // ─── HTTP helpers ────────────────────────────────────────
   _apiKey() {

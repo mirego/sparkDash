@@ -5,6 +5,22 @@ import { normalizeMac, WOL_INTERFACE } from "../wol.js";
 import { sshExec } from "./ssh.js";
 
 /**
+ * Unified-memory → OOM-risk cutoff (used by both local + remote unified-memory
+ * collection). OOM risk is driven by REMAINING memory, not utilization:
+ * vLLM deliberately targets high GPU-memory utilization (e.g.
+ * --gpu-memory-utilization 0.80), so a healthy model-loaded box sits at
+ * ~90-94% used (measured: 91% and 94% live) — a fixed percentage alarm would
+ * be a constant false positive. Risk should only fire when there is genuinely
+ * almost nothing left to give: under 1 GB of free unified memory is true OOM
+ * territory, anything above that is `low`.
+ */
+export const OOM_RISK_THRESHOLDS = { highAvailableMB: 1024 }; // < 1 GB remaining == OOM risk
+
+export function oomRiskFor(availableMB) {
+  return availableMB < OOM_RISK_THRESHOLDS.highAvailableMB ? "high" : "low";
+}
+
+/**
  * Extended nvidia-smi GPU query for health telemetry.
  *
  * Adds passive-cooling (fan), multi-zone thermal (memory junction), clock
@@ -865,7 +881,8 @@ export class SystemCollector {
     // Total used = GPU + CPU (but GPU is the main component)
     const usedMB = gpuUsedMB + cpuUsedMB;
     const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
-    const oomRisk = percentage > 85 ? "high" : percentage > 60 ? "medium" : "low";
+    const availableMB = Math.round(availKB / 1024);
+    const oomRisk = oomRiskFor(availableMB);
 
     // Memory bandwidth (nvidia-smi dmon) — host namespaces when in Docker
     let bandwidth = { current: 0, peak: 400 };
@@ -886,7 +903,7 @@ export class SystemCollector {
       gpuUsed: gpuUsedMB,
       cpuUsed: usedMB - gpuUsedMB,
       used: usedMB,
-      available: Math.round(availKB / 1024),
+      available: availableMB,
       percentage,
       oomRisk,
       bandwidth,
@@ -1237,14 +1254,15 @@ export class SystemCollector {
 
       const usedMB = gpuUsedMB + cpuUsedMB;
       const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
-      const oomRisk = percentage > 85 ? "high" : percentage > 60 ? "medium" : "low";
+      const availableMB = Math.round(availKB / 1024);
+      const oomRisk = oomRiskFor(availableMB);
 
       return {
         total: totalMB,
         gpuUsed: gpuUsedMB,
         cpuUsed: cpuUsedMB,
         used: usedMB,
-        available: Math.round(availKB / 1024),
+        available: availableMB,
         percentage,
         oomRisk,
         bandwidth: { current: 0, peak: 400 },

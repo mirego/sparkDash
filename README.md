@@ -221,7 +221,7 @@ Rules and their thresholds:
 | GPU memory temp | ≥ 75 °C | ≥ 85 °C |
 | Fan (stalled under load) | stopped | stopped with > 20 % GPU usage |
 | ECC | ≥ 100 corrected | any uncorrected |
-| OOM risk | medium | high |
+| OOM risk | — | < 1 GB unified memory remaining |
 | Disk free | ≥ 90 % used | ≥ 95 % used |
 | TTFT p95 | ≥ 1.0 s | ≥ 3.0 s |
 | Node | — | offline |

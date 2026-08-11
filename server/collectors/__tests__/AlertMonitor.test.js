@@ -125,7 +125,7 @@ test("alerts sorted highest severity first", () => {
     metrics: {
       ...mkSpark().metrics,
       gpu: { ...mkSpark().metrics.gpu, temperature: 100 }, // danger
-      unifiedMemory: { oomRisk: "medium" }, // warn
+      unifiedMemory: { oomRisk: "high" }, // danger
     },
   }));
   assert.equal(h.alerts[0].level, "danger");

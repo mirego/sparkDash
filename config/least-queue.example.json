@@ -33,30 +33,6 @@
       "engine": "vllm",
       "node": "B",
       "port": 8891
-    },
-    {
-      "name": "qwen3.6-35b-a3b-q8@A:8892",
-      "model_id": "qwen3.6-35b-a3b-q8",
-      "base_url": "http://127.0.0.1:8892/v1",
-      "engine": "llama",
-      "node": "A",
-      "port": 8892
-    },
-    {
-      "name": "qwen3.6-35b-a3b-nvfp4@B:8893",
-      "model_id": "qwen3.6-35b-a3b-nvfp4",
-      "base_url": "http://192.168.100.11:8893/v1",
-      "engine": "vllm",
-      "node": "B",
-      "port": 8893
-    },
-    {
-      "name": "qwen3.6-35b-a3b-nvfp4@A:8893",
-      "model_id": "qwen3.6-35b-a3b-nvfp4",
-      "base_url": "http://127.0.0.1:8893/v1",
-      "engine": "vllm",
-      "node": "A",
-      "port": 8893
     }
   ]
 }

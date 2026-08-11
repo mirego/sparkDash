@@ -106,11 +106,7 @@ export function CpuPanel({ cpu, ram, sparkId, unifiedMemory }: CpuPanelProps) {
           {unifiedMemory?.oomRisk && unifiedMemory.oomRisk !== "low" && (
             <div className="flex justify-between text-xs">
               <span className="text-muted">OOM Risk</span>
-              <span
-                className={`font-tabular ${
-                  unifiedMemory.oomRisk === "high" ? "text-danger" : "text-warning"
-                }`}
-              >
+              <span className="font-tabular text-danger">
                 {unifiedMemory.oomRisk}
               </span>
             </div>
