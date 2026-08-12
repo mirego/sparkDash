@@ -45,6 +45,13 @@ const GPU_QUERY_FIELDS = [
   "pstate",
   "ecc.errors.corrected.volatile.total",
   "ecc.errors.uncorrected.volatile.total",
+  // ── thermal-throttle columns (appended; positions 11-16) ──
+  "clocks.current.sm",
+  "clocks.max.sm",
+  "clocks_throttle_reasons.hw_thermal_slowdown",
+  "clocks_throttle_reasons.sw_thermal_slowdown",
+  "clocks_throttle_reasons.hw_slowdown",
+  "clocks_throttle_reasons.sw_power_cap",
 ];
 const GPU_QUERY = `--query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits`;
 
@@ -204,6 +211,7 @@ export class SystemCollector {
       power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
       vram,
       processes,
+      throttle: gpu.throttle,
     };
   }
 
@@ -342,19 +350,103 @@ export class SystemCollector {
         : /^\[?n\/a\]?$/i.test(rawPstate) || rawPstate === ""
           ? null
           : rawPstate;
+
+    const throttle = this._buildThrottle({
+      hwThermal: this._parseSmiActive(parts[13]),
+      swThermal: this._parseSmiActive(parts[14]),
+      hwSlowdown: this._parseSmiActive(parts[15]),
+      powerCap: this._parseSmiActive(parts[16]),
+      smClockMHz: num(11),
+      smClockMaxMHz: num(12),
+    });
+
     return {
-      fan: num(0),                      // fan.speed (% or RPM; N/A on some SKUs)
-      temperature: num(1) ?? 0,         // temperature.gpu (junction)
-      temperatureMemory: num(2),        // temperature.memory (memory junction)
-      usage: num(3) ?? 0,               // utilization.gpu
-      powerDraw: num(4),                // power.draw (null when N/A) — no false 0
-      powerLimit: num(5) ?? 120,        // power.limit
-      clockSm: num(6),                  // clocks.sm (MHz)
-      clockMem: num(7),                 // clocks.mem (MHz)
-      pstate,                           // e.g. P0/P8, or null when unknown
-      eccCorrected: num(9),             // ecc.errors.corrected.volatile.total
-      eccUncorrected: num(10),          // ecc.errors.uncorrected.volatile.total
+      fan: num(0),
+      temperature: num(1) ?? 0,
+      temperatureMemory: num(2),
+      usage: num(3) ?? 0,
+      powerDraw: num(4),
+      powerLimit: num(5) ?? 120,
+      clockSm: num(6),
+      clockMem: num(7),
+      pstate,
+      eccCorrected: num(9),
+      eccUncorrected: num(10),
+      throttle,
     };
+  }
+
+  /** Parse nvidia-smi Active / Not Active fields. */
+  _parseSmiActive(value) {
+    if (value == null) return false;
+    const t = String(value).trim();
+    if (!t || /^\[?n\/a\]?$/i.test(t)) return false;
+    if (/^not\s*active$/i.test(t)) return false;
+    if (/^active$/i.test(t)) return true;
+    // Bitmask form (rare with this query): non-zero means active
+    if (/^0x[0-9a-f]+$/i.test(t)) return BigInt(t) !== 0n;
+    const n = parseInt(t, 10);
+    if (Number.isFinite(n)) return n !== 0;
+    return false;
+  }
+
+  /**
+   * @param {{
+   *   hwThermal?: boolean,
+   *   swThermal?: boolean,
+   *   hwSlowdown?: boolean,
+   *   powerCap?: boolean,
+   *   smClockMHz?: number | null,
+   *   smClockMaxMHz?: number | null,
+   * }} flags
+   */
+  _buildThrottle(flags = {}) {
+    const hwThermal = Boolean(flags.hwThermal);
+    const swThermal = Boolean(flags.swThermal);
+    const hwSlowdown = Boolean(flags.hwSlowdown);
+    const powerCap = Boolean(flags.powerCap);
+    const thermal = hwThermal || swThermal;
+    const active = thermal || hwSlowdown || powerCap;
+    /** @type {"ok" | "thermal" | "power" | "hw" | "unknown"} */
+    let reason = "ok";
+    if (thermal) reason = "thermal";
+    else if (powerCap) reason = "power";
+    else if (hwSlowdown) reason = "hw";
+
+    const smClockMHz =
+      flags.smClockMHz != null && Number.isFinite(flags.smClockMHz)
+        ? Math.round(flags.smClockMHz)
+        : null;
+    const smClockMaxMHz =
+      flags.smClockMaxMHz != null && Number.isFinite(flags.smClockMaxMHz)
+        ? Math.round(flags.smClockMaxMHz)
+        : null;
+    const smClockPct =
+      smClockMHz != null && smClockMaxMHz != null && smClockMaxMHz > 0
+        ? Math.min(100, Math.round((smClockMHz / smClockMaxMHz) * 1000) / 10)
+        : null;
+
+    const details = [];
+    if (hwThermal) details.push("HW thermal slowdown");
+    if (swThermal) details.push("SW thermal slowdown");
+    if (powerCap) details.push("SW power cap");
+    if (hwSlowdown && !hwThermal) details.push("HW slowdown");
+
+    return {
+      thermal,
+      hwSlowdown,
+      powerCap,
+      active,
+      reason,
+      smClockMHz,
+      smClockMaxMHz,
+      smClockPct,
+      detail: details.length ? details.join(" · ") : "Clocks not limited",
+    };
+  }
+
+  _defaultThrottle() {
+    return this._buildThrottle();
   }
 
   _parseComputeApps(output) {
@@ -986,6 +1078,7 @@ export class SystemCollector {
         power: { draw: gpu.powerDraw, limit: gpu.powerLimit, systemDraw },
         vram: { used: usedMB, total: totalMB, percentage, available: availableMB },
         processes,
+        throttle: gpu.throttle,
       };
     } catch (err) {
       console.error(`[SystemCollector] Remote GPU error for ${this.spark.id}:`, err.message);
@@ -1399,6 +1492,7 @@ export class SystemCollector {
       power: { draw: 0, limit: 120, systemDraw: 0 },
       vram: { used: 0, total: 0, percentage: 0, available: 0 },
       processes: [],
+      throttle: this._defaultThrottle(),
     };
   }
 

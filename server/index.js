@@ -9,7 +9,8 @@ import os from "os";
 import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
-import { sshExec, sshTest, llmTest } from "./collectors/ssh.js";
+import { sshExec, sshTest, llmTest, comfyTest } from "./collectors/ssh.js";
+import { comfyCancelJob } from "./collectors/comfyActions.js";
 import { validateSparkTarget, createRateLimiter } from "./validate.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
 import { broadcastForLanIp, effectiveMac, normalizeMac, sendWol } from "./wol.js";
@@ -43,6 +44,8 @@ import {
 } from "./collectors/ModelRegistry.js";
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
+import { llmProbeHost } from "./collectors/llmHost.js";
+import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 
 dotenv.config();
 
@@ -129,6 +132,7 @@ const ROOT = path.resolve(__dirname, "..");
 const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
+const COMFY_PORT = parseInt(process.env.COMFY_PORT || "8188", 10);
 
 /** Per-spark LLM HTTP port (1–65535), else env default. */
 function resolveLlmPort(sparkOrPort) {
@@ -148,6 +152,20 @@ function resolveLlmPort(sparkOrPort) {
   const n = typeof raw === "string" ? parseInt(raw, 10) : Number(raw);
   if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
   return LLM_PORT;
+}
+
+/** Per-spark ComfyUI HTTP port (1–65535), else env default 8188. */
+function resolveComfyPort(sparkOrPort) {
+  if (sparkOrPort && typeof sparkOrPort === "object") {
+    const raw = sparkOrPort.comfyPort;
+    const n = typeof raw === "string" ? parseInt(raw, 10) : Number(raw);
+    if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+    return COMFY_PORT;
+  }
+  const raw = sparkOrPort;
+  const n = typeof raw === "string" ? parseInt(raw, 10) : Number(raw);
+  if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+  return COMFY_PORT;
 }
 
 /** Optional Bearer token for a Spark LLM port (from encrypted secrets). */
@@ -183,6 +201,8 @@ function startMonitor(spark) {
         if (mon) mon.updateConfig(registry.getSpark(id));
       }
     },
+    // Hermes check / update results must not wait for the next broadcast tick.
+    onHermesChange: () => forceBroadcast(),
   });
   monitors.set(spark.id, monitor);
   monitor.start();
@@ -264,6 +284,8 @@ app.post("/api/sparks/test", async (req, res) => {
       llmHost: body.llmHost || null,
       isLocal: Boolean(body.isLocal),
       llmPort: resolveLlmPort(body),
+      comfyPort: resolveComfyPort(body),
+      comfyMonitoring: Boolean(body.comfyMonitoring),
       ssh: {
         host: body.ssh?.host || body.lanIp || "",
         user: body.ssh?.user || "root",
@@ -275,15 +297,20 @@ app.post("/api/sparks/test", async (req, res) => {
       return res.status(400).json({ error: "lanIp or ssh.host required" });
     }
     const llmPort = resolveLlmPort(spark);
-    const [sshResult, llmResult] = await Promise.all([
+    const comfyPort = resolveComfyPort(spark);
+    const [sshResult, llmResult, comfyResult] = await Promise.all([
       spark.isLocal ? Promise.resolve({ ok: true, message: "local (skipped SSH)" }) : sshTest(spark),
       llmTest(spark, llmPort),
+      spark.comfyMonitoring
+        ? comfyTest(spark, comfyPort)
+        : Promise.resolve({ ok: true, message: "disabled", skipped: true }),
     ]);
     res.json({
       id: spark.id,
       ssh: sshResult,
       llm: llmResult,
-      ok: sshResult.ok || llmResult.ok,
+      comfy: comfyResult,
+      ok: sshResult.ok || llmResult.ok || (comfyResult.ok && !comfyResult.skipped),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -417,17 +444,46 @@ app.post("/api/sparks/:id/test", async (req, res) => {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
 
-    const [sshResult, llmResult] = await Promise.all([
+    const [sshResult, llmResult, comfyResult] = await Promise.all([
       spark.isLocal ? Promise.resolve({ ok: true, message: "local (skipped SSH)" }) : sshTest(spark),
       llmTest(spark, resolveLlmPort(spark)),
+      spark.comfyMonitoring
+        ? comfyTest(spark, resolveComfyPort(spark))
+        : Promise.resolve({ ok: true, message: "disabled", skipped: true }),
     ]);
     res.json({
       id: req.params.id,
       ssh: sshResult,
       llm: llmResult,
-      ok: sshResult.ok || llmResult.ok,
+      comfy: comfyResult,
+      ok: sshResult.ok || llmResult.ok || (comfyResult.ok && !comfyResult.skipped),
       hasPassword: registry.hasPassword(req.params.id),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cancel a ComfyUI job (running interrupt and/or pending dequeue).
+app.post("/api/sparks/:id/comfy/cancel", async (req, res) => {
+  if (!allowTest(clientKey(req))) {
+    return res.status(429).json({ error: "Too many requests; try again shortly" });
+  }
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+    if (!spark.comfyMonitoring) {
+      return res.status(400).json({ error: "ComfyUI monitoring is disabled for this Spark" });
+    }
+    const promptId = req.body?.promptId ?? req.body?.prompt_id;
+    if (!promptId || typeof promptId !== "string") {
+      return res.status(400).json({ error: "promptId is required" });
+    }
+    const result = await comfyCancelJob(spark, promptId, resolveComfyPort(spark));
+    // Nudge a comfy re-poll so UI updates quickly
+    const mon = monitors.get(req.params.id);
+    if (mon) void mon._pollDomain?.("comfy");
+    res.json({ success: result.ok, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -448,6 +504,127 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
     _lastBroadcastPayload = payload;
     broadcastPayload(payload);
     res.json({ success: true, domain });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Hermes Agent ───────────────────────────────────
+// Batch route first (like shutdown-all/wake-all): a plain Sparks-suffixed
+// path (3 segments) that cannot be captured by /api/sparks/:id/hermes/* (4).
+/** One-click `hermes update` on every Spark with hermes monitoring enabled. */
+app.post("/api/sparks/hermes/update-all", async (_req, res) => {
+  const results = [];
+  for (const spark of registry.sparks) {
+    const monitor = monitors.get(spark.id);
+    const entry = { id: spark.id, name: spark.name, ok: false, started: false, skipped: false };
+    if (!spark.hermesMonitoring || !monitor) {
+      entry.skipped = true;
+      entry.reason = spark.hermesMonitoring
+        ? "monitor not running"
+        : "Hermes Agent monitoring is disabled (enable it in Edit Spark)";
+      results.push(entry);
+      continue;
+    }
+    const result = monitor.runHermesUpdate();
+    entry.started = Boolean(result.started);
+    entry.ok = Boolean(result.started);
+    if (!result.started) {
+      entry.skipped = true;
+      entry.reason = result.reason || "update already running";
+    }
+    results.push(entry);
+  }
+  res.json({ success: true, results });
+});
+
+/** Re-check for a hermes update now (bypasses the poll cadence). */
+app.post("/api/sparks/:id/hermes/check", async (req, res) => {
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+    if (!spark.hermesMonitoring) {
+      return res.status(400).json({
+        error: "Hermes Agent monitoring is disabled for this Spark (enable it in Edit Spark)",
+      });
+    }
+    const monitor = monitors.get(req.params.id);
+    if (!monitor) return res.status(404).json({ error: "Spark not found" });
+    const result = await monitor.hermesProbe.check();
+    monitor.applyHermesCheck(result);
+    res.json({ success: true, hermes: monitor.snapshot().hermes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** One-click `hermes update` via SSH. Returns 202; progress via snapshot. */
+app.post("/api/sparks/:id/hermes/update", async (req, res) => {
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+    if (!spark.hermesMonitoring) {
+      return res.status(400).json({
+        error: "Hermes Agent monitoring is disabled for this Spark (enable it in Edit Spark)",
+      });
+    }
+    const monitor = monitors.get(req.params.id);
+    if (!monitor) return res.status(404).json({ error: "Spark not found" });
+    const result = await monitor.runHermesUpdate();
+    res.status(result.started ? 202 : 200).json({
+      success: result.started,
+      reason: result.reason,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Per-Spark Hermes update preview: the latest release (cached globally), the
+// installed version, the actual pending commits on this Spark (HEAD..origin/main)
+// and a resolved `view` so the dialog shows the commit list for minor /
+// no-bump updates and the full release changelog only when a real version bump
+// is pending.
+app.get("/api/sparks/:id/hermes/updates", async (req, res) => {
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+    if (!spark.hermesMonitoring) {
+      return res.status(400).json({
+        error: "Hermes Agent monitoring is disabled for this Spark (enable it in Edit Spark)",
+      });
+    }
+    const monitor = monitors.get(req.params.id);
+    if (!monitor) return res.status(404).json({ error: "Spark not found" });
+
+    const installedVersion = monitor.snapshot().hermes?.version || null;
+    const pending = await monitor.hermesProbe.pendingCommits();
+
+    let release = null;
+    let releaseError = null;
+    try {
+      release = await getLatestRelease();
+    } catch (err) {
+      releaseError = err instanceof Error ? err.message : String(err);
+    }
+
+    // Resolve which content the dialog should lead with. A version bump exists
+    // only when the latest tagged release is newer than what is installed;
+    // otherwise the pending update is commits on main and those are the honest
+    // changelog. Without both versions, fall back to the release when available.
+    const hasPending = Boolean(pending && pending.commits && pending.commits.length > 0);
+    const releaseNewer =
+      release?.semver && installedVersion && compareSemver(release.semver, installedVersion) > 0;
+    const view = releaseNewer ? "release" : hasPending ? "commits" : "release";
+
+    res.json({
+      success: true,
+      view,
+      release,
+      releaseError,
+      installedVersion,
+      pending,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1801,6 +1978,17 @@ function broadcastPayload(payload) {
   });
 }
 
+/**
+ * Force an immediate broadcast, ignoring the diff cache.
+ * Used after a user action (manual refresh / hermes check / update) so the
+ * UI reflects the result right away instead of on the next poll tick.
+ */
+function forceBroadcast() {
+  const payload = buildSnapshotPayload();
+  _lastBroadcastPayload = payload;
+  broadcastPayload(payload);
+}
+
 function startBroadcast() {
   const interval = getSettings().pollIntervalMs;
   broadcastTimer = setInterval(async () => {
@@ -1841,6 +2029,15 @@ function shutdown(signal) {
   if (_shuttingDown) return;
   _shuttingDown = true;
   console.log(`[sparkDash] ${signal} received, shutting down…`);
+  try {
+    // Finalize in-flight benches before the process dies so clients polling
+    // GET /llm/bench/:id do not hit "Benchmark not found" after --watch reload.
+    decodeBenchManager.interruptAll(
+      "Interrupted — server restarted while the benchmark was running"
+    );
+  } catch (err) {
+    console.error("[sparkDash] failed to finalize benchmarks:", err.message);
+  }
   try {
     if (broadcastTimer) {
       clearInterval(broadcastTimer);

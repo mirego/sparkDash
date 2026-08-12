@@ -60,11 +60,96 @@ export interface SparkConfig {
    * Forced true for head, forced false for worker.
    */
   llmMonitoring?: boolean;
+  /**
+   * Probe local ComfyUI and show the ComfyUI card (default false; all roles).
+   */
+  comfyMonitoring?: boolean;
+  /** ComfyUI HTTP port (default 8188). */
+  comfyPort?: number;
+  /**
+   * Opt-in: Hermes Agent CLI (nousresearch/hermes-agent) is installed on this
+   * machine. When enabled, sparkDash checks for Hermes updates and can run
+   * `hermes update` for you via SSH.
+   */
+  hermesMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
 }
 
 export type SparkRole = "head" | "worker" | "standalone";
+
+// ─── Hermes Agent status ───────────────────────────────
+/** Opt-in Hermes Agent update monitoring state, pushed in every snapshot. */
+export interface HermesStatus {
+  /** Opt-in setting from Edit Spark (hermes installed on this machine). */
+  monitoring: boolean;
+  /** Whether the `hermes` binary was found on the target. null before first check. */
+  installed: boolean | null;
+  /** Installed version string when detected (e.g. "0.20.0"). */
+  version: string | null;
+  /** true when `hermes update --check` reports commits behind origin/main. */
+  updateAvailable: boolean | null;
+  /** Number of commits behind origin/main when reported. */
+  behindCommits: number | null;
+  /** Last check time (ms epoch). */
+  checkedAt: number | null;
+  /** One-shot update job state. */
+  status: "idle" | "running" | "success" | "error";
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** Short human-readable message when the last check/update failed. */
+  error: string | null;
+}
+
+/** Latest public Hermes Agent release (changelog for the update dialog). */
+export interface HermesRelease {
+  /** GitHub release tag, e.g. "v2026.7.7.2". */
+  tagName: string;
+  /** Human release name, e.g. "Hermes Agent v0.18.1 (v2026.7.7.2)". */
+  name: string;
+  version: string;
+  /** Semantic version of the release (e.g. "0.20.0") for bump detection. */
+  semver: string | null;
+  publishedAt: string | null;
+  htmlUrl: string;
+  /** Markdown release body. */
+  body: string;
+}
+
+/** One pending commit an update would bring (from git HEAD..origin/main). */
+export interface HermesPendingCommit {
+  sha: string;
+  title: string;
+}
+
+/** One Spark's outcome from a batch `update-all` call. */
+export interface HermesBatchUpdateResult {
+  id: string;
+  name: string;
+  ok: boolean;
+  started: boolean;
+  skipped?: boolean;
+  reason?: string;
+}
+
+export interface HermesBatchUpdateResponse {
+  success: boolean;
+  results: HermesBatchUpdateResult[];
+}
+
+/** Per-Spark update preview used by the confirmation dialog. */
+export interface HermesUpdatesResponse {
+  success: boolean;
+  /** Which content the dialog should lead with. */
+  view: "commits" | "release";
+  /** Latest tagged release (may be null on GitHub API failure). */
+  release: HermesRelease | null;
+  releaseError: string | null;
+  /** Installed hermes version on this Spark (e.g. "0.20.0"), when known. */
+  installedVersion: string | null;
+  /** Pending commits from git (may be null if the repo can't be read). */
+  pending: { count: number; headSha: string | null; commits: HermesPendingCommit[] } | null;
+}
 
 // ─── Hardware info ───────────────────────────────────────
 export interface HardwareInfo {
@@ -89,6 +174,26 @@ export interface HealthBadge {
   /** Short label, e.g. "GPU junction", "Fan", "OOM risk". */
   label: string;
   /** Human-readable current value / detail, e.g. "77°C". */
+
+  detail: string;
+}
+
+export interface GpuThrottle {
+  /** HW or SW thermal slowdown engaged. */
+  thermal: boolean;
+  /** HW slowdown (may include thermal or power brake). */
+  hwSlowdown: boolean;
+  /** SW power-cap scaling limiting clocks. */
+  powerCap: boolean;
+  /** Any limiting reason above. */
+  active: boolean;
+  reason: "ok" | "thermal" | "power" | "hw" | "unknown";
+  smClockMHz: number | null;
+  smClockMaxMHz: number | null;
+  /** Current SM clock as % of max (0–100). null when clocks unavailable. */
+  smClockPct: number | null;
+  /** Human-readable active reasons (tooltip). */
+
   detail: string;
 }
 
@@ -120,6 +225,8 @@ export interface GpuMetrics {
   };
   /** Top GPU processes by VRAM usage (sorted descending, max 5). */
   processes?: Array<{ pid: number; name: string; vramMB: number }>;
+  /** NVIDIA clock throttle / thermal slowdown state from nvidia-smi. */
+  throttle?: GpuThrottle | null;
 }
 
 // ─── CPU metrics ─────────────────────────────────────────
@@ -191,7 +298,7 @@ export interface UnifiedMemoryMetrics {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
-  backend: "vllm" | "llama.cpp" | "sglang" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
   modelId: string | null;
   modelPath: string | null;
   contextLength: number | null;
@@ -347,6 +454,74 @@ export interface LlmPosture {
   detail: string;
 }
 
+// ─── ComfyUI metrics ─────────────────────────────────────
+/** Active or queued ComfyUI job (parsed from /queue prompt graph). */
+export interface ComfyJob {
+  id: string;
+  status: "running" | "pending";
+  /** Workflow title when present in extra_pnginfo. */
+  title: string | null;
+  /** Model weight files referenced by loader nodes. */
+  models: string[];
+  nodeCount: number;
+  steps: number | null;
+  width: number | null;
+  height: number | null;
+  batchSize: number | null;
+  sampler: string | null;
+  /** Queue entry create time (ms epoch when available). */
+  createTime: number | null;
+}
+
+/** Live or estimated progress for the active Comfy job. */
+export interface ComfyProgress {
+  promptId: string | null;
+  nodeId: string | null;
+  nodeLabel: string | null;
+  value: number;
+  max: number;
+  percent: number | null;
+  updatedAt: number;
+  /** ws = Comfy WebSocket frames; estimate = elapsed/avg heuristic */
+  source?: "ws" | "estimate";
+}
+
+export interface ComfyLastJob {
+  id: string;
+  status: "completed" | "failed" | "cancelled" | string;
+  title: string | null;
+  durationMs: number | null;
+  endedAt: number | null;
+}
+
+export interface ComfyModelsInstalled {
+  checkpoints: string[];
+  loras: string[];
+}
+
+export interface ComfyMetrics {
+  available: boolean;
+  port: number;
+  version: string | null;
+  pytorchVersion: string | null;
+  /** Primary device type from /system_stats (e.g. cpu, cuda) — not VRAM. */
+  deviceType?: string | null;
+  queueRunning: number;
+  queuePending: number;
+  /** Currently executing job, if any. */
+  activeJob?: ComfyJob | null;
+  /** Next pending jobs (capped server-side). */
+  pendingJobs?: ComfyJob[];
+  progress?: ComfyProgress | null;
+  lastJob?: ComfyLastJob | null;
+  modelsInstalled?: ComfyModelsInstalled | null;
+  /** Estimated ms until queue idle (running remainder + pending × avg). */
+  queueEtaMs?: number | null;
+  /** Browser-openable ComfyUI base URL (probe host + port). */
+  openUrl?: string | null;
+  error: string | null;
+}
+
 // ─── Full metrics snapshot ────────────────────────────────
 export interface SparkMetrics {
   gpu: GpuMetrics | null;
@@ -357,6 +532,8 @@ export interface SparkMetrics {
   unifiedMemory: UnifiedMemoryMetrics | null;
   /** Array of LLM metrics, one per configured port. Empty array when no ports. */
   llm: LlmMetrics[];
+  /** ComfyUI probe result when monitoring is enabled; null when off or not yet polled. */
+  comfy?: ComfyMetrics | null;
 }
 
 // ─── Spark snapshot (server pushes this) ──────────────────
@@ -368,6 +545,7 @@ export interface SparkSnapshot {
   energyTodayWh?: number;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;
+  isLocal?: boolean;
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;
@@ -389,6 +567,12 @@ export interface SparkSnapshot {
   llmPorts: number[];
   /** Ports with a stored LLM API key (key itself never exposed) */
   llmApiKeyPorts?: number[];
+  /** Whether ComfyUI is probed (opt-in; all roles) */
+  comfyMonitoring?: boolean;
+  /** ComfyUI HTTP port (default 8188) */
+  comfyPort?: number;
+  /** Hermes Agent update monitoring state (present in every snapshot). */
+  hermes?: HermesStatus;
   hardware: HardwareInfo;
   metrics: SparkMetrics;
   /**
@@ -497,7 +681,7 @@ export interface Settings {
   temperatureUnit: "celsius" | "fahrenheit";
   /** Persist prompts / HTTP traces / GPU samples on decode benchmark runs. */
   benchDebugTraces: boolean;
-  /** Layout density — comfortable (default) or compact. */
+  /** Layout density — compact (default) or comfortable. */
   density: "comfortable" | "compact";
 }
 
@@ -509,6 +693,7 @@ export interface SparkTestResponse {
   id: string;
   ssh: { ok: boolean; message: string };
   llm: { ok: boolean; message: string };
+  comfy?: { ok: boolean; message: string; skipped?: boolean };
   ok: boolean;
 }
 
@@ -527,6 +712,10 @@ export interface DecodeBenchConfig {
 export interface DecodeBenchStreamResult {
   index: number;
   ttftMs: number;
+  /** First answer token (post-reasoning) in ms from request start; null when the reply never leaves the reasoning phase. */
+  ttftContentMs: number | null;
+  /** Number of streamed chunks that carried reasoning (not answer) text. */
+  reasoningChunks: number;
   decodeTps: number;
   decodeTokens: number;
   completionTokens: number;

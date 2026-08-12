@@ -2,6 +2,8 @@ import type {
   DecodeBenchJob,
   DecodeBenchListResponse,
   EnergyReport,
+  HermesBatchUpdateResponse,
+  HermesUpdatesResponse,
   LlmMetrics,
   ModelFleetResponse,
   Settings,
@@ -104,6 +106,17 @@ export function testSparkConfig(config: Omit<SparkConfig, "id"> & { id?: string 
   return apiFetch("/api/sparks/test", {
     method: "POST",
     body: JSON.stringify(config),
+  });
+}
+
+/** Cancel a ComfyUI job (interrupt running and/or remove from queue). */
+export function cancelComfyJob(
+  sparkId: string,
+  promptId: string
+): Promise<{ success: boolean; ok?: boolean; method?: string; message?: string }> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(sparkId)}/comfy/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ promptId }),
   });
 }
 
@@ -303,6 +316,22 @@ export function updateLlmHost(
   });
 }
 
+// ─── Hermes Agent ────────────────────────────────────
+/** One-click `hermes update` via SSH on the Spark (background job; 202 when started). */
+export function updateHermes(id: string): Promise<{ success: boolean; reason?: string }> {
+  return apiFetch(`/api/sparks/${id}/hermes/update`, { method: "POST" });
+}
+
+/** Run `hermes update` on every Spark with Hermes Agent monitoring enabled. */
+export function updateAllHermes(): Promise<HermesBatchUpdateResponse> {
+  return apiFetch("/api/sparks/hermes/update-all", { method: "POST" });
+}
+
+/** Force an immediate `hermes update --check` on the Spark. */
+export function checkHermes(id: string): Promise<{ success: boolean }> {
+  return apiFetch(`/api/sparks/${id}/hermes/check`, { method: "POST" });
+}
+
 // ─── Power management ────────────────────────────────────
 export interface PowerResult {
   success: boolean;
@@ -343,6 +372,12 @@ export function shutdownAllSparks(): Promise<BatchPowerResult> {
 /** Send WoL to all registered Sparks that have a MAC configured. */
 export function wakeAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/wake-all", { method: "POST" });
+}
+
+// ─── Hermes update preview ───────────────────────────────
+/** Per-Spark update preview (release + pending commits + resolved view). */
+export function fetchHermesUpdates(id: string): Promise<HermesUpdatesResponse> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/hermes/updates`);
 }
 
 // ─── Global settings ──────────────────────────────────────

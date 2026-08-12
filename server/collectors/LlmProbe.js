@@ -62,17 +62,64 @@ function _saveOffsets(sparkId, port, modelId, input, output) {
   _saveDiskCounts();
 }
 
+import { llmProbeHost } from "./llmHost.js";
+
 const FAIL_RESET_THRESHOLD = 3;
 const REDETECT_INTERVAL_MS = 60_000;
+/**
+ * SGLang's last_gen_throughput is a sticky gauge (holds last decode rate when
+ * idle). Only treat it as live after we observe a change between polls, and
+ * expire back to 0 if it stops changing.
+ */
+const SGLANG_STICKY_TPS_LIVE_MS = 6_000;
+
+/**
+ * Prefer a short model id when the server returns a Hugging Face hub cache path.
+ * e.g. /root/.cache/huggingface/hub/models--org--Name/snapshots/<hash>
+ *   → org/Name
+ * @param {unknown} id
+ * @returns {string | null}
+ */
+export function normalizeModelId(id) {
+  if (id == null) return null;
+  const s = String(id).trim();
+  if (!s) return null;
+
+  const hub = s.match(/(?:^|\/)models--([^/]+?)(?:\/snapshots\/[^/]+)?\/?$/);
+  if (hub) return hub[1].replace(/--/g, "/");
+
+  const mid = s.match(/models--([^/]+)\/snapshots\//);
+  if (mid) return mid[1].replace(/--/g, "/");
+
+  return s;
+}
+
+/** True when `id` looks like a Hugging Face hub cache directory (models--org--name). */
+export function isHfHubCachePath(id) {
+  if (id == null) return false;
+  return /(?:^|\/)models--[^/]+/.test(String(id));
+}
+
+/**
+ * Set modelId (always normalized) and modelPath (omit HF hub cache paths —
+ * they duplicate the short id and clutter the LLM panel).
+ * @param {unknown} raw
+ */
+function applyModelRef(probe, raw) {
+  if (raw == null || raw === "") return;
+  const s = String(raw);
+  probe.modelId = normalizeModelId(s);
+  probe.modelPath = isHfHubCachePath(s) ? null : s;
+}
 
 export class LlmProbe {
   constructor(spark, port = 8888) {
     this.spark = spark;
     this.port = port;
-    this.baseUrl = `http://${spark.llmHost || spark.lanIp}:${port}`;
+    this.baseUrl = `http://${llmProbeHost(spark)}:${port}`;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | null
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -165,6 +212,8 @@ export class LlmProbe {
 
     this._consecutiveFailures = 0;
     this._lastDetectAt = 0;
+    /** @type {{ value: number, liveUntil: number } | null} */
+    this._sglangStickyTps = null;
   }
 
   /** Update probe port (and host from spark). Resets detection when the target changes. */
@@ -174,7 +223,7 @@ export class LlmProbe {
     if (Number.isInteger(next) && next >= 1 && next <= 65535) {
       this.port = next;
     }
-    this.baseUrl = `http://${this.spark.llmHost || this.spark.lanIp}:${this.port}`;
+    this.baseUrl = `http://${llmProbeHost(this.spark)}:${this.port}`;
     if (this.baseUrl !== prevUrl) {
       // Reload disk offsets for the new port key
       const offsets = _loadOffsets(this._sparkId, this.port, this.modelId);
@@ -315,6 +364,7 @@ export class LlmProbe {
     this._prevTtftHist = null;
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
+    this._sglangStickyTps = null;
   }
 
   /** Note auth from an HTTP status on an unauthenticated probe request. */
@@ -333,11 +383,15 @@ export class LlmProbe {
   // ─── Server type detection ───────────────────────────────
   async _detectServerType() {
     // Skip the llama.cpp /slots probe once we've positively identified an
-    // OpenAI-compatible backend. vLLM and sglang have no /slots endpoint, so
-    // re-probing it on every re-detect cycle just spams 404s in the backend's
-    // access log (#15). Still probe /slots on first contact, when the type is
-    // unknown, or when the backend was previously llama.cpp.
-    if (this.backendType !== "vllm" && this.backendType !== "sglang") {
+    // OpenAI-compatible backend. vLLM / sglang / ds4-server have no /slots,
+    // so re-probing it on every re-detect cycle just spams 404s in the
+    // backend's access log (#15). Still probe /slots on first contact, when
+    // the type is unknown, or when the backend was previously llama.cpp.
+    if (
+      this.backendType !== "vllm" &&
+      this.backendType !== "sglang" &&
+      this.backendType !== "ds4"
+    ) {
       const slotUrl = `${this.baseUrl}/slots`;
       try {
         const slotRes = await this._fetch(slotUrl);
@@ -358,13 +412,22 @@ export class LlmProbe {
       } catch {}
     }
 
-    // Try OpenAI-compatible
+    // Try OpenAI-compatible (vLLM, SGLang, or ds4-server)
     try {
       const modelRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelRes.status);
       if (auth === "ok" || auth === "auth") {
         this.serverIsOpenAI = true;
-        this.backendType = "vllm";
+        let owned = null;
+        if (auth === "ok") {
+          try {
+            const modelsData = await modelRes.json();
+            owned = modelsData?.data?.[0]?.owned_by;
+          } catch {
+            /* body optional for detection */
+          }
+        }
+        this.backendType = await this._classifyOpenAIBackend(owned);
         return;
       }
     } catch {}
@@ -373,7 +436,54 @@ export class LlmProbe {
     this.backendType = null;
   }
 
-  // ─── OpenAI-compatible path (vLLM/sglang) ────────────────
+  /**
+   * Classify an OpenAI-compatible server: ds4-server, SGLang, or vLLM (default).
+   * @param {unknown} ownedBy
+   * @returns {Promise<"ds4" | "sglang" | "vllm">}
+   */
+  async _classifyOpenAIBackend(ownedBy) {
+    if (typeof ownedBy === "string") {
+      if (/ds4/i.test(ownedBy)) return "ds4";
+      if (/sglang/i.test(ownedBy)) return "sglang";
+    }
+    if (await this._probeIsDs4()) return "ds4";
+    if (await this._probeIsSglang()) return "sglang";
+    return "vllm";
+  }
+
+  /** True when SGLang native server-info endpoints respond. */
+  async _probeIsSglang() {
+    for (const path of ["/get_server_info", "/server_info"]) {
+      try {
+        const res = await this._fetch(`${this.baseUrl}${path}`);
+        if (!res.ok) continue;
+        const data = await res.json().catch(() => null);
+        if (data && typeof data === "object" && !Array.isArray(data)) return true;
+      } catch {
+        /* try next */
+      }
+    }
+    return false;
+  }
+
+  /** True when Prometheus /metrics exposes ds4-server series (ds4-on-spark). */
+  async _probeIsDs4() {
+    try {
+      const res = await this._fetch(`${this.baseUrl}/metrics`);
+      if (!res.ok) return false;
+      const txt = await res.text();
+      return LlmProbe._metricsLookLikeDs4(txt);
+    } catch {
+      return false;
+    }
+  }
+
+  /** @param {string} body */
+  static _metricsLookLikeDs4(body) {
+    return /(?:^|\n)ds4_tokens_decoded_total(?:\{|\s)/m.test(String(body || ""));
+  }
+
+  // ─── OpenAI-compatible path (vLLM/sglang/ds4) ────────────
   async _probeOpenAICompatible() {
     const now = Date.now();
     const dtSec = (now - this.lastProbeTime) / 1000;
@@ -381,6 +491,7 @@ export class LlmProbe {
 
     // Model info from /v1/models — 401/403 means protected; other failure = down
     let modelsOk = false;
+    let owned = null;
     try {
       const modelsRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelsRes.status);
@@ -391,8 +502,13 @@ export class LlmProbe {
         modelsOk = true;
         const modelsData = await modelsRes.json();
         const model = modelsData?.data?.[0];
-        this.modelId = model?.id || null;
-        this.contextLength = model?.max_model_len || null;
+        this.modelId = normalizeModelId(model?.id || null);
+        // Drop HF hub cache paths from modelPath if /v1/models id was a cache dir
+        if (isHfHubCachePath(model?.id)) this.modelPath = null;
+        // ds4-server uses context_length; vLLM uses max_model_len
+        this.contextLength =
+          model?.max_model_len ?? model?.context_length ?? this.contextLength;
+        owned = model?.owned_by;
       }
     } catch {}
 
@@ -400,184 +516,405 @@ export class LlmProbe {
       throw new Error("OpenAI-compatible /v1/models unreachable");
     }
 
-    // Skip SGLang probe when we already know the backend is vLLM
-    let isSglang = false;
-    if (this.backendType !== "vllm") {
+    // Self-heal backend from owned_by before branching (cheap, no extra HTTP)
+    if (typeof owned === "string") {
+      if (/ds4/i.test(owned)) this.backendType = "ds4";
+      else if (/sglang/i.test(owned) && this.backendType !== "ds4") {
+        this.backendType = "sglang";
+      }
+    }
+
+    // SGLang: native info endpoints. Skip on known vLLM/ds4 to avoid 404 spam.
+    if (this.backendType === "sglang" || this.backendType == null) {
       try {
         const sgRes = await this._fetch(`${this.baseUrl}/get_server_info`);
         if (sgRes.ok) {
-          isSglang = true;
+          this.backendType = "sglang";
           const sgData = await sgRes.json();
-          this.contextLength = sgData.max_total_tokens || sgData.context_length || this.contextLength;
-          if (sgData.total_input_tokens != null && sgData.total_output_tokens != null) {
-            const deltaIn = sgData.total_input_tokens - this.lastTokenCounts.input;
-            const deltaOut = sgData.total_output_tokens - this.lastTokenCounts.output;
-            this.lastTokenCounts.input = sgData.total_input_tokens;
-            this.lastTokenCounts.output = sgData.total_output_tokens;
-            this.totalOutputTokens = sgData.total_output_tokens;
-            this.totalInputTokens = sgData.total_input_tokens;
-            this._accumulateTokens(sgData.total_input_tokens, sgData.total_output_tokens);
-            if (dtSec > 0 && dtSec < 10) {
-              this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-              this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
-            }
-          }
+          this._applySglangServerInfo(sgData, dtSec);
         }
       } catch {}
     }
 
-    // /metrics fetch: vLLM always; SGLang when launched with --enable-metrics
-    // (get_server_info rarely exposes cumulative token counters).
-    {
-
-      try {
-        const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
-        if (metricsRes.ok) {
-          const txt = await metricsRes.text();
-
-          const promptTokensRaw = this._getVllmMetric(txt, "prompt_tokens_total");
-          // Use local_compute only — prompt_tokens_total includes MTP draft
-          // re-prefill cache hits that inflate the count ~240x for DSpark.
-          const computeRe = new RegExp(`^vllm:prompt_tokens_by_source_total\\{[^}]*source="local_compute"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`, "m");
-          const computeMatch = txt.match(computeRe);
-          const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
-          // SGLang (--enable-metrics): sglang:prompt_tokens_total / generation_tokens_total
-          // (and a few historical aliases). Prefer these when vLLM series absent.
-          let promptTokensSgl = null;
-          let genTokensSgl = null;
-          if (isSglang || (promptTokensRaw == null && genTokens == null) || txt.includes("sglang:")) {
-            promptTokensSgl =
-              this._getSglangMetric(txt, "prompt_tokens_total") ??
-              this._getSglangMetric(txt, "num_prompt_tokens_total") ??
-              this._getSglangMetric(txt, "prompt_tokens");
-            genTokensSgl =
-              this._getSglangMetric(txt, "generation_tokens_total") ??
-              this._getSglangMetric(txt, "num_generation_tokens_total") ??
-              this._getSglangMetric(txt, "generation_tokens") ??
-              this._getSglangMetric(txt, "completion_tokens_total");
+    if (this.backendType === "sglang") {
+      // Optional Prometheus path when launched with --enable-metrics
+      if (this.generationTps === 0 && this.prefillTps === 0) {
+        try {
+          const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
+          if (metricsRes.ok) {
+            this._applySglangMetrics(await metricsRes.text(), dtSec);
           }
-          const promptTokensVllm = computeMatch ? parseFloat(computeMatch[1]) : null;
-          // Prefer vLLM local_compute when present; else SGLang counters; else raw vLLM prompt total.
-          const promptTokens =
-            promptTokensVllm != null
-              ? promptTokensVllm
-              : promptTokensSgl != null
-                ? promptTokensSgl
-                : promptTokensRaw;
-          const genTokensFinal = genTokens != null ? genTokens : genTokensSgl;
-          if (promptTokens != null && genTokensFinal != null) {
-            const deltaIn = promptTokens - this.lastTokenCounts.input;
-            const deltaOut = genTokensFinal - this.lastTokenCounts.output;
-            this.lastTokenCounts.input = promptTokens;
-            this.lastTokenCounts.output = genTokensFinal;
-            this.totalOutputTokens = genTokensFinal;
-            this.totalInputTokens = promptTokens;
-            this._accumulateTokens(promptTokens, genTokensFinal);
-            // Cumulative counters often only advance at request end on SGLang.
-            if (dtSec > 0 && dtSec < 10) {
-              this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-              this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
-            }
-          }
-
-          // SGLang realtime series update on each log interval during prefill/decode.
-          // Prefer these for live prefill/gen tok/s while a request is in flight.
-          if (isSglang || txt.includes("sglang:realtime_tokens_total")) {
-            const rtPrefill =
-              this._getSglangLabeledSum(txt, "realtime_tokens_total", "mode", "prefill_compute") +
-              this._getSglangLabeledSum(txt, "realtime_tokens_total", "mode", "prefill_cache");
-            const rtDecode = this._getSglangLabeledSum(txt, "realtime_tokens_total", "mode", "decode");
-            if (!this._sglangRealtime) this._sglangRealtime = { prefill: 0, decode: 0 };
-            const dPref = rtPrefill - this._sglangRealtime.prefill;
-            const dDec = rtDecode - this._sglangRealtime.decode;
-            this._sglangRealtime.prefill = rtPrefill;
-            this._sglangRealtime.decode = rtDecode;
-            if (dtSec > 0 && dtSec < 10) {
-              if (dDec > 0) {
-                this.generationTps = Math.max(0, Math.round((dDec / dtSec) * 100) / 100);
-              }
-              if (dPref > 0) {
-                this.prefillTps = Math.max(0, Math.round((dPref / dtSec) * 100) / 100);
-              }
-            }
-          }
-
-          let running = this._getVllmMetric(txt, "num_requests_running");
-          if (running == null) {
-            running =
-              this._getSglangMetric(txt, "num_running_reqs") ??
-              this._getSglangMetric(txt, "num_requests_running") ??
-              this._getSglangMetric(txt, "running_requests");
-          }
-          // Keep requestsRunning in sync with other vLLM tiles (null when missing)
-          this.requestsRunning = running;
-          if (running != null) {
-            this.slotsActive = Math.round(running);
-            if (running > this.maxRequestsRunning) this.maxRequestsRunning = Math.round(running);
-          }
-
-          // Engine sleep state (0 = active, 1 = sleeping)
-          if (this.gpuMemoryUtilization == null) {
-            const sleepState = this._getVllmMetric(txt, "engine_sleep_state");
-            if (sleepState != null) this.gpuMemoryUtilization = sleepState;
-          }
-
-          // vLLM inference performance (same /metrics body — no extra HTTP)
-          this.requestsWaiting =
-            this._getVllmMetric(txt, "num_requests_waiting") ??
-            this._getSglangMetric(txt, "num_queue_reqs") ??
-            this._getSglangMetric(txt, "num_requests_waiting") ??
-            this._getSglangMetric(txt, "waiting_requests");
-          // Waiting reason breakdown (vLLM): capacity | deferred | …
-          this.waitingByReason = this._parseWaitingByReason(txt);
-          this.engineWaitReason = this._summarizeWaitReason(this.waitingByReason);
-          // Total completed requests — sum across all finished_reason labels
-          const reqRe = /^vllm:request_success_total\{[^}]*\}\s+([\d.eE+-]+)\s*$/m;
-          const reqMatch = txt.match(new RegExp(reqRe.source, "gm"));
-          this.totalRequests = reqMatch ? reqMatch.reduce((sum, line) => {
-            const v = parseFloat(line.match(/([\d.eE+-]+)\s*$/)?.[1] || "0");
-            return sum + (isNaN(v) ? 0 : v);
-          }, 0) : null;
-          this.kvCacheUsage = this._getVllmMetric(txt, "kv_cache_usage_perc");
-          this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
-
-          const ttftHist = this._parseVllmHistogram(txt, "vllm:time_to_first_token_seconds");
-          const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
-          this._pushTtftWindow(ttftHist, ttftSum);
-          const t = this._recentTtft();
-          // Round to 3 decimals so WS snapshots stay stable (avoids float jitter)
-          this.ttftP95Seconds = t.p95 == null ? null : Math.round(t.p95 * 1000) / 1000;
-          this.ttftMeanSeconds = t.mean == null ? null : Math.round(t.mean * 1000) / 1000;
-
-          const e2eHist = this._parseVllmHistogram(txt, "vllm:e2e_request_latency_seconds");
-          const e2eP95 = this._histogramQuantile(e2eHist.buckets, e2eHist.total, 0.95);
-          this.e2eP95Seconds = e2eP95 == null ? null : Math.round(e2eP95 * 1000) / 1000;
-
-          const itlHist = this._parseVllmHistogram(txt, "vllm:inter_token_latency_seconds");
-          const itlP95 = this._histogramQuantile(itlHist.buckets, itlHist.total, 0.95);
-          this.itlP95Seconds = itlP95 == null ? null : Math.round(itlP95 * 1000) / 1000;
-
-          // Lifetime rates from absolute counters (stable tiles; null when unused)
-          const prefixHits = this._getVllmMetric(txt, "prefix_cache_hits_total");
-          const prefixQueries = this._getVllmMetric(txt, "prefix_cache_queries_total");
-          this.prefixCacheHitRate =
-            prefixHits != null && prefixQueries != null && prefixQueries > 0
-              ? Math.round((prefixHits / prefixQueries) * 10000) / 10000
-              : null;
-
-          const mtpAccepted = this._getVllmMetric(txt, "spec_decode_num_accepted_tokens_total");
-          const mtpDrafted = this._getVllmMetric(txt, "spec_decode_num_draft_tokens_total");
-          this.mtpAcceptanceRate =
-            mtpAccepted != null && mtpDrafted != null && mtpDrafted > 0
-              ? Math.round((mtpAccepted / mtpDrafted) * 10000) / 10000
-              : null;
+        } catch {
+          /* metrics optional */
         }
-      } catch {}
+      }
+      await this._enrichSglangModelInfo();
+      return this._getSnapshot();
     }
 
-    this.backendType = isSglang ? "sglang" : "vllm";
+    // Single /metrics fetch: ds4-server or vLLM Prometheus exposition
+    try {
+      const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
+      if (metricsRes.ok) {
+        const txt = await metricsRes.text();
+        if (
+          this.backendType === "ds4" ||
+          LlmProbe._metricsLookLikeDs4(txt)
+        ) {
+          this.backendType = "ds4";
+          this._applyDs4Metrics(txt, dtSec);
+        } else {
+          this.backendType = "vllm";
+          this._applyVllmMetrics(txt, dtSec);
+        }
+      } else if (this.backendType !== "ds4") {
+        this.backendType = "vllm";
+      }
+    } catch {
+      if (this.backendType !== "ds4") this.backendType = "vllm";
+    }
 
     return this._getSnapshot();
+  }
+
+  /**
+   * Apply ds4-server Prometheus /metrics (Entrpi/ds4-on-spark).
+   * Live tok/s from counter diffs (same as vLLM) so idle → 0. The engine's
+   * `ds4_decode_tok_s` / `ds4_prefill_tok_s` gauges are ~60s windows and stay
+   * non-zero long after requests finish — do not use them for the live panel.
+   * @param {string} txt
+   * @param {number} dtSec
+   */
+  _applyDs4Metrics(txt, dtSec) {
+    const decoded = this._getPromMetric(txt, "ds4_tokens_decoded_total");
+    const prefilled = this._getPromMetric(txt, "ds4_tokens_prefilled_total");
+
+    if (decoded != null) {
+      if (prefilled != null && dtSec > 0 && dtSec < 10) {
+        const deltaIn = prefilled - this.lastTokenCounts.input;
+        const deltaOut = decoded - this.lastTokenCounts.output;
+        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+      } else if (dtSec > 0 && dtSec < 10) {
+        const deltaOut = decoded - this.lastTokenCounts.output;
+        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+      }
+      if (prefilled != null) this.lastTokenCounts.input = prefilled;
+      this.lastTokenCounts.output = decoded;
+      this.totalOutputTokens = decoded;
+    } else {
+      // No counters — fall back to window gauges only while something is in flight
+      const inflightHint = this._getPromMetric(txt, "ds4_requests_inflight");
+      const gaugeGen = this._getPromMetric(txt, "ds4_decode_tok_s");
+      const gaugePrefill = this._getPromMetric(txt, "ds4_prefill_tok_s");
+      if (inflightHint != null && inflightHint > 0) {
+        if (gaugeGen != null) {
+          this.generationTps = Math.max(0, Math.round(gaugeGen * 100) / 100);
+        }
+        if (gaugePrefill != null) {
+          this.prefillTps = Math.max(0, Math.round(gaugePrefill * 100) / 100);
+        }
+      } else {
+        this.generationTps = 0;
+        this.prefillTps = 0;
+      }
+    }
+
+    const inflight = this._getPromMetric(txt, "ds4_requests_inflight");
+    this.requestsRunning = inflight;
+    if (inflight != null) this.slotsActive = Math.round(inflight);
+
+    const banksTotal = this._getPromMetric(txt, "ds4_banks_total");
+    if (banksTotal != null) this.slotsTotal = Math.round(banksTotal);
+
+    const specAccept = this._getPromMetric(txt, "ds4_spec_accept_ratio");
+    this.mtpAcceptanceRate =
+      specAccept != null ? Math.round(specAccept * 10000) / 10000 : null;
+
+    // Prefix-cache hit rate from prefill kind labels (cached / (computed+cached))
+    const cached = this._getPromMetricLabeled(
+      txt,
+      "ds4_tokens_prefilled_total",
+      "kind",
+      "cached"
+    );
+    const computed = this._getPromMetricLabeled(
+      txt,
+      "ds4_tokens_prefilled_total",
+      "kind",
+      "computed"
+    );
+    if (cached != null && computed != null) {
+      const total = cached + computed;
+      this.prefixCacheHitRate =
+        total > 0 ? Math.round((cached / total) * 10000) / 10000 : null;
+    } else {
+      this.prefixCacheHitRate = null;
+    }
+
+    // Clear tiles that are vLLM-histogram-specific (no ds4 equivalent yet)
+    this.kvCacheUsage = null;
+    this.requestsWaiting = null;
+    this.ttftP95Seconds = null;
+    this.preemptionsTotal = null;
+    this.e2eP95Seconds = null;
+    this.itlP95Seconds = null;
+  }
+
+  /**
+   * Apply stock vLLM Prometheus /metrics (tok/s + inference tiles).
+   * @param {string} txt
+   * @param {number} dtSec
+   */
+  _applyVllmMetrics(txt, dtSec) {
+    // Prefer local_compute prompt tokens — raw prompt_tokens_total includes MTP
+    // draft re-prefill cache hits that inflate the count ~240x for DSpark.
+    const promptTokensRaw = this._getVllmMetric(txt, "prompt_tokens_total");
+    const computeRe = new RegExp(`^vllm:prompt_tokens_by_source_total\\{[^}]*source="local_compute"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`, "m");
+    const computeMatch = txt.match(computeRe);
+    const promptTokens = computeMatch ? parseFloat(computeMatch[1]) : promptTokensRaw;
+    const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
+    if (promptTokens != null && genTokens != null) {
+      const deltaIn = promptTokens - this.lastTokenCounts.input;
+      const deltaOut = genTokens - this.lastTokenCounts.output;
+      this.lastTokenCounts.input = promptTokens;
+      this.lastTokenCounts.output = genTokens;
+      // _accumulateTokens keeps disk-persisted, restart-tolerant cumulative
+      // totals (per-user token accuracy); same values for fresh counters.
+      this._accumulateTokens(promptTokens, genTokens);
+      if (dtSec > 0 && dtSec < 10) {
+        this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+      }
+    }
+
+    const running = this._getVllmMetric(txt, "num_requests_running");
+    this.requestsRunning = running;
+    if (running != null) this.slotsActive = Math.round(running);
+
+    if (this.gpuMemoryUtilization == null) {
+      const sleepState = this._getVllmMetric(txt, "engine_sleep_state");
+      if (sleepState != null) this.gpuMemoryUtilization = sleepState;
+    }
+
+    this.requestsWaiting = this._getVllmMetric(txt, "num_requests_waiting");
+    this.kvCacheUsage = this._getVllmMetric(txt, "kv_cache_usage_perc");
+    this.preemptionsTotal = this._getVllmMetric(txt, "num_preemptions_total");
+
+    const ttftHist = this._parseVllmHistogram(txt, "vllm:time_to_first_token_seconds");
+    const ttftP95 = this._histogramQuantile(ttftHist.buckets, ttftHist.total, 0.95);
+    this.ttftP95Seconds = ttftP95 == null ? null : Math.round(ttftP95 * 1000) / 1000;
+
+    const e2eHist = this._parseVllmHistogram(txt, "vllm:e2e_request_latency_seconds");
+    const e2eP95 = this._histogramQuantile(e2eHist.buckets, e2eHist.total, 0.95);
+    this.e2eP95Seconds = e2eP95 == null ? null : Math.round(e2eP95 * 1000) / 1000;
+
+    const itlHist = this._parseVllmHistogram(txt, "vllm:inter_token_latency_seconds");
+    const itlP95 = this._histogramQuantile(itlHist.buckets, itlHist.total, 0.95);
+    this.itlP95Seconds = itlP95 == null ? null : Math.round(itlP95 * 1000) / 1000;
+
+    const prefixHits = this._getVllmMetric(txt, "prefix_cache_hits_total");
+    const prefixQueries = this._getVllmMetric(txt, "prefix_cache_queries_total");
+    this.prefixCacheHitRate =
+      prefixHits != null && prefixQueries != null && prefixQueries > 0
+        ? Math.round((prefixHits / prefixQueries) * 10000) / 10000
+        : null;
+
+    const mtpAccepted = this._getVllmMetric(txt, "spec_decode_num_accepted_tokens_total");
+    const mtpDrafted = this._getVllmMetric(txt, "spec_decode_num_draft_tokens_total");
+    this.mtpAcceptanceRate =
+      mtpAccepted != null && mtpDrafted != null && mtpDrafted > 0
+        ? Math.round((mtpAccepted / mtpDrafted) * 10000) / 10000
+        : null;
+  }
+
+  /**
+   * Apply SGLang /get_server_info.
+   * Older builds expose total_input_tokens / total_output_tokens.
+   * Current builds (metrics often off) expose sticky last_gen_throughput under
+   * internal_states[i]. Only treat it as live after the value changes between
+   * polls, then expire to 0 when it stops moving (idle leftover).
+   * @param {Record<string, unknown>} sgData
+   * @param {number} dtSec
+   */
+  _applySglangServerInfo(sgData, dtSec) {
+    // Prefer true max context (context_length / max_total_tokens). Do NOT use
+    // max_total_num_tokens — that is the KV-cache pool budget across concurrent
+    // sequences and is often ~2× the configured context (showed 2.1M for a 1M run).
+    const explicitCtx =
+      LlmProbe._positiveNumber(sgData.context_length) ??
+      LlmProbe._positiveNumber(sgData.max_total_tokens);
+    if (explicitCtx != null) {
+      this.contextLength = explicitCtx;
+    } else if (this.contextLength == null) {
+      this.contextLength =
+        LlmProbe._positiveNumber(sgData.max_req_input_len) ??
+        LlmProbe._positiveNumber(sgData.max_total_num_tokens) ??
+        null;
+    }
+
+    if (sgData.model_path) {
+      applyModelRef(this, sgData.model_path);
+    }
+
+    const maxRunning = Number(sgData.max_running_requests);
+    if (Number.isFinite(maxRunning) && maxRunning > 0) {
+      this.slotsTotal = Math.round(maxRunning);
+    }
+
+    const inTok = sgData.total_input_tokens;
+    const outTok = sgData.total_output_tokens;
+    if (inTok != null && outTok != null) {
+      const input = Number(inTok);
+      const output = Number(outTok);
+      if (Number.isFinite(input) && Number.isFinite(output)) {
+        const deltaIn = input - this.lastTokenCounts.input;
+        const deltaOut = output - this.lastTokenCounts.output;
+        this.lastTokenCounts.input = input;
+        this.lastTokenCounts.output = output;
+        // _accumulateTokens keeps disk-persisted, restart-tolerant cumulative
+        // totals (per-user token accuracy); it sets totalInput/totalOutput to
+        // the same values for fresh counters, so no clobbering concern here.
+        this._accumulateTokens(input, output);
+        if (dtSec > 0 && dtSec < 10) {
+          this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+          this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        }
+        return;
+      }
+    }
+
+    // No cumulative counters — sticky last_gen_throughput only while it moves
+    const lastGen = LlmProbe._sglangLastGenThroughput(sgData);
+    this.generationTps = this._sglangStickyThroughput(lastGen);
+  }
+
+  /**
+   * Map SGLang's sticky last_gen_throughput gauge to a live panel rate.
+   * Returns 0 until the value changes between polls (avoids showing a stale
+   * leftover after idle); stays live for a short window after each change.
+   * @param {number | null} raw
+   * @returns {number}
+   */
+  _sglangStickyThroughput(raw) {
+    if (raw == null || !Number.isFinite(raw) || raw < 0) {
+      this._sglangStickyTps = null;
+      return 0;
+    }
+    const rounded = Math.round(raw * 100) / 100;
+    const now = Date.now();
+    const prev = this._sglangStickyTps;
+
+    if (!prev) {
+      // First sample after reset/start — seed only; do not display stale gauge
+      this._sglangStickyTps = { value: rounded, liveUntil: 0 };
+      return 0;
+    }
+
+    if (rounded !== prev.value) {
+      this._sglangStickyTps = {
+        value: rounded,
+        liveUntil: now + SGLANG_STICKY_TPS_LIVE_MS,
+      };
+      return rounded;
+    }
+
+    if (prev.liveUntil > now) {
+      return rounded;
+    }
+    return 0;
+  }
+
+  /**
+   * @param {unknown} v
+   * @returns {number | null}
+   */
+  static _positiveNumber(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  /**
+   * Max last_gen_throughput across internal_states (or top-level).
+   * @param {Record<string, unknown>} sgData
+   * @returns {number | null}
+   */
+  static _sglangLastGenThroughput(sgData) {
+    if (!sgData || typeof sgData !== "object") return null;
+    const top = Number(sgData.last_gen_throughput);
+    if (Number.isFinite(top) && top >= 0) return top;
+
+    const states = sgData.internal_states;
+    if (!Array.isArray(states) || !states.length) return null;
+    let best = null;
+    for (const st of states) {
+      if (!st || typeof st !== "object") continue;
+      const v = Number(st.last_gen_throughput);
+      if (!Number.isFinite(v) || v < 0) continue;
+      if (best == null || v > best) best = v;
+    }
+    return best;
+  }
+
+  /**
+   * Apply SGLang Prometheus /metrics (--enable-metrics).
+   * Supports both `sglang:` and `sglang_` prefixes.
+   * @param {string} txt
+   * @param {number} dtSec
+   */
+  _applySglangMetrics(txt, dtSec) {
+    const gen =
+      this._getPromMetric(txt, "sglang:generation_tokens_total") ??
+      this._getPromMetric(txt, "sglang_generation_tokens_total");
+    const prompt =
+      this._getPromMetric(txt, "sglang:prompt_tokens_total") ??
+      this._getPromMetric(txt, "sglang_prompt_tokens_total");
+    if (gen == null) {
+      const gauge =
+        this._getPromMetric(txt, "sglang:gen_throughput") ??
+        this._getPromMetric(txt, "sglang_gen_throughput");
+      if (gauge != null) {
+        this.generationTps = Math.max(0, Math.round(gauge * 100) / 100);
+      }
+      return;
+    }
+
+    if (dtSec > 0 && dtSec < 10) {
+      const deltaOut = gen - this.lastTokenCounts.output;
+      this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+      if (prompt != null) {
+        const deltaIn = prompt - this.lastTokenCounts.input;
+        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        this.lastTokenCounts.input = prompt;
+      }
+    }
+    this.lastTokenCounts.output = gen;
+    this.totalOutputTokens = gen;
+
+    const running =
+      this._getPromMetric(txt, "sglang:num_running_reqs") ??
+      this._getPromMetric(txt, "sglang_num_running_reqs");
+    if (running != null) {
+      this.requestsRunning = running;
+      this.slotsActive = Math.round(running);
+    }
+  }
+
+  /** Prefer SGLang /get_model_info (or /model_info) over raw HF cache paths. */
+  async _enrichSglangModelInfo() {
+    for (const path of ["/get_model_info", "/model_info"]) {
+      try {
+        const res = await this._fetch(`${this.baseUrl}${path}`);
+        if (!res.ok) continue;
+        const data = await res.json();
+        const raw = data?.model_path || data?.tokenizer_path;
+        if (!raw) continue;
+        applyModelRef(this, raw);
+        return;
+      } catch {
+        /* try next */
+      }
+    }
   }
 
   // ─── llama.cpp native path ────────────────────────────────
@@ -637,8 +974,13 @@ export class LlmProbe {
       const propsRes = await this._fetch(`${this.baseUrl}/props`);
       if (propsRes.ok) {
         const props = await propsRes.json();
-        this.modelId = props.model_alias || props.model_path || this.modelId;
-        this.modelPath = props.model_path || null;
+        const raw = props.model_alias || props.model_path || this.modelId;
+        if (props.model_path && !isHfHubCachePath(props.model_path)) {
+          this.modelPath = props.model_path;
+        } else if (isHfHubCachePath(props.model_path) || isHfHubCachePath(props.model_alias)) {
+          this.modelPath = null;
+        }
+        if (raw) this.modelId = normalizeModelId(raw);
         this.contextLength = props.total_context_length || props.context_length || this.contextLength;
       }
     } catch {}
@@ -648,10 +990,15 @@ export class LlmProbe {
   }
 
   // ─── Metrics helpers ─────────────────────────────────────
-  _getVllmMetric(body, name) {
+  /**
+   * Sum all Prometheus series matching `name` (optional labels).
+   * @param {string} body
+   * @param {string} name Full metric name, e.g. "ds4_decode_tok_s" or "vllm:prompt_tokens_total"
+   * @returns {number | null}
+   */
+  _getPromMetric(body, name) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    // Allow optional Prometheus labels; sum all series (multi-engine / multi-model)
-    const re = new RegExp(`^vllm:${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
+    const re = new RegExp(`^${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
     let sum = 0;
     let found = false;
     let m;
@@ -663,6 +1010,39 @@ export class LlmProbe {
       }
     }
     return found ? sum : null;
+  }
+
+  /**
+   * Sum series of `name` whose label `labelKey` equals `labelValue`.
+   * @param {string} body
+   * @param {string} name
+   * @param {string} labelKey
+   * @param {string} labelValue
+   * @returns {number | null}
+   */
+  _getPromMetricLabeled(body, name, labelKey, labelValue) {
+    const escName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escKey = labelKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escVal = labelValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(
+      `^${escName}\\{[^}]*\\b${escKey}="${escVal}"[^}]*\\}\\s+([\\d.eE+-]+)\\s*$`,
+      "gm"
+    );
+    let sum = 0;
+    let found = false;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const v = parseFloat(m[1]);
+      if (Number.isFinite(v)) {
+        sum += v;
+        found = true;
+      }
+    }
+    return found ? sum : null;
+  }
+
+  _getVllmMetric(body, name) {
+    return this._getPromMetric(body, `vllm:${name}`);
   }
 
   /**
@@ -819,7 +1199,7 @@ export class LlmProbe {
   _buildPosture() {
     if (this.authOpen == null) return null;
 
-    const host = this.spark?.llmHost || this.spark?.lanIp || "";
+    const host = llmProbeHost(this.spark);
     const scope = classifyHostScope(host);
     const keyed = Boolean(this._apiKey());
     /** @type {"open" | "protected" | "keyed"} */
