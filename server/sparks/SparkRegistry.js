@@ -481,6 +481,8 @@ export class SparkRegistry {
     return {
       id: config.id,
       name: config.name || config.id,
+      /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
+      kind: config.kind === "host" ? "host" : "spark",
       lanIp: config.lanIp || "",
       llmHost: config.llmHost || null,
       cx7Ip: config.cx7Ip || null,
@@ -512,6 +514,10 @@ export class SparkRegistry {
       comfyMonitoring: Boolean(config.comfyMonitoring),
       /** ComfyUI HTTP port (default 8188). */
       comfyPort: this._normalizeComfyPort(config.comfyPort),
+      /**
+       * Opt-in tailnet presence via `tailscale status --json` (default false).
+       */
+      tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
       /**
        * Opt-in: Hermes Agent CLI is installed on this machine. When enabled,
        * the SparkMonitor checks for updates and allows one-click `hermes update`.

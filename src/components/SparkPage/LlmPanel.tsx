@@ -7,6 +7,7 @@ import { BotIcon, GearIcon, InfoIcon } from "../ui/icons";
 import { useMetricsHistoryTail } from "../../hooks/metricsStore";
 import { enginePhaseLabel, formatWaitReason, waitReasonDetail } from "../../utils/health";
 import { BenchmarkDialog } from "./BenchmarkDialog";
+import { LlmDailyChart } from "./LlmDailyChart";
 
 interface LlmPanelProps {
   llm: LlmMetrics | null;
@@ -56,6 +57,7 @@ function BackendBadge({ backend }: { backend: string | null }) {
     "llama.cpp": "llama.cpp",
     sglang: "sgLang",
     ds4: "ds4",
+    exl3: "EXL3",
   };
 
   return (
@@ -169,6 +171,9 @@ export function LlmPanel({
 }: LlmPanelProps) {
   // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
   const genHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.tps`);
+  const prefillHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.prefill`);
+  const cachedPrefillHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.prefillCached`);
+  const uncachedPrefillHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.prefillUncached`);
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [hostDraft, setHostDraft] = useState(llmHost || "");
@@ -195,6 +200,10 @@ export function LlmPanel({
   }, [clearEngineInfoTimer]);
 
   const generationTps = llm?.generationTps ?? 0;
+  const prefillTps = llm?.prefillTps ?? 0;
+  const showPrefillSplit = llm?.cachedPrefillTps != null || llm?.uncachedPrefillTps != null;
+  const cachedPrefillTps = llm?.cachedPrefillTps ?? 0;
+  const uncachedPrefillTps = llm?.uncachedPrefillTps ?? 0;
   const available = llm?.available ?? false;
 
   // Keep draft in sync when server pushes a different port (other tab / reload)
@@ -311,7 +320,7 @@ export function LlmPanel({
       {showSettings ? (
         <div className="space-y-3">
           <p className="text-[10px] text-muted">
-            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / OpenAI-compatible gateway).
+            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / EXL3 / OpenAI-compatible gateway).
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-muted">Port</span>
@@ -452,6 +461,7 @@ export function LlmPanel({
             >
               Showcase
             </button>
+            <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
           </div>
         </div>
       ) : (
@@ -486,6 +496,48 @@ export function LlmPanel({
               </span>
             </div>
           </div>
+          <div
+            className="flex items-center justify-between"
+            title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
+          >
+            <span className="text-xs text-muted">Prefill tok/s</span>
+            <div className="flex items-center gap-2">
+              <Sparkline data={prefillHistory} color="var(--color-text)" height={24} />
+              <span className="font-tabular text-sm font-semibold text-text">
+                {prefillTps.toFixed(1)}
+              </span>
+            </div>
+          </div>
+          {showPrefillSplit && (
+            <>
+              <div
+                className="flex items-center justify-between"
+                title="Prefill tokens served from prefix cache (little GPU work). High values mean prompt reuse, not a faster cold prefill."
+              >
+                <span className="text-xs text-muted">Cached prefill tok/s</span>
+                <div className="flex items-center gap-2">
+                  <Sparkline data={cachedPrefillHistory} color="var(--color-muted)" height={24} />
+                  <span className="font-tabular text-sm font-semibold text-muted">
+                    {cachedPrefillTps.toFixed(1)}
+                  </span>
+                </div>
+              </div>
+              <div
+                className="flex items-center justify-between"
+                title="Uncached (computed) prefill — tokens that actually build KV cache on the GPU."
+              >
+                <span className="text-xs text-muted">Uncached prefill tok/s</span>
+                <div className="flex items-center gap-2">
+                  <Sparkline data={uncachedPrefillHistory} color="var(--color-text)" height={24} />
+                  <span className="font-tabular text-sm font-semibold text-text">
+                    {uncachedPrefillTps.toFixed(1)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
 
           {llm && (llm.enginePhase || llm.decodeBound) && (
             <div

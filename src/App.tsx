@@ -29,6 +29,8 @@ function placeholderSnapshot(
     llmMonitoring?: boolean;
     comfyMonitoring?: boolean;
     comfyPort?: number;
+    tailscaleMonitoring?: boolean;
+    kind?: "spark" | "host";
   }
 ): SparkSnapshot {
   const role =
@@ -43,6 +45,7 @@ function placeholderSnapshot(
   return {
     id,
     name,
+    kind: roleFields?.kind ?? "spark",
     online: false,
     uptime: null,
     disabledDevices,
@@ -63,6 +66,7 @@ function placeholderSnapshot(
           : roleFields?.llmMonitoring !== false,
     comfyMonitoring: Boolean(roleFields?.comfyMonitoring),
     comfyPort: roleFields?.comfyPort ?? 8188,
+    tailscaleMonitoring: Boolean(roleFields?.tailscaleMonitoring),
     hermes: {
       monitoring: false,
       installed: null,
@@ -93,6 +97,7 @@ function placeholderSnapshot(
       unifiedMemory: null,
       llm: [],
       comfy: null,
+      tailscale: null,
     },
   };
 }
@@ -181,10 +186,12 @@ function DashboardApp() {
               llmMonitoring: c.llmMonitoring ?? existing.llmMonitoring,
               comfyMonitoring: c.comfyMonitoring ?? existing.comfyMonitoring,
               comfyPort: c.comfyPort ?? existing.comfyPort,
+              tailscaleMonitoring: c.tailscaleMonitoring ?? existing.tailscaleMonitoring,
               disabledDevices: c.disabledDevices || existing.disabledDevices,
               disabledInterfaces: c.disabledInterfaces || existing.disabledInterfaces,
               llmPorts: c.llmPorts ?? existing.llmPorts,
               llmPort: c.llmPorts?.[0] ?? c.llmPort ?? existing.llmPort,
+              kind: c.kind ?? existing.kind,
             };
           }
           return placeholderSnapshot(
@@ -201,6 +208,8 @@ function DashboardApp() {
               llmMonitoring: c.llmMonitoring,
               comfyMonitoring: c.comfyMonitoring,
               comfyPort: c.comfyPort,
+              tailscaleMonitoring: c.tailscaleMonitoring,
+              kind: c.kind,
             }
           );
         })

@@ -4,6 +4,8 @@ import { SystemCollector } from "../collectors/SystemCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
 import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
+import { TailscaleProbe } from "../collectors/TailscaleProbe.js";
+import { llmDaily } from "../collectors/LlmDaily.js";
 import { sshTest, sshExec } from "../collectors/ssh.js";
 import {
   POLL_INTERVAL_GPU,
@@ -15,6 +17,7 @@ import {
   POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
   POLL_INTERVAL_HERMES,
+  POLL_INTERVAL_TAILSCALE,
   LLM_PORT,
   COMFY_PORT,
   HOST_PATHS,
@@ -49,6 +52,11 @@ export class SparkMonitor {
     /** @type {ComfyProbe | null} */
     this.comfyProbe = this._comfyMonitoringEnabled(spark)
       ? new ComfyProbe(spark, this._comfyPort(spark))
+      : null;
+
+    /** @type {TailscaleProbe | null} */
+    this.tailscaleProbe = this._tailscaleMonitoringEnabled(spark)
+      ? new TailscaleProbe(spark)
       : null;
 
     /** @type {HermesProbe | null} */
@@ -88,8 +96,24 @@ export class SparkMonitor {
       unifiedMemory: this.collector._defaultUnifiedMemory(),
       llm: [],
       comfy: null,
+      tailscale: null,
     };
     this._lastUpdate = {};
+
+    // Hardware summary: kind "spark" uses the static DGX Spark specs; kind
+    // "host" (dedicated GPU Linux box) detects real hardware once in the
+    // background so the header doesn't mislabel the machine as a Spark.
+    this._hardwareSummary = this._staticHardwareSummary(spark);
+    this._stopped = false;
+    if (spark?.kind === "host") {
+      void this.collector
+        .detectHardware()
+        .then((detected) => {
+          if (this._stopped || !detected) return;
+          this._hardwareSummary = { ...this._hardwareSummary, ...detected };
+        })
+        .catch(() => {});
+    }
 
     // Timers
     this._intervals = [];
@@ -99,6 +123,8 @@ export class SparkMonitor {
     this._comfyIntervalId = null;
     /** @type {ReturnType<typeof setInterval> | null} */
     this._hermesIntervalId = null;
+    /** @type {ReturnType<typeof setInterval> | null} */
+    this._tailscaleIntervalId = null;
     this._running = false;
     /** @type {Record<string, boolean>} in-flight domain guards */
     this._inflight = {};
@@ -110,6 +136,7 @@ export class SparkMonitor {
     const wasComfy = this._comfyMonitoringEnabled(this.spark);
     const prevComfyPort = this._comfyPort(this.spark);
     const wasHermes = this._hermesMonitoringEnabled(this.spark);
+    const wasTailscale = this._tailscaleMonitoringEnabled(this.spark);
     this.spark = spark;
     this.collector.spark = spark;
 
@@ -150,6 +177,18 @@ export class SparkMonitor {
       this._metrics.comfy = null;
     }
 
+    // Tailscale probe — create / update / clear
+    if (this._tailscaleMonitoringEnabled()) {
+      if (this.tailscaleProbe) {
+        this.tailscaleProbe.setTarget(spark);
+      } else {
+        this.tailscaleProbe = new TailscaleProbe(spark);
+      }
+    } else {
+      this.tailscaleProbe = null;
+      this._metrics.tailscale = null;
+    }
+
     // Hermes probe — create / update / clear
     if (this._hermesMonitoringEnabled()) {
       if (this.hermesProbe) {
@@ -174,6 +213,9 @@ export class SparkMonitor {
     const comfyPortChanged = comfyOn && prevComfyPort !== this._comfyPort();
     if (this._running && (wasComfy !== comfyOn || comfyPortChanged)) {
       this._restartComfyPollInterval();
+    }
+    if (this._running && wasTailscale !== this._tailscaleMonitoringEnabled()) {
+      this._restartTailscalePollInterval();
     }
   }
 
@@ -232,6 +274,31 @@ export class SparkMonitor {
   }
 
   /**
+   * Opt-in tailnet monitoring (all roles; default off).
+   * @param {object} [spark]
+   */
+  _tailscaleMonitoringEnabled(spark = this.spark) {
+    return Boolean(spark?.tailscaleMonitoring);
+  }
+
+  /** Start or clear the tailnet poll timer based on monitoring flag. */
+  _restartTailscalePollInterval() {
+    if (this._tailscaleIntervalId != null) {
+      clearInterval(this._tailscaleIntervalId);
+      this._intervals = this._intervals.filter((id) => id !== this._tailscaleIntervalId);
+      this._tailscaleIntervalId = null;
+    }
+    if (this._tailscaleMonitoringEnabled() && this._running) {
+      this._tailscaleIntervalId = setInterval(
+        () => this._pollDomain("tailscale"),
+        POLL_INTERVAL_TAILSCALE
+      );
+      this._intervals.push(this._tailscaleIntervalId);
+      void this._pollDomain("tailscale");
+    }
+  }
+
+  /**
    * Opt-in Hermes Agent monitoring (all roles; default off).
    * @param {object} [spark]
    */
@@ -275,6 +342,7 @@ export class SparkMonitor {
   start() {
     if (this._running) return;
     this._running = true;
+    this._stopped = false;
     this._poll();
     this._intervals.push(setInterval(() => this._pollDomain("gpu"), POLL_INTERVAL_GPU));
     this._intervals.push(setInterval(() => this._pollDomain("cpu"), POLL_INTERVAL_CPU));
@@ -285,6 +353,7 @@ export class SparkMonitor {
     this._restartLlmPollInterval();
     this._restartComfyPollInterval();
     this._restartHermesPollInterval();
+    this._restartTailscalePollInterval();
     // Liveness on a slightly slower cadence
     this._intervals.push(setInterval(() => this._checkOnline(), POLL_INTERVAL_LIVENESS));
     console.log(`[SparkMonitor] ${this.spark.id} started`);
@@ -293,11 +362,13 @@ export class SparkMonitor {
   /** Stop background polling. */
   stop() {
     this._running = false;
+    this._stopped = true;
     for (const id of this._intervals) clearInterval(id);
     this._intervals = [];
     this._llmIntervalId = null;
     this._comfyIntervalId = null;
     this._hermesIntervalId = null;
+    this._tailscaleIntervalId = null;
     this._inflight = {};
     if (this.comfyProbe) {
       try {
@@ -313,9 +384,11 @@ export class SparkMonitor {
   snapshot() {
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
     const comfyOn = this._comfyMonitoringEnabled();
+    const tailscaleOn = this._tailscaleMonitoringEnabled();
     return {
       id: this.spark.id,
       name: this.spark.name,
+      kind: this.spark.kind || "spark",
       online: this.online,
       uptime: this._uptimeSeconds,
       lanIp: this.spark.lanIp || "",
@@ -339,8 +412,9 @@ export class SparkMonitor {
             .filter((n) => Number.isInteger(n)),
       comfyMonitoring: comfyOn,
       comfyPort: this._comfyPort(),
+      tailscaleMonitoring: tailscaleOn,
       hermes: this._hermes,
-      hardware: this._getHardwareSummary(),
+      hardware: this._hardwareSummary,
       metrics: {
         // NOTE: no `timestamp` here on purpose. The broadcast path skips
         // snapshots whose JSON is byte-identical to the previous one (see
@@ -357,6 +431,7 @@ export class SparkMonitor {
         unifiedMemory: this._metrics.unifiedMemory,
         llm: this._metrics.llm,
         comfy: comfyOn ? this._metrics.comfy : null,
+        tailscale: tailscaleOn ? this._metrics.tailscale : null,
       },
     };
   }
@@ -426,6 +501,7 @@ export class SparkMonitor {
       this._pollDomain("llm"),
       this._pollDomain("comfy"),
       this._pollDomain("hermes"),
+      this._pollDomain("tailscale"),
     ]);
   }
 
@@ -437,6 +513,7 @@ export class SparkMonitor {
     if (domain === "llm" && !this._llmMonitoringEnabled()) return;
     if (domain === "comfy" && !this._comfyMonitoringEnabled()) return;
     if (domain === "hermes" && !this._hermesMonitoringEnabled()) return;
+    if (domain === "tailscale" && !this._tailscaleMonitoringEnabled()) return;
     this._inflight[domain] = true;
     try {
       let result;
@@ -467,6 +544,9 @@ export class SparkMonitor {
           break;
         case "comfy":
           result = this.comfyProbe ? await this.comfyProbe.probe() : null;
+          break;
+        case "tailscale":
+          result = this.tailscaleProbe ? await this.tailscaleProbe.probe() : null;
           break;
         case "hermes":
           result = this.hermesProbe ? await this.hermesProbe.check() : null;
@@ -506,9 +586,19 @@ export class SparkMonitor {
           break;
         case "llm":
           this._metrics.llm = result;
+          {
+            const probes = Array.from(this.llmProbes.values());
+            for (let i = 0; i < result.length; i++) {
+              const probe = probes[i];
+              if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
+            }
+          }
           break;
         case "comfy":
           this._metrics.comfy = result;
+          break;
+        case "tailscale":
+          this._metrics.tailscale = result;
           break;
         case "hermes":
           this.applyHermesCheck(result);
@@ -660,8 +750,24 @@ export class SparkMonitor {
     }
   }
 
-  // ─── Hardware summary (cached, computed once) ─────────────
-  _getHardwareSummary() {
+  // ─── Hardware summary ─────────────────────────────────────
+  /**
+   * Static summary used for kind "spark" (DGX Spark specs) and as the
+   * pre-detection fallback for kind "host". kind "host" is then enriched
+   * with real hardware from `detectHardware()` once available.
+   */
+  _staticHardwareSummary(spark) {
+    if (spark?.kind === "host") {
+      return {
+        device: "Linux GPU host",
+        cpuModel: null,
+        cpuCores: null,
+        totalMemoryGB: null,
+        gpuChip: null,
+        cudaDriver: null,
+        storageModel: null,
+      };
+    }
     return {
       device: "NVIDIA DGX Spark",
       cpuModel: "GB10",
@@ -673,3 +779,4 @@ export class SparkMonitor {
     };
   }
 }
+

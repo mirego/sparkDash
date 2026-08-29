@@ -3,9 +3,12 @@ import type { SparkSnapshot } from "../../api/types";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { updateSpark, refreshSparkMetric, addLlmPort, removeLlmPort } from "../../api/client";
 import { SparkHeader } from "./SparkHeader";
+import { SparkActions } from "./SparkActions";
 import { GpuPanel } from "./GpuPanel";
+import { RamPanel } from "./RamPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
+import { TailscalePanel } from "./TailscalePanel";
 import { LlmPanel } from "./LlmPanel";
 import { HealthPanel } from "./HealthPanel";
 import { ComfyPanel } from "./ComfyPanel";
@@ -174,6 +177,7 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
 
   const llmOn = isLlmMonitoringEnabled(spark);
   const comfyOn = Boolean(spark.comfyMonitoring);
+  const tailscaleOn = Boolean(spark.tailscaleMonitoring);
   /** First LLM + Comfy share a row when both are on. */
   const primarySideBySide = llmOn && comfyOn;
   const showServices = llmOn || comfyOn;
@@ -214,7 +218,13 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-page-gap)" }}>
       <SparkHeader spark={spark} onEdit={onEdit} />
       <HealthPanel spark={spark} />
-      <div className="spark-page grid md:grid-cols-2" style={{ gap: "var(--density-page-gap)" }}>
+      {/* Mobile-only action row (Update Hermes / Shutdown·Wake / Edit) — desktop keeps them in the header. */}
+      <SparkActions
+        spark={spark}
+        onEdit={onEdit}
+        className="flex flex-wrap items-center justify-end gap-2 px-1 py-1 sm:hidden"
+      />
+      <div className="spark-page grid grid-cols-1 md:grid-cols-2" style={{ gap: "var(--density-page-gap)" }}>
         <SectionHeading
           title="Resources"
           open={resourcesOpen}
@@ -223,27 +233,63 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
         />
         {resourcesOpen && (
           <>
-            {/* Resources layout: GPU spans the full left column; Storage + Network stack in the right column */}
-            <GpuPanel
-              gpu={metrics.gpu}
-              sparkId={spark.id}
-              temperatureUnit={temperatureUnit}
-              className="md:row-span-2"
-            />
-            <StoragePanel
-              storage={metrics.storage}
-              sparkId={spark.id}
-              disabledDevices={disabledDevices}
-              onDisabledChange={setDisabledDevices}
-              storagePollDisabled={storagePollDisabled}
-              onStoragePollModeChange={handleStoragePollModeChange}
-            />
-            <NetworkPanel
-              network={metrics.network}
-              sparkId={spark.id}
-              disabledInterfaces={disabledInterfaces}
-              onDisabledChange={setDisabledInterfaces}
-            />
+            {spark.kind === "host" ? (
+              /* Hosts: GPU spans the full left column; RAM → Network → Storage [→ Tailnet] stack in the right column */
+              <>
+                <GpuPanel
+                  gpu={metrics.gpu}
+                  sparkId={spark.id}
+                  temperatureUnit={temperatureUnit}
+                  className={tailscaleOn ? "md:row-span-4" : "md:row-span-3"}
+                />
+                <RamPanel
+                  ram={metrics.ram}
+                  cpu={metrics.cpu}
+                  sparkId={spark.id}
+                  temperatureUnit={temperatureUnit}
+                />
+                <NetworkPanel
+                  network={metrics.network}
+                  sparkId={spark.id}
+                  disabledInterfaces={disabledInterfaces}
+                  onDisabledChange={setDisabledInterfaces}
+                />
+                <StoragePanel
+                  storage={metrics.storage}
+                  sparkId={spark.id}
+                  disabledDevices={disabledDevices}
+                  onDisabledChange={setDisabledDevices}
+                  storagePollDisabled={storagePollDisabled}
+                  onStoragePollModeChange={handleStoragePollModeChange}
+                />
+                {tailscaleOn && <TailscalePanel tailscale={metrics.tailscale ?? null} />}
+              </>
+            ) : (
+              /* Resources layout: GPU spans the full left column; Storage + Network [+ Tailnet] stack in the right column */
+              <>
+                <GpuPanel
+                  gpu={metrics.gpu}
+                  sparkId={spark.id}
+                  temperatureUnit={temperatureUnit}
+                  className={tailscaleOn ? "md:row-span-3" : "md:row-span-2"}
+                />
+                <StoragePanel
+                  storage={metrics.storage}
+                  sparkId={spark.id}
+                  disabledDevices={disabledDevices}
+                  onDisabledChange={setDisabledDevices}
+                  storagePollDisabled={storagePollDisabled}
+                  onStoragePollModeChange={handleStoragePollModeChange}
+                />
+                <NetworkPanel
+                  network={metrics.network}
+                  sparkId={spark.id}
+                  disabledInterfaces={disabledInterfaces}
+                  onDisabledChange={setDisabledInterfaces}
+                />
+                {tailscaleOn && <TailscalePanel tailscale={metrics.tailscale ?? null} />}
+              </>
+            )}
           </>
         )}
         {/*

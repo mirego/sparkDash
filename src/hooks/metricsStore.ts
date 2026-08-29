@@ -162,9 +162,13 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
     }
     if (m.cpu) {
       pushHistory(`${s.id}:cpu.usage`, m.cpu.usage);
-      if (m.cpu.temperature != null && Number.isFinite(m.cpu.temperature)) {
+      // CPU temp is only shown for dedicated GPU hosts (not DGX Sparks).
+      if (s.kind === "host" && m.cpu.temperature != null && m.cpu.temperature > 0) {
         pushHistory(`${s.id}:cpu.temp`, m.cpu.temperature);
       }
+    }
+    if (m.ram) {
+      pushHistory(`${s.id}:ram.percentage`, m.ram.percentage);
     }
     if (Array.isArray(m.llm)) {
       // Zip with snapshot.llmPorts so multi-port LLM series key distinctly.
@@ -182,6 +186,12 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         if (llm.kvCacheUsage != null) pushHistory(`${s.id}:llm${portKey}.kv`, llm.kvCacheUsage);
         if (llm.itlP95Seconds != null) pushHistory(`${s.id}:llm${portKey}.itl`, llm.itlP95Seconds);
         if (llm.genTpsPerRunning != null) pushHistory(`${s.id}:llm${portKey}.tpsPerRun`, llm.genTpsPerRunning);
+        if (llm.cachedPrefillTps != null) {
+          pushHistory(`${s.id}:llm${portKey}.prefillCached`, llm.cachedPrefillTps);
+        }
+        if (llm.uncachedPrefillTps != null) {
+          pushHistory(`${s.id}:llm${portKey}.prefillUncached`, llm.uncachedPrefillTps);
+        }
         // Encode phase as ordinal for sparklines: DOWN0 IDLE1 QUEUED2 PREFILL3 DECODE4 SLOW5
         if (llm.enginePhase) {
           const phaseMap: Record<string, number> = {

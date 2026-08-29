@@ -5,6 +5,7 @@ import type {
   HermesBatchUpdateResponse,
   HermesUpdatesResponse,
   LlmMetrics,
+  LlmDailyResponse,
   ModelFleetResponse,
   Settings,
   ShowcaseListResponse,
@@ -51,6 +52,16 @@ export function fetchSparkMetrics(id: string): Promise<{
 /** GPU energy history pre-aggregated into day / week / month buckets. */
 export function fetchEnergyHistory(): Promise<EnergyReport> {
   return apiFetch("/api/energy");
+}
+
+/** Daily busy tok/s rollups for one Spark LLM port. */
+export function fetchLlmDaily(
+  id: string,
+  port: number,
+  days = 14
+): Promise<LlmDailyResponse> {
+  const q = new URLSearchParams({ port: String(port), days: String(days) });
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/llm/daily?${q.toString()}`);
 }
 
 export function addSpark(config: SparkConfig): Promise<{ success: boolean; spark: SparkConfig }> {
