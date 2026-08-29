@@ -589,7 +589,9 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
               </div>
             );
           })()}
-          {(() => {
+          {/* Big-number tok/s | prefill block — redundant with the sparkline
+              section below (which already shows live values + graphs). */}
+          {/* {(() => {
             const role = resolveSparkRole(spark);
             if (role === "worker") return null;
             const llmArr = spark.metrics.llm;
@@ -611,7 +613,7 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                 </div>
               </div>
             );
-          })()}
+          })()} */}
           {/* Token throughput sparklines */}
           {llm && (
             <button type="button" onClick={() => onOpenDialog?.(spark.id)}
@@ -786,7 +788,13 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
  * from DGX_SPARK thresholds) into a single warning ribbon shown above the
  * Spark cards: danger ≥ critical, else warn ≥ caution. Hidden when every online
  * Spark is healthy (no silent noise).
+ *
+ * REMOVED from render (2026-08-29): the "Critical — action needed" / "Warning"
+ * ribbon was too alarmist for the overview. Per-Spark health badges on each
+ * card + InferenceHealthPanel below the grid still surface alert state.
+ * Kept here (unused) so it can be re-added trivially.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function FleetHealthBanner({ sparks }: { sparks: SparkSnapshot[] }) {
   const online = sparks.filter((s) => s.online && s.health);
   const danger = online.filter((s) => s.health!.level === "danger");
@@ -1084,7 +1092,8 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         description={`Gracefully shut down all ${onlineShutdownCount} online Spark${onlineShutdownCount === 1 ? "" : "s"}? Offline nodes will be skipped.`}
         confirmLabel="Shut down all"
       />
-      <FleetHealthBanner sparks={visibleSparks} />
+      {/* FleetHealthBanner removed — alert states still visible via per-Spark
+          health badges and the InferenceHealthPanel below the cards. */}
       <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
         {visibleSparks.map((spark) => (
           <SparkCard key={spark.id} spark={spark}
