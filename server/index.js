@@ -43,6 +43,7 @@ import {
   evaluateModelHealth,
 } from "./collectors/ModelRegistry.js";
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
+import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
@@ -1889,6 +1890,63 @@ let broadcastTimer = null;
 let _lastBroadcastPayload = null;
 
 /** Build the snapshot payload string. Centralized so broadcast + refresh share it. */
+
+/** Map /inflight sparkId (or backend / model pin) onto a SparkRegistry id. */
+// (impl moved to ./util/inflightSpark.js)
+
+function filterActiveUsersForSpark(allUsers, sparkId) {
+  if (!Array.isArray(allUsers)) return [];
+  const out = [];
+  let totalRunning = 0;
+  let totalWaiting = 0;
+  for (const u of allUsers) {
+    const reqs = Array.isArray(u.openRequests) ? u.openRequests : [];
+    const mine = reqs.filter((r) => requestBelongsToSpark(r, sparkId));
+    // If the user object itself is already scoped (no per-req sparkId yet),
+    // keep it only when the rolled-up sparkId matches.
+    if (mine.length === 0) {
+      if (reqs.length === 0 && resolveInflightSparkId(u) === sparkId) {
+        out.push(u);
+        totalRunning += u.activeCount || 0;
+        totalWaiting += u.waitingCount || 0;
+      }
+      continue;
+    }
+    const waitingCount = mine.filter((r) => r.phase === "waiting").length;
+    const activeCount = mine.length - waitingCount;
+    totalRunning += activeCount;
+    totalWaiting += waitingCount;
+    const promptEstTokens = mine.reduce((s, r) => s + (Number(r.promptEstTokens) || 0), 0);
+    const completionEstTokens = mine.reduce((s, r) => s + (Number(r.completionEstTokens) || 0), 0);
+    const maxTokens = mine.reduce((s, r) => s + (Number(r.maxTokens) || 0), 0);
+    const cachedVals = mine.map((r) => r.cachedTokens).filter((n) => n != null);
+    const cachedTokens = cachedVals.length
+      ? cachedVals.reduce((s, n) => s + Number(n), 0)
+      : null;
+    out.push({
+      ...u,
+      requests: mine.length,
+      waiting: waitingCount > 0,
+      waitingCount,
+      activeCount,
+      promptEstTokens: promptEstTokens || null,
+      completionEstTokens: completionEstTokens || null,
+      maxTokens: maxTokens || null,
+      cachedTokens,
+      model: mine[0]?.model ?? u.model ?? null,
+      openRequests: mine,
+    });
+  }
+  out._totalRunning = totalRunning;
+  out._totalWaiting = totalWaiting;
+  return out;
+}
+
+function filterRecentForSpark(recent, sparkId) {
+  if (!Array.isArray(recent)) return [];
+  return recent.filter((r) => requestBelongsToSpark(r, sparkId));
+}
+
 async function buildSnapshotPayload() {
   // Poll the auth-proxy's /inflight endpoint for real-time active user counts.
   const allActiveUsers = await getActiveUsers();
@@ -1914,10 +1972,20 @@ async function buildSnapshotPayload() {
   for (const spark of sparks) {
     if (Array.isArray(spark.metrics?.llm)) {
       for (const llm of spark.metrics.llm) {
-        llm.activeUsers = allActiveUsers;
-        llm.recentRequests = allActiveUsers._recentRequests || [];
-        llm.proxyRequestsRunning = proxyRunning;
-        llm.proxyRequestsWaiting = proxyWaiting;
+        // Fleet /inflight is one list. Dual least-queue must not clone the
+        // same key-prefix pills onto every Spark card — only requests that
+        // landed on this spark.id (from X-Fleet-Backend / pin alias).
+        llm.activeUsers = filterActiveUsersForSpark(allActiveUsers, spark.id);
+        llm.recentRequests = filterRecentForSpark(
+          allActiveUsers._recentRequests || [],
+          spark.id,
+        );
+        const scopedRun = llm.activeUsers._totalRunning || 0;
+        const scopedWait = llm.activeUsers._totalWaiting || 0;
+        llm.proxyRequestsRunning = scopedRun;
+        llm.proxyRequestsWaiting = scopedWait;
+        llm.fleetProxyRequestsRunning = proxyRunning;
+        llm.fleetProxyRequestsWaiting = proxyWaiting;
         // Preserve engine gauges under explicit names (probe already sets them;
         // re-assert so older snapshots stay honest if something else touched run/wait).
         if (llm.engineRequestsRunning == null && llm.requestsRunning != null) {
