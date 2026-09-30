@@ -42,6 +42,11 @@ import {
   buildModelFleet,
   evaluateModelHealth,
 } from "./collectors/ModelRegistry.js";
+import {
+  buildOpencodeConfig,
+  validateOpencodeConfig,
+  DEFAULT_CPA_HOST,
+} from "./collectors/OpenCodeExport.js";
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
@@ -1741,6 +1746,57 @@ app.get("/api/models/fleet", async (_req, res) => {
     routing: modelRegistry.registry?.routing || {},
     currentServedId: resolveLiveCurrentModel(),
     models,
+  });
+});
+
+// ─── opencode.json provider block export ─────────────────
+/**
+ * GET /api/models/export/opencode?host=<cpa-host>
+ *
+ * Generates a ready-to-paste opencode.json provider block from the LIVE
+ * model-registry.json — re-read per request (d-001: copy artifact only; we do
+ * not write files anywhere, and nothing here is cached between requests).
+ * Endpoint + alias + apiKey rules follow d-002:
+ *   baseURL http://<cpa-host>:8317/v1, apiKey {env:CPA_API_KEY}, models keyed
+ *   by the claude-* alias ids CPA accepts (live-models-status.json as truth,
+ *   registry aliases as fallback).
+ */
+app.get("/api/models/export/opencode", (req, res) => {
+  const hostRaw = typeof req.query.host === "string" ? req.query.host.trim() : "";
+  // registry getter hot-reloads on mtime change — no sparkDash restart needed.
+  const registry = modelRegistry.registry;
+  if (!Array.isArray(registry?.models) || registry.models.length === 0) {
+    return res.status(409).json({
+      error: modelRegistry.error
+        ? `model registry invalid: ${modelRegistry.error}`
+        : "model registry absent or empty — run the control-plane fleet sync first",
+    });
+  }
+  let built;
+  try {
+    built = buildOpencodeConfig(registry, {
+      host: hostRaw || DEFAULT_CPA_HOST,
+      cpaStatus: readCpaStatus(),
+      // Live probe truth (canonicalised); buildOpencodeConfig falls back to
+      // CPA working_set when the probe has no served id yet.
+      servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
+    });
+  } catch (err) {
+    if (err.code === "BAD_HOST") return res.status(400).json({ error: err.message });
+    throw err;
+  }
+  const check = validateOpencodeConfig(built.config);
+  if (!check.valid) {
+    // Generator bug, not user error: surface loudly rather than ship a bad artifact.
+    console.error("[opencode-export] generated config failed validation:", check.errors);
+    return res.status(500).json({ error: "generated config failed schema validation", details: check.errors });
+  }
+  res.json({
+    format: "opencode.json",
+    host: hostRaw || DEFAULT_CPA_HOST,
+    warnings: built.warnings,
+    config: built.config,
+    text: JSON.stringify(built.config, null, 2),
   });
 });
 

@@ -7,6 +7,7 @@ import type {
   LlmMetrics,
   LlmDailyResponse,
   ModelFleetResponse,
+  OpencodeExportResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -407,4 +408,13 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
 /** Per-model fleet: registry + live health badges + coalesced per-user usage. */
 export function fetchModelFleet(): Promise<ModelFleetResponse> {
   return apiFetch("/api/models/fleet");
+}
+
+/**
+ * Copy-paste-ready opencode.json provider block generated from the live
+ * registry. `host` is the CLIProxyAPI host (default server-side: 127.0.0.1).
+ */
+export function fetchOpencodeExport(host?: string): Promise<OpencodeExportResponse> {
+  const q = host ? `?host=${encodeURIComponent(host)}` : "";
+  return apiFetch(`/api/models/export/opencode${q}`);
 }

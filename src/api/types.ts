@@ -738,6 +738,33 @@ export interface ModelFleetResponse {
   models: FleetModel[];
 }
 
+/** One model entry inside an exported opencode provider block. */
+export interface OpencodeExportModelEntry {
+  name: string;
+}
+
+/** GET /api/models/export/opencode response — copy-paste-ready artifact. */
+export interface OpencodeExportResponse {
+  format: "opencode.json";
+  host: string;
+  warnings: string[];
+  config: {
+    $schema: string;
+    model?: string;
+    provider: Record<
+      string,
+      {
+        npm: string;
+        name: string;
+        env: string[];
+        options: { baseURL: string; apiKey: string };
+        models: Record<string, OpencodeExportModelEntry>;
+      }
+    >;
+  };
+  text: string;
+}
+
 export interface Settings {
   pollIntervalMs: number;
   defaultLlmPort: number;
