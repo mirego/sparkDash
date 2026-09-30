@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { FleetModel, ModelFleetResponse } from "../../api/types";
 import { fetchModelFleet } from "../../api/client";
+import { PiMonoCopyButton } from "./PiMonoCopyButton";
 
 const STATUS_COLOR = {
   live: "var(--color-success, #4dbf91)",
@@ -95,7 +96,7 @@ export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
 
   return (
     <div className="panel" style={{ padding: "var(--density-card-pad)" }}>
-      <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+      <div className="flex flex-wrap items-center justify-between gap-2" style={{ marginBottom: 12 }}>
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-text-strong">Model Fleet</span>
           {data && data.models.length > 0 && (
@@ -104,11 +105,14 @@ export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
             </span>
           )}
         </div>
-        <span className="text-[10px] text-muted">
-          {data?.registryLoaded ? "registry-driven" : "registry absent"} · {
-            data && data.ts ? new Date(data.ts).toLocaleTimeString() : "—"
-          }
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-muted">
+            {data?.registryLoaded ? "registry-driven" : "registry absent"} · {
+              data && data.ts ? new Date(data.ts).toLocaleTimeString() : "—"
+            }
+          </span>
+          {data?.registryLoaded && <PiMonoCopyButton />}
+        </div>
       </div>
 
       {error && (

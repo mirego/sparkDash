@@ -7,6 +7,7 @@ import type {
   LlmMetrics,
   LlmDailyResponse,
   ModelFleetResponse,
+  PiMonoExportResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -407,4 +408,14 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
 /** Per-model fleet: registry + live health badges + coalesced per-user usage. */
 export function fetchModelFleet(): Promise<ModelFleetResponse> {
   return apiFetch("/api/models/fleet");
+}
+
+/**
+ * Copy-paste-ready pi-mono config (models.json document) generated from the
+ * live registry by the pi-mono format adapter. `host` overrides the endpoint
+ * host; the server resolves its default. Regenerated on every call.
+ */
+export function fetchPiMonoExport(host?: string): Promise<PiMonoExportResponse> {
+  const q = host ? `?host=${encodeURIComponent(host)}` : "";
+  return apiFetch(`/api/models/export/pimono${q}`);
 }

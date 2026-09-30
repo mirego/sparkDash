@@ -738,6 +738,22 @@ export interface ModelFleetResponse {
   models: FleetModel[];
 }
 
+/** GET /api/models/export/pimono response — copy-paste-ready pi-mono config.
+ * `text` is the exact clipboard payload; `config` is the parsed document
+ * (pi-mono schema: { providers: { <id>: { baseUrl, api, apiKey:"$CPA_API_KEY",
+ * authHeader, models:[...] } } }). `targetPath` is where the user pastes it
+ * (~/.pi/agent/models.json) and `defaultModel` is a `sparkdash/<id>` suggestion
+ * for pi's settings.json — never part of models.json itself.
+ * The server never emits plaintext secrets; the key is an env placeholder. */
+export interface PiMonoExportResponse {
+  format: string;
+  targetPath: string;
+  defaultModel: string | null;
+  warnings: string[];
+  config: unknown;
+  text: string;
+}
+
 export interface Settings {
   pollIntervalMs: number;
   defaultLlmPort: number;

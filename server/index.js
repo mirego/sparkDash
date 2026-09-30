@@ -1761,7 +1761,17 @@ app.get("/api/models/export/pimono", (req, res) => {
     host: req.query?.host,
     servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
   });
-  res.json({ format: "pi-mono", targetPath: "~/.pi/agent/models.json", config, defaultModel, warnings });
+  // `text` is the exact clipboard payload the UI copies — serialized here so
+  // the copied bytes are always the server's schema-valid projection, never a
+  // client-side re-stringify of a mutated object.
+  res.json({
+    format: "pi-mono",
+    targetPath: "~/.pi/agent/models.json",
+    config,
+    defaultModel,
+    warnings,
+    text: JSON.stringify(config, null, 2),
+  });
 });
 
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
