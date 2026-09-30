@@ -45,6 +45,7 @@ import {
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
+import { buildPimonoConfig } from "./collectors/PimonoConfigExport.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
@@ -1742,6 +1743,25 @@ app.get("/api/models/fleet", async (_req, res) => {
     currentServedId: resolveLiveCurrentModel(),
     models,
   });
+});
+
+// Generate the pi-mono (Pi coding agent) ~/.pi/agent/models.json config from
+// LIVE sources on demand (registry + CPA alias status re-read per request —
+// fleet-sync updates show up without restarting sparkDash). Sibling of the
+// opencode export (t_03552241); same binding decisions d-001/d-002:
+// baseUrl = CPA :8317/v1, apiKey = "$CPA_API_KEY" env placeholder only (pi's
+// $VAR syntax — NOT {env:VAR}), zero plaintext secrets. `?host=` sets the CPA
+// host the consuming CLI reaches (default 127.0.0.1; tailnet IP for remotes).
+// `defaultModel` is a suggestion for the UI only: pi keeps its default in
+// settings.json, and models.json rejects unknown keys.
+app.get("/api/models/export/pimono", (req, res) => {
+  const { config, defaultModel, warnings } = buildPimonoConfig({
+    registry: modelRegistry.registry,
+    cpaStatus: readCpaStatus(),
+    host: req.query?.host,
+    servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
+  });
+  res.json({ format: "pi-mono", targetPath: "~/.pi/agent/models.json", config, defaultModel, warnings });
 });
 
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
