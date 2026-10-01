@@ -8,6 +8,7 @@ import type {
   LlmDailyResponse,
   ModelFleetResponse,
   OpencodeExportResponse,
+  PiMonoExportResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -417,4 +418,15 @@ export function fetchModelFleet(): Promise<ModelFleetResponse> {
 export function fetchOpencodeExport(host?: string): Promise<OpencodeExportResponse> {
   const q = host ? `?host=${encodeURIComponent(host)}` : "";
   return apiFetch(`/api/models/export/opencode${q}`);
+}
+
+/**
+ * Copy-paste-ready pi-mono config (models.json document) generated from the
+ * live registry by the pi-mono format adapter. `host` overrides the endpoint
+ * host; the server resolves its default. Regenerated on every call.
+ */
+export function fetchPiMonoExport(host?: string): Promise<PiMonoExportResponse> {
+  const q = host ? `?host=${encodeURIComponent(host)}` : "";
+  return apiFetch(`/api/models/export/pimono${q}`);
+
 }

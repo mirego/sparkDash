@@ -50,6 +50,7 @@ import {
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
+import { buildPimonoConfig } from "./collectors/PimonoConfigExport.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
@@ -1797,6 +1798,36 @@ app.get("/api/models/export/opencode", (req, res) => {
     warnings: built.warnings,
     config: built.config,
     text: JSON.stringify(built.config, null, 2),
+  });
+});
+
+// Generate the pi-mono (Pi coding agent) ~/.pi/agent/models.json config from
+// LIVE sources on demand (registry + CPA alias status re-read per request —
+// fleet-sync updates show up without restarting sparkDash). Sibling of the
+// opencode export (t_03552241); same binding decisions d-001/d-002:
+// baseUrl = CPA :8317/v1, apiKey = "$CPA_API_KEY" env placeholder only (pi's
+// $VAR syntax — NOT {env:VAR}), zero plaintext secrets. `?host=` sets the CPA
+// host the consuming CLI reaches (default 127.0.0.1; tailnet IP for remotes).
+// `defaultModel` is a suggestion for the UI only: pi keeps its default in
+// settings.json, and models.json rejects unknown keys.
+app.get("/api/models/export/pimono", (req, res) => {
+  const { config, defaultModel, warnings } = buildPimonoConfig({
+    registry: modelRegistry.registry,
+    cpaStatus: readCpaStatus(),
+    host: req.query?.host,
+    servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
+  });
+  // `text` is the exact clipboard payload the UI copies — serialized here so
+  // the copied bytes are always the server's schema-valid projection, never a
+  // client-side re-stringify of a mutated object.
+  res.json({
+    format: "pi-mono",
+    targetPath: "~/.pi/agent/models.json",
+    config,
+    defaultModel,
+    warnings,
+    text: JSON.stringify(config, null, 2),
+
   });
 });
 

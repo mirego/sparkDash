@@ -20,14 +20,16 @@
  * registry on every request so output can never go stale between restarts.
  */
 
-/** CPA proxy port — server-resolved constant per d-002. */
-export const CPA_PORT = 8317;
+import { CPA_PORT, DEFAULT_CPA_HOST } from "./CpaEndpoint.js";
+
+// Shared CPA binding (d-002) lives in CpaEndpoint.js — re-exported so the
+// module's public surface (and its tests) keep importing it from here.
+export { CPA_PORT, DEFAULT_CPA_HOST };
+
 /** Env var the user exports themselves; placeholder only in the artifact. */
 export const CPA_API_KEY_ENV = "CPA_API_KEY";
 /** Custom-provider id surfaced in opencode's /models picker as `sparkdash/<alias>`. */
 export const PROVIDER_ID = "sparkdash";
-/** Default CPA host: same-machine CLI use (d-002 trade-off note). */
-export const DEFAULT_CPA_HOST = "127.0.0.1";
 /** The fleet "always-current" alias CPA publishes for the served model (product-head ruling 2026-09-30). */
 export const CURRENT_MODEL_ALIAS = "gilfoyle-current-model";
 
