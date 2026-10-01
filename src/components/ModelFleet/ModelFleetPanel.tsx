@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import type { FleetModel, ModelFleetResponse } from "../../api/types";
-import { fetchModelFleet } from "../../api/client";
+import type { FleetModel, ModelFleetResponse, OpencodeExportResponse } from "../../api/types";
+import { fetchModelFleet, fetchOpencodeExport } from "../../api/client";
+import { PiMonoCopyButton } from "./PiMonoCopyButton";
 
 const STATUS_COLOR = {
   live: "var(--color-success, #4dbf91)",
@@ -65,6 +66,7 @@ function StatusBadge({ isLive }: { isLive: boolean }) {
 export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
   const [data, setData] = useState<ModelFleetResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showExport, setShowExport] = useState(false);
 
   useEffect(() => {
     if (!enabled) return;
@@ -95,7 +97,7 @@ export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
 
   return (
     <div className="panel" style={{ padding: "var(--density-card-pad)" }}>
-      <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+      <div className="flex flex-wrap items-center justify-between gap-2" style={{ marginBottom: 12 }}>
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-text-strong">Model Fleet</span>
           {data && data.models.length > 0 && (
@@ -103,12 +105,25 @@ export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
               {data.models.length} model{data.models.length !== 1 ? "s" : ""}
             </span>
           )}
+          {data?.registryLoaded && (
+            <button
+              type="button"
+              onClick={() => setShowExport((v) => !v)}
+              className="rounded border border-border px-2 py-0.5 text-[10px] font-semibold text-muted hover:bg-surface-hover hover:text-text-strong transition-colors"
+              title="Generate a ready-to-paste opencode.json provider block from the live registry"
+            >
+              {showExport ? "hide opencode export" : "opencode export"}
+            </button>
+          )}
         </div>
-        <span className="text-[10px] text-muted">
-          {data?.registryLoaded ? "registry-driven" : "registry absent"} · {
-            data && data.ts ? new Date(data.ts).toLocaleTimeString() : "—"
-          }
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-muted">
+            {data?.registryLoaded ? "registry-driven" : "registry absent"} · {
+              data && data.ts ? new Date(data.ts).toLocaleTimeString() : "—"
+            }
+          </span>
+          {data?.registryLoaded && <PiMonoCopyButton />}
+        </div>
       </div>
 
       {error && (
@@ -116,6 +131,8 @@ export function ModelFleetPanel({ enabled = true }: { enabled?: boolean }) {
           Failed to load model fleet: {error}
         </div>
       )}
+
+      {showExport && <OpencodeExportSection />}
 
       {!data && !error && (
         <div className="py-6 text-center text-xs text-muted">Loading model fleet…</div>
@@ -146,6 +163,131 @@ function isLiveModel(model: FleetModel, currentServedId: string | null): boolean
   if (!currentServedId) return false;
   if (model.id === currentServedId) return true;
   return !!model.aliases && model.aliases.includes(currentServedId);
+}
+
+/**
+ * Copy-paste opencode.json provider block generated server-side from the LIVE
+ * model-registry.json (regenerated on every fetch — no sparkDash restart, no
+ * stale build artifact). The API key is always the {env:CPA_API_KEY}
+ * placeholder; this artifact never carries credentials and never writes to
+ * remote machines (wiki d-001 / d-002).
+ */
+function OpencodeExportSection() {
+  const [host, setHost] = useState("127.0.0.1");
+  const [exportData, setExportData] = useState<OpencodeExportResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async (h: string) => {
+    setLoading(true);
+    setExportError(null);
+    setCopied(false);
+    try {
+      const res = await fetchOpencodeExport(h || undefined);
+      setExportData(res);
+    } catch (err) {
+      setExportData(null);
+      setExportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void generate(host);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const copy = async () => {
+    if (!exportData?.text) return;
+    try {
+      await navigator.clipboard.writeText(exportData.text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable (non-HTTPS context) — select the text instead.
+      const el = document.getElementById("opencode-export-json") as HTMLTextAreaElement | null;
+      el?.select();
+      setExportError("Clipboard blocked — the JSON below is selected; press Ctrl+C to copy.");
+    }
+  };
+
+  return (
+    <div className="mb-3 rounded border border-border bg-surface-hover/30 px-3 py-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+          opencode.json provider block
+        </span>
+        <label className="ml-auto flex items-center gap-1.5 text-[10px] text-muted">
+          CPA host
+          <input
+            type="text"
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            spellCheck={false}
+            className="w-36 rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[11px] text-text-strong"
+            title="CLIProxyAPI host the CLI reaches (port fixed at 8317). Default: 127.0.0.1 for same-host use."
+          />
+        </label>
+        <button
+          type="button"
+          onClick={() => void generate(host)}
+          disabled={loading}
+          className="rounded border border-border px-2 py-0.5 text-[10px] font-semibold text-muted hover:bg-surface-hover hover:text-text-strong transition-colors disabled:opacity-50"
+          title="Re-read config/model-registry.json and regenerate (no restart needed)"
+        >
+          {loading ? "generating…" : "regenerate"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void copy()}
+          disabled={!exportData}
+          className="rounded border border-accent/50 bg-accent/10 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+        >
+          {copied ? "copied ✓" : "copy"}
+        </button>
+      </div>
+
+      {exportError && (
+        <div className="mb-2 rounded border border-danger/30 bg-danger/10 px-2 py-1 text-[10px] text-danger">
+          {exportError}
+        </div>
+      )}
+
+      {exportData && exportData.warnings.length > 0 && (
+        <div className="mb-2 flex flex-col gap-1">
+          {exportData.warnings.map((w, i) => (
+            <div key={i} className="rounded border border-warning/30 bg-warning/10 px-2 py-1 text-[10px] text-warning">
+              {w}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {exportData ? (
+        <>
+          <textarea
+            id="opencode-export-json"
+            readOnly
+            value={exportData.text}
+            rows={Math.min(18, exportData.text.split("\n").length)}
+            spellCheck={false}
+            className="w-full resize-y rounded border border-border bg-surface px-2 py-2 font-mono text-[10px] leading-relaxed text-text-strong"
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <div className="mt-1.5 text-[10px] text-muted">
+            Paste into <span className="font-mono">opencode.json</span> (project root or{" "}
+            <span className="font-mono">~/.config/opencode/opencode.json</span>). Models appear as{" "}
+            <span className="font-mono">sparkdash/&lt;alias&gt;</span> in <span className="font-mono">/models</span>.
+            Set <span className="font-mono">CPA_API_KEY</span> in your environment — the export carries no secrets.
+          </div>
+        </>
+      ) : (
+        !loading && <div className="py-2 text-center text-[11px] text-muted">Nothing to export yet.</div>
+      )}
+    </div>
+  );
 }
 
 function ModelRow({ model, isLive }: { model: FleetModel; isLive: boolean }) {

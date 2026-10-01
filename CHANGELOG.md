@@ -9,23 +9,78 @@ Format: version sections are listed newest first.
 
 ## [Unreleased]
 
-### Changed
-- **OOM risk redefined** — now driven by *remaining* unified memory instead of utilization. Because vLLM targets high GPU-memory utilization, a healthy model-loaded box sat at ~90–94% used, so the old percentage-based alarm (medium >95%, high >97%) was a constant false positive. OOM risk now fires only when **less than 1 GB of unified memory remains** (`oomRiskFor` takes available MB; threshold `< 1024 MB` → `high`, otherwise `low`). Applies to local + SSH collectors, the AlertMonitor rule/messages, the fleet README table, and the `medium` tier was removed from the frontend types and OOM badge.
-- **Model Fleet status tags simplified** — the per-row tag is now coarse and live/down based: the currently-served model shows a green `live` tag (replacing the old replica-health text such as `Degraded`), and every inactive model shows `down`. The redundant name-adjacent `live` chip was folded into this single status tag.
+---
 
-## [1.5.0] — 2026-08-02
+## [1.8.5] — 2026-08-28
+
+### Fixed
+- **Decode type picker defaults to Structured** — opening the sheet (or loading a previous run) no longer leaves Prose/Code/JSON selected. A still-running job still shows its type.
+- **Code workload was prose-speed** — the LRU + "thorough comments" prompt is English with `def` sprinkled in, so DFlash2 accept matched Prose. Code is now `clamp_00`…`clamp_49` identical-shape Python helpers, no comments.
+
+---
+
+## [1.8.4] — 2026-08-28
 
 ### Added
-- **GPU health telemetry** — fan, memory-junction temperature, SM/memory clocks, power state (P-state), and ECC error counters collected per GPU (local + SSH). Missing/[N/A] reads degrade to `null` and render as “—” instead of a misleading 0 (no-silent-failures rule).
-- **Fleet health & alerting** — server-side `AlertMonitor` evaluates every snapshot against the DGX_SPARK thermal/fan thresholds (previously dead constants) plus OOM / disk / TTFT / offline rules. Adds per-Spark `health` badges, an Overview fleet warning banner, a live WebSocket `alerts` channel, `GET /api/alerts` (+ history), and an optional outbound webhook (`ALERT_WEBHOOK_URL`, 5-min dedup).
-- **CPU temperature** — reads real hwmon/thermal temperature locally and over SSH (previously a hardcoded 0 °C); shown on the CPU panel, “—” when no readable source.
-- **Health panel** — per-Spark subsystem badges (junction/memory temp, fan, ECC, OOM, disk, TTFT) with overall Critical/Warning/Healthy status and a recent-alert feed.
-- **Expanded history** — GPU power, VRAM %, GPU memory temp, and CPU temp added to the client history store / sparklines.
+- **Decode benchmark type picker** — choose **Structured** (default, count 1→200), **Prose** (lab hash-map explanation), **Code** (fixed LRU-cache Python prompt), or **JSON** (GPU-metrics catalog) before Run. Labels are output types only — no `response_format`, grammars, or guided JSON. Same lab protocol for every type: temp 0, `top_p` 1, thinking off, 32-token warmup, default 400 tokens. The selected type is shown on results and in copied summaries.
 
-### Tests
-- `AlertMonitor.test.js` (20) — rule evaluation (temp/fan/ECC/OOM/disk/TTFT/offline), sorting, change detection, bounded history, webhook transitions + cooldown.
-- `SystemCollector.gpu.test.js` (6) — extended GPU line parsing, [N/A]→null degradation, P-state normalization, compute-apps parsing, default profile.
+---
 
+## [1.8.3] — 2026-08-28
+
+### Changed
+- **Decode benchmark uses the lab structured protocol** — count 1→200 (numbers only) instead of the Showcase JSON/YAML catalog + fill-to-max. Temperature **0**, `top_p` **1**, thinking **off**, 32-token warmup, default max tokens **400**. Concurrency 1 is the same prompt as glm-5.3-flash-sm120 `tests/bench_decode.py --structured`; concurrent streams get a unique suffix so they do not share a prefix-cache block.
+- **Thinking flags default off** — GLM / Qwen / MiniMax think unless the request disables it. `applyThinkingFlags` now defaults to off and always sends `enable_thinking`, `thinking`, and `thinking_mode`. HTTP 400 retries keep an explicit off payload instead of stripping flags (stripping lets hybrid models think by default). Showcase treats a missing thinking flag as off.
+
+---
+
+## [1.8.2] — 2026-08-23
+
+### Added
+- **EXL3 live tok/s** — detect ExLlamaV3 `tools/serve_openai.py` (`owned_by: exl3` or `/health` `{ok, busy}`) instead of mislabeling it as vLLM. Generation and prefill tok/s come from `/health` cumulative token counters (no Prometheus `/metrics`).
+- **Tailnet monitoring** — opt-in per unit (`tailscaleMonitoring`, default **off**); `tailscale status --json` on the host and a Tailnet card under Resources. Flags a unit that is healthy on the LAN but off its tailnet. ([#43](https://github.com/MiaAI-Lab/sparkDash/pull/43))
+
+### Security
+- **`BIND_HOST` now defaults to `127.0.0.1` (loopback) instead of `0.0.0.0`** — the dashboard is unauthenticated and can SSH into and power off Sparks, so it is no longer reachable on the LAN by default. Set `BIND_HOST` to the host's LAN IP (or `0.0.0.0`) to opt in to remote access. **Migration:** if you access sparkDash from another machine via bare-metal `npm start`, set `BIND_HOST` explicitly. Production and dev Compose both set `BIND_HOST=0.0.0.0` (`network_mode: host`). Startup now also warns when bound to a non-loopback address. ([#35](https://github.com/MiaAI-Lab/sparkDash/pull/35))
+
+### Fixed
+- Decode bench `POST /api/sparks/:id/llm/bench` rejects LLM ports that are not in the Spark's configured list (same allowlist as showcase). ([#45](https://github.com/MiaAI-Lab/sparkDash/pull/45))
+- **Host CPU temperature** — dedicated GPU hosts (`kind: host`) show CPU temp on the RAM panel and Overview (hidden at 0°C / no sensor). Remote hosts now read hwmon/thermal over SSH. DGX Sparks still do not display CPU temp (remote Sparks still skip the extra sensor SSH). ([#34](https://github.com/MiaAI-Lab/sparkDash/pull/34))
+
+### Changed
+- Docker Node base image pulls from `public.ecr.aws/docker/library/node` so Spark builds do not fail on Docker Hub IPv6 `auth.docker.io` / “network is unreachable”. `deploy.sh` prints that workaround if a build still fails.
+- README architecture diagram top border aligned with the box. ([#39](https://github.com/MiaAI-Lab/sparkDash/pull/39))
+
+---
+
+## [1.8.1] — 2026-08-16
+
+### Added
+- **Daily LLM tok/s history** — busy-sample rollups (peak + mean) for decode and prefill, persisted in `config/llm-daily.json` (30 UTC days). 14-day peak chart on the LLM card; `GET /api/sparks/:id/llm/daily`.
+- **Cached vs uncached prefill tok/s** — live rows when the backend splits kinds: ds4 labeled prefill counters, llama.cpp `/slots` `n_prompt_tokens_cache`, SGLang `sglang:cached_tokens_total` (L1 `cache_source="device"`). Combined Prefill stays computed/uncached. vLLM is unchanged (combined prefill + prefix-cache hit rate).
+
+### Changed
+- **Docker SSH key auth** — compose comments + README: key auth runs inside the container (`/root/.ssh`), not the host user’s `~/.ssh`. Custom-named keys must be mounted as `id_ed25519` (or set `SSH_IDENTITY_FILE`). LAN IPs are from the sparkDash host. Add/Edit Spark hint when auth is Key.
+
+### Fixed
+- SGLang `/metrics` no longer overwrites `/get_server_info` tok/s when both are present.
+- llama.cpp `n_prompt_tokens_processed: 0` is not treated as missing (fully cached prompts).
+
+---
+
+## [1.8.0] — 2026-08-15
+
+### Added
+- **Non-Spark unit support** (`kind: "host"`) — dedicated GPU hosts (any Linux box with an NVIDIA GPU, e.g. a workstation with an RTX card) are first-class units: added from the **+** button (choose **Dedicated GPU host**), monitored via SSH + `nvidia-smi` exactly like a Spark, but never labeled as a DGX Spark.
+- **Detected host hardware** — for `kind: "host"`, the header shows real hardware detected once when online (GPU model, CUDA driver, CPU model/cores, system RAM) instead of fixed GB10 specs.
+- **Separate system RAM vs discrete VRAM** — for host units, VRAM comes straight from `nvidia-smi` (`memory.used` / `memory.total`, free = total − used) while system RAM is read from `/proc/meminfo`. Spark behavior is unchanged (GB10 unified HBM pool).
+- **RAM panel + Overview RAM bar** — host unit pages get a dedicated RAM panel, and Overview cards show a RAM bar under VRAM for hosts.
+- **Host Resources layout** — host unit pages stack **RAM → Network → Storage** in the right column with **GPU** filling the left column (Sparks keep the original layout). CX7 IP is hidden for hosts (Spark-specific NIC).
+- **Prefill tok/s** (moved from Unreleased) — live LLM panel sparkline, Overview cards as two columns (**tok/s** | **prefill**), decode-bench **Prefill** column (`prompt_tokens` ÷ TTFT).
+- **Live prefill measurement** — vLLM uses engine-step `iteration_tokens_total` surplus over generation (so a short/cached prefill that lands in the same poll as the first decode tokens still counts); prompt/TTFT counters are the fallback because they often only move at first token. ds4 uses computed (not cached) prefill token diffs. Idle returns to 0. Opening a saved chat in the UI does not hit the GPU; prefill is the prompt/KV pass when you send or regenerate.
+
+### Changed
+- **Decode benchmark matches Showcase structural** — same prompt catalog and fill-to-max shaping (`min_tokens` / `ignore_eos` / fill suffix); no 4k unique prefill prefix. Temperature **0**, thinking **off** (Showcase defaults are temp 0.7 and thinking off). Default max tokens 512.
 
 - **Update Hermes button is now a permanent, neutral control** — no more toast notifications for Hermes updates. It turns warning-yellow and shows a commit-count badge **only when an update is actually available**; clicking it opens the update dialog (status / pending commits / release notes) as before.
 - **Overview "Update Hermes" button** (formerly "Update All") follows the same rule — neutral by default, warning-yellow with a pending-count badge only when ≥1 monitored Spark has an update available. Pressing it now shows a **live progress bar** (x/y Sparks settled, driven by WS per-Spark update status) until every started update finishes.

@@ -42,9 +42,17 @@ import {
   buildModelFleet,
   evaluateModelHealth,
 } from "./collectors/ModelRegistry.js";
+import {
+  buildOpencodeConfig,
+  validateOpencodeConfig,
+  DEFAULT_CPA_HOST,
+} from "./collectors/OpenCodeExport.js";
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
+import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
+import { buildPimonoConfig } from "./collectors/PimonoConfigExport.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
+import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 
 dotenv.config();
@@ -129,7 +137,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 
-const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
+// Default to loopback: the dashboard exposes SSH and remote power controls, so it
+// should not be reachable on the LAN unless explicitly opted in. Set BIND_HOST to the
+// host's LAN IP (or 0.0.0.0) to expose it; docker-compose.yml already sets 0.0.0.0.
+const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
 const COMFY_PORT = parseInt(process.env.COMFY_PORT || "8188", 10);
@@ -878,9 +889,30 @@ app.put("/api/sparks/:id/llm-ports/:port/api-key", (req, res) => {
 });
 
 /**
+ * Daily decode / prefill tok/s rollups (busy samples, last 14 UTC days by default).
+ * Query: port (required for multi-port), days (1–30).
+ */
+app.get("/api/sparks/:id/llm/daily", (req, res) => {
+  const spark = registry.getSpark(req.params.id);
+  if (!spark) return res.status(404).json({ error: "Spark not found" });
+  const ports =
+    Array.isArray(spark.llmPorts) && spark.llmPorts.length
+      ? spark.llmPorts
+      : [resolveLlmPort(spark)];
+  let port = req.query.port != null ? Number(req.query.port) : ports[0];
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return res.status(400).json({ error: "Invalid port" });
+  }
+  let days = req.query.days != null ? Number(req.query.days) : 14;
+  if (!Number.isFinite(days)) days = 14;
+  res.json(llmDaily.getSeries(spark.id, port, { days }));
+});
+
+/**
  * Decode throughput benchmark (streaming, post-first-token tok/s).
  *
- * POST body: { port?, concurrencies: number[], maxTokens? }
+ * POST body: { port?, concurrencies: number[], maxTokens?, promptType? }
+ * promptType is structured | prose | code | json (default structured).
  * Returns immediately with a bench job; poll GET for progress/results.
  */
 app.post("/api/sparks/:id/llm/bench", (req, res) => {
@@ -904,6 +936,9 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
   let port = req.body?.port != null ? Number(req.body.port) : ports[0];
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return res.status(400).json({ error: "Invalid port" });
+  }
+  if (!ports.includes(port)) {
+    return res.status(400).json({ error: "port is not configured for this Spark" });
   }
 
   // Resolve model id for this port from live snapshot when possible
@@ -929,6 +964,7 @@ app.post("/api/sparks/:id/llm/bench", (req, res) => {
       modelId,
       concurrencies: req.body?.concurrencies,
       maxTokens: req.body?.maxTokens,
+      promptType: req.body?.promptType,
       debug: benchDebug,
       apiKey: resolveLlmApiKey(spark, port),
       sampleHardware:
@@ -1714,6 +1750,87 @@ app.get("/api/models/fleet", async (_req, res) => {
   });
 });
 
+// ─── opencode.json provider block export ─────────────────
+/**
+ * GET /api/models/export/opencode?host=<cpa-host>
+ *
+ * Generates a ready-to-paste opencode.json provider block from the LIVE
+ * model-registry.json — re-read per request (d-001: copy artifact only; we do
+ * not write files anywhere, and nothing here is cached between requests).
+ * Endpoint + alias + apiKey rules follow d-002:
+ *   baseURL http://<cpa-host>:8317/v1, apiKey {env:CPA_API_KEY}, models keyed
+ *   by the claude-* alias ids CPA accepts (live-models-status.json as truth,
+ *   registry aliases as fallback).
+ */
+app.get("/api/models/export/opencode", (req, res) => {
+  const hostRaw = typeof req.query.host === "string" ? req.query.host.trim() : "";
+  // registry getter hot-reloads on mtime change — no sparkDash restart needed.
+  const registry = modelRegistry.registry;
+  if (!Array.isArray(registry?.models) || registry.models.length === 0) {
+    return res.status(409).json({
+      error: modelRegistry.error
+        ? `model registry invalid: ${modelRegistry.error}`
+        : "model registry absent or empty — run the control-plane fleet sync first",
+    });
+  }
+  let built;
+  try {
+    built = buildOpencodeConfig(registry, {
+      host: hostRaw || DEFAULT_CPA_HOST,
+      cpaStatus: readCpaStatus(),
+      // Live probe truth (canonicalised); buildOpencodeConfig falls back to
+      // CPA working_set when the probe has no served id yet.
+      servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
+    });
+  } catch (err) {
+    if (err.code === "BAD_HOST") return res.status(400).json({ error: err.message });
+    throw err;
+  }
+  const check = validateOpencodeConfig(built.config);
+  if (!check.valid) {
+    // Generator bug, not user error: surface loudly rather than ship a bad artifact.
+    console.error("[opencode-export] generated config failed validation:", check.errors);
+    return res.status(500).json({ error: "generated config failed schema validation", details: check.errors });
+  }
+  res.json({
+    format: "opencode.json",
+    host: hostRaw || DEFAULT_CPA_HOST,
+    warnings: built.warnings,
+    config: built.config,
+    text: JSON.stringify(built.config, null, 2),
+  });
+});
+
+// Generate the pi-mono (Pi coding agent) ~/.pi/agent/models.json config from
+// LIVE sources on demand (registry + CPA alias status re-read per request —
+// fleet-sync updates show up without restarting sparkDash). Sibling of the
+// opencode export (t_03552241); same binding decisions d-001/d-002:
+// baseUrl = CPA :8317/v1, apiKey = "$CPA_API_KEY" env placeholder only (pi's
+// $VAR syntax — NOT {env:VAR}), zero plaintext secrets. `?host=` sets the CPA
+// host the consuming CLI reaches (default 127.0.0.1; tailnet IP for remotes).
+// `defaultModel` is a suggestion for the UI only: pi keeps its default in
+// settings.json, and models.json rejects unknown keys.
+app.get("/api/models/export/pimono", (req, res) => {
+  const { config, defaultModel, warnings } = buildPimonoConfig({
+    registry: modelRegistry.registry,
+    cpaStatus: readCpaStatus(),
+    host: req.query?.host,
+    servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
+  });
+  // `text` is the exact clipboard payload the UI copies — serialized here so
+  // the copied bytes are always the server's schema-valid projection, never a
+  // client-side re-stringify of a mutated object.
+  res.json({
+    format: "pi-mono",
+    targetPath: "~/.pi/agent/models.json",
+    config,
+    defaultModel,
+    warnings,
+    text: JSON.stringify(config, null, 2),
+
+  });
+});
+
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
   const results = [];
   // Remotes first, local last — shutting down the dashboard host mid-loop would
@@ -1889,6 +2006,63 @@ let broadcastTimer = null;
 let _lastBroadcastPayload = null;
 
 /** Build the snapshot payload string. Centralized so broadcast + refresh share it. */
+
+/** Map /inflight sparkId (or backend / model pin) onto a SparkRegistry id. */
+// (impl moved to ./util/inflightSpark.js)
+
+function filterActiveUsersForSpark(allUsers, sparkId) {
+  if (!Array.isArray(allUsers)) return [];
+  const out = [];
+  let totalRunning = 0;
+  let totalWaiting = 0;
+  for (const u of allUsers) {
+    const reqs = Array.isArray(u.openRequests) ? u.openRequests : [];
+    const mine = reqs.filter((r) => requestBelongsToSpark(r, sparkId));
+    // If the user object itself is already scoped (no per-req sparkId yet),
+    // keep it only when the rolled-up sparkId matches.
+    if (mine.length === 0) {
+      if (reqs.length === 0 && resolveInflightSparkId(u) === sparkId) {
+        out.push(u);
+        totalRunning += u.activeCount || 0;
+        totalWaiting += u.waitingCount || 0;
+      }
+      continue;
+    }
+    const waitingCount = mine.filter((r) => r.phase === "waiting").length;
+    const activeCount = mine.length - waitingCount;
+    totalRunning += activeCount;
+    totalWaiting += waitingCount;
+    const promptEstTokens = mine.reduce((s, r) => s + (Number(r.promptEstTokens) || 0), 0);
+    const completionEstTokens = mine.reduce((s, r) => s + (Number(r.completionEstTokens) || 0), 0);
+    const maxTokens = mine.reduce((s, r) => s + (Number(r.maxTokens) || 0), 0);
+    const cachedVals = mine.map((r) => r.cachedTokens).filter((n) => n != null);
+    const cachedTokens = cachedVals.length
+      ? cachedVals.reduce((s, n) => s + Number(n), 0)
+      : null;
+    out.push({
+      ...u,
+      requests: mine.length,
+      waiting: waitingCount > 0,
+      waitingCount,
+      activeCount,
+      promptEstTokens: promptEstTokens || null,
+      completionEstTokens: completionEstTokens || null,
+      maxTokens: maxTokens || null,
+      cachedTokens,
+      model: mine[0]?.model ?? u.model ?? null,
+      openRequests: mine,
+    });
+  }
+  out._totalRunning = totalRunning;
+  out._totalWaiting = totalWaiting;
+  return out;
+}
+
+function filterRecentForSpark(recent, sparkId) {
+  if (!Array.isArray(recent)) return [];
+  return recent.filter((r) => requestBelongsToSpark(r, sparkId));
+}
+
 async function buildSnapshotPayload() {
   // Poll the auth-proxy's /inflight endpoint for real-time active user counts.
   const allActiveUsers = await getActiveUsers();
@@ -1914,10 +2088,20 @@ async function buildSnapshotPayload() {
   for (const spark of sparks) {
     if (Array.isArray(spark.metrics?.llm)) {
       for (const llm of spark.metrics.llm) {
-        llm.activeUsers = allActiveUsers;
-        llm.recentRequests = allActiveUsers._recentRequests || [];
-        llm.proxyRequestsRunning = proxyRunning;
-        llm.proxyRequestsWaiting = proxyWaiting;
+        // Fleet /inflight is one list. Dual least-queue must not clone the
+        // same key-prefix pills onto every Spark card — only requests that
+        // landed on this spark.id (from X-Fleet-Backend / pin alias).
+        llm.activeUsers = filterActiveUsersForSpark(allActiveUsers, spark.id);
+        llm.recentRequests = filterRecentForSpark(
+          allActiveUsers._recentRequests || [],
+          spark.id,
+        );
+        const scopedRun = llm.activeUsers._totalRunning || 0;
+        const scopedWait = llm.activeUsers._totalWaiting || 0;
+        llm.proxyRequestsRunning = scopedRun;
+        llm.proxyRequestsWaiting = scopedWait;
+        llm.fleetProxyRequestsRunning = proxyRunning;
+        llm.fleetProxyRequestsWaiting = proxyWaiting;
         // Preserve engine gauges under explicit names (probe already sets them;
         // re-assert so older snapshots stay honest if something else touched run/wait).
         if (llm.engineRequestsRunning == null && llm.requestsRunning != null) {
@@ -2020,6 +2204,15 @@ startModelFleetProber();
 server.listen(PORT, BIND_HOST, () => {
   console.log(`[sparkDash] server listening on http://${BIND_HOST}:${PORT}`);
   console.log(`[sparkDash] WebSocket endpoint ws://${BIND_HOST}:${PORT}/ws`);
+  const isLoopback =
+    BIND_HOST === "localhost" || BIND_HOST === "::1" || /^127\./.test(BIND_HOST);
+  if (isLoopback) {
+    console.log("[sparkDash] localhost-only; set BIND_HOST=0.0.0.0 (or a LAN IP) to allow remote access");
+  } else {
+    console.warn(
+      `[sparkDash] WARNING: bound to ${BIND_HOST} — reachable on the LAN. This dashboard is unauthenticated and can SSH into and power off your Sparks; restrict access at the network/firewall layer.`
+    );
+  }
   startAllMonitors();
 });
 
@@ -2037,6 +2230,11 @@ function shutdown(signal) {
     );
   } catch (err) {
     console.error("[sparkDash] failed to finalize benchmarks:", err.message);
+  }
+  try {
+    llmDaily.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush LLM daily history:", err.message);
   }
   try {
     if (broadcastTimer) {

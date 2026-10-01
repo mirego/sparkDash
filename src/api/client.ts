@@ -5,7 +5,10 @@ import type {
   HermesBatchUpdateResponse,
   HermesUpdatesResponse,
   LlmMetrics,
+  LlmDailyResponse,
   ModelFleetResponse,
+  OpencodeExportResponse,
+  PiMonoExportResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -51,6 +54,16 @@ export function fetchSparkMetrics(id: string): Promise<{
 /** GPU energy history pre-aggregated into day / week / month buckets. */
 export function fetchEnergyHistory(): Promise<EnergyReport> {
   return apiFetch("/api/energy");
+}
+
+/** Daily busy tok/s rollups for one Spark LLM port. */
+export function fetchLlmDaily(
+  id: string,
+  port: number,
+  days = 14
+): Promise<LlmDailyResponse> {
+  const q = new URLSearchParams({ port: String(port), days: String(days) });
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/llm/daily?${q.toString()}`);
 }
 
 export function addSpark(config: SparkConfig): Promise<{ success: boolean; spark: SparkConfig }> {
@@ -396,4 +409,24 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
 /** Per-model fleet: registry + live health badges + coalesced per-user usage. */
 export function fetchModelFleet(): Promise<ModelFleetResponse> {
   return apiFetch("/api/models/fleet");
+}
+
+/**
+ * Copy-paste-ready opencode.json provider block generated from the live
+ * registry. `host` is the CLIProxyAPI host (default server-side: 127.0.0.1).
+ */
+export function fetchOpencodeExport(host?: string): Promise<OpencodeExportResponse> {
+  const q = host ? `?host=${encodeURIComponent(host)}` : "";
+  return apiFetch(`/api/models/export/opencode${q}`);
+}
+
+/**
+ * Copy-paste-ready pi-mono config (models.json document) generated from the
+ * live registry by the pi-mono format adapter. `host` overrides the endpoint
+ * host; the server resolves its default. Regenerated on every call.
+ */
+export function fetchPiMonoExport(host?: string): Promise<PiMonoExportResponse> {
+  const q = host ? `?host=${encodeURIComponent(host)}` : "";
+  return apiFetch(`/api/models/export/pimono${q}`);
+
 }

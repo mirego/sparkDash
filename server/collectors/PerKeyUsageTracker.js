@@ -541,6 +541,8 @@ export async function getActiveUsers() {
             completionSource: r.completionSource ?? null,
             ageSec: r.ageSec ?? null,
             ttftSec: r.ttftSec ?? null,
+            backend: r.backend ?? null,
+            sparkId: r.sparkId ?? null,
           })),
         });
       }
@@ -565,6 +567,8 @@ export async function getActiveUsers() {
       durationSec: r.durationSec ?? null,
       finishedAt: r.finishedAt ?? null,
       path: r.path ?? null,
+      backend: r.backend ?? null,
+      sparkId: r.sparkId ?? null,
     }));
     return users.sort((a, b) => b.requests - a.requests);
   } catch (err) {
