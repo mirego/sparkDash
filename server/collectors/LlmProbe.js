@@ -1241,6 +1241,7 @@ export class LlmProbe {
         // totals (per-user token accuracy); it sets totalInput/totalOutput to
         // the same values for fresh counters, so no clobbering concern here.
         this._accumulateTokens(input, output);
+        this.totalPromptTokens = input;
         if (sgCached != null) this.totalCachedTokens = sgCached;
         this._sglangTotalsPolled = true;
         this._sglangTokenSource = "server_info";
@@ -1474,30 +1475,6 @@ export class LlmProbe {
     const prompt =
       this._getPromMetric(txt, "sglang:prompt_tokens_total") ??
       this._getPromMetric(txt, "sglang_prompt_tokens_total");
-    if (gen == null) {
-      const gauge =
-        this._getPromMetric(txt, "sglang:gen_throughput") ??
-        this._getPromMetric(txt, "sglang_gen_throughput");
-      if (gauge != null) {
-        this.generationTps = Math.max(0, Math.round(gauge * 100) / 100);
-      }
-      return;
-    }
-
-    if (dtSec > 0 && dtSec < 10) {
-      const deltaOut = gen - this.lastTokenCounts.output;
-      this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-      if (prompt != null) {
-        const deltaIn = prompt - this.lastTokenCounts.input;
-        this._setPrefillTps(deltaIn / dtSec, deltaOut > 0);
-        this.lastTokenCounts.input = prompt;
-      } else if (deltaOut <= 0) {
-        this.prefillTps = 0;
-      }
-    }
-    this.lastTokenCounts.output = gen;
-    this.totalOutputTokens = gen;
-
     const running =
       this._getPromMetric(txt, "sglang:num_running_reqs") ??
       this._getPromMetric(txt, "sglang_num_running_reqs");

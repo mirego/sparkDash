@@ -441,38 +441,108 @@ export class SystemCollector {
     return lines.map((line, i) => {
       const parts = line.split(",").map((s) => s.trim());
       const num = (j) => this._parseSmiNumber(parts[j]);
-      const rawPstate = parts[8] != null ? String(parts[8]).trim() : "";
-      const pstate =
-        /^[0-9]+$/i.test(rawPstate)
-          ? `P${rawPstate}`
-          : /^\[?n\/a\]?$/i.test(rawPstate) || rawPstate === ""
-            ? null
-            : rawPstate;
-      const index = num(17) ?? i;
-      const name = parts[18] && !/^\[?n\/a\]?$/i.test(parts[18]) ? parts[18] : null;
-      const uuid = parts[19] && /^GPU-/i.test(parts[19]) ? parts[19] : null;
+      const n = parts.length;
+      // Layouts seen in the wild (field count disambiguates):
+      //  n=20 extended metrics + index,name,uuid; n=17 extended (GPU_QUERY_FIELDS);
+      //  n=11 extended core w/o throttle columns; n=13 upstream short
+      //  (temp,util,draw,limit,sm,max,4 throttle flags,index,name,uuid).
+      // Every column is null-guarded so a missing/[N/A] field degrades to null.
+      let fan = null;
+      let temperature;
+      let temperatureMemory = null;
+      let usage;
+      let powerDraw;
+      let powerLimit;
+      let clockMem = null;
+      let pstate = null;
+      let eccCorrected = null;
+      let eccUncorrected = null;
+      let smClockMHz = null;
+      let smClockMaxMHz = null;
+      let hwThermal = null;
+      let swThermal = null;
+      let hwSlowdown = null;
+      let powerCap = null;
+      let index = i;
+      let name = null;
+      let uuid = null;
+      const normPstate = (raw) => {
+        const s = raw != null ? String(raw).trim() : "";
+        if (/^[0-9]+$/i.test(s)) return `P${s}`;
+        return /^\[?n\/a\]?$/i.test(s) || s === "" ? null : s;
+      };
+      if (n === 17 || n === 20) {
+        fan = num(0);
+        temperature = num(1) ?? 0;
+        temperatureMemory = num(2);
+        usage = num(3) ?? 0;
+        powerDraw = num(4);
+        powerLimit = num(5) ?? 120;
+        clockMem = num(7);
+        pstate = normPstate(parts[8]);
+        eccCorrected = num(9);
+        eccUncorrected = num(10);
+        smClockMHz = num(11);
+        smClockMaxMHz = num(12);
+        hwThermal = this._parseSmiActive(parts[13]);
+        swThermal = this._parseSmiActive(parts[14]);
+        hwSlowdown = this._parseSmiActive(parts[15]);
+        powerCap = this._parseSmiActive(parts[16]);
+        if (n === 20) {
+          index = num(17) ?? i;
+          name = parts[18] && !/^\[?n\/a\]?$/i.test(parts[18]) ? parts[18] : null;
+          uuid = parts[19] && /^GPU-/i.test(parts[19]) ? parts[19] : null;
+        }
+      } else if (n === 11) {
+        // Extended core without the appended throttle columns (legacy tests).
+        fan = num(0);
+        temperature = num(1) ?? 0;
+        temperatureMemory = num(2);
+        usage = num(3) ?? 0;
+        powerDraw = num(4);
+        powerLimit = num(5) ?? 120;
+        smClockMHz = num(6);
+        clockMem = num(7);
+        pstate = normPstate(parts[8]);
+        eccCorrected = num(9);
+        eccUncorrected = num(10);
+      } else {
+        temperature = parseFloat(parts[0]) || 0;
+        usage = parseFloat(parts[1]) || 0;
+        powerDraw = parseFloat(parts[2]) || 0;
+        powerLimit = num(3) ?? 120;
+        smClockMHz = num(n - 8);
+        smClockMaxMHz = num(n - 9);
+        hwThermal = this._parseSmiActive(parts[n - 7]);
+        swThermal = this._parseSmiActive(parts[n - 6]);
+        hwSlowdown = this._parseSmiActive(parts[n - 5]);
+        powerCap = this._parseSmiActive(parts[n - 4]);
+        index = num(n - 3) ?? i;
+        name = parts[n - 2] && !/^\[?n\/a\]?$/i.test(parts[n - 2]) ? parts[n - 2] : null;
+        uuid = parts[n - 1] && /^GPU-/i.test(parts[n - 1]) ? parts[n - 1] : null;
+      }
       return {
         index,
         name,
         uuid,
-        fan: num(0),
-        temperature: parseFloat(parts[1]) || 0,
-        temperatureMemory: num(2),
-        usage: parseFloat(parts[3]) || 0,
-        powerDraw: parseFloat(parts[4]) || 0,
-        powerLimit: num(5) ?? 120,
-        clockSm: num(11),
-        clockMem: num(7),
+        fan,
+        temperature,
+        temperatureMemory,
+        usage,
+        powerDraw,
+        powerLimit,
+        clockSm: smClockMHz,
+        clockMem,
         pstate,
-        eccCorrected: num(9),
-        eccUncorrected: num(10),
+        eccCorrected,
+        eccUncorrected,
         throttle: this._buildThrottle({
-          hwThermal: this._parseSmiActive(parts[13]),
-          swThermal: this._parseSmiActive(parts[14]),
-          hwSlowdown: this._parseSmiActive(parts[15]),
-          powerCap: this._parseSmiActive(parts[16]),
-          smClockMHz: num(11),
-          smClockMaxMHz: num(12),
+          hwThermal,
+          swThermal,
+          hwSlowdown,
+          powerCap,
+          smClockMHz,
+          smClockMaxMHz,
         }),
       };
     });
@@ -506,9 +576,9 @@ export class SystemCollector {
     const round2 = (n) => Math.round(n * 100) / 100;
     const maxOf = (key) =>
       devices.reduce((m, d) => (d[key] != null && d[key] > m ? d[key] : m), null);
-    const sumOf = (key) => {
+    const sumOf = (key, fallback = null) => {
       const vals = devices.map((d) => d[key]).filter((v) => v != null);
-      return vals.length ? round2(vals.reduce((s, v) => s + v, 0)) : null;
+      return vals.length ? round2(vals.reduce((s, v) => s + v, 0)) : fallback;
     };
     const firstOf = (key) => devices.map((d) => d[key]).find((v) => v != null) ?? null;
     return {
@@ -516,8 +586,8 @@ export class SystemCollector {
       temperature: Math.max(...devices.map((d) => d.temperature)),
       temperatureMemory: maxOf("temperatureMemory"),
       usage: Math.max(...devices.map((d) => d.usage)),
-      powerDraw: round2(devices.reduce((sum, d) => sum + d.powerDraw, 0)),
-      powerLimit: round2(devices.reduce((sum, d) => sum + d.powerLimit, 0)),
+      powerDraw: sumOf("powerDraw"),
+      powerLimit: sumOf("powerLimit", 120),
       clockSm: firstOf("clockSm"),
       clockMem: firstOf("clockMem"),
       pstate: firstOf("pstate"),

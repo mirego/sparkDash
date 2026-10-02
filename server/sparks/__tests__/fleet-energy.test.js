@@ -628,9 +628,13 @@ test("integration splits energy and coverage at UTC minute boundaries", (t) => {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const filePath = path.join(dir, "fleet-energy.json");
   const minute = Date.UTC(2026, 7, 23, 12, 0, 0);
+  // Inject a fixed clock: flush() prunes buckets older than RETENTION_MS
+  // (31d) against the wall clock, which would otherwise drop these buckets
+  // once real time drifts more than 31 days past `minute`.
   const tracker = new FleetEnergyTracker({
     filePath,
     load: false,
+    now: () => minute + MINUTE_MS,
     setIntervalFn: () => 1,
     clearIntervalFn: () => {},
   });

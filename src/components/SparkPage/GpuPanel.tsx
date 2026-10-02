@@ -323,6 +323,10 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
               <span className="font-tabular text-danger">{gpu.ecc.uncorrected}</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* NVRM kernel memory-allocation failures (journal count) */}
       {(gpu?.nvErrNoMemory ?? 0) > 0 && (
         <div
           className="flex items-center justify-between text-sm"

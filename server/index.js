@@ -2300,14 +2300,23 @@ const wss = new WebSocketServer({
   path: "/ws",
   verifyClient: ({ req }, done) => done(authorizeUpgrade(req)),
 });
-wss.on("connection", (ws) => {
+// While a connection-time snapshot is being built, buildSnapshotPayload()
+// internally runs alertMonitor.update(), whose onChange would broadcast an
+// `alerts` frame to the brand-new client BEFORE its awaited `snapshot` frame —
+// breaking the client contract of snapshot-first. Suppress during that window.
+let _suppressAlertBroadcast = false;
+
+wss.on("connection", async (ws) => {
   console.log("[ws] client connected");
   // This snapshot belongs only to the new client. Broadcasting it would add a
   // duplicate history sample to every existing dashboard whenever a tab opens.
   try {
-    ws.send(buildSnapshotPayload());
+    _suppressAlertBroadcast = true;
+    ws.send(await buildSnapshotPayload());
   } catch {
     // The close handler will clean up a client that disappears during connect.
+  } finally {
+    _suppressAlertBroadcast = false;
   }
   ws.on("close", () => {
     console.log("[ws] client disconnected");
@@ -2319,6 +2328,7 @@ wss.on("connection", (ws) => {
 // message so open dashboard tabs get live health notifications without polling
 // /api/alerts. Optional outbound webhook is enabled with ALERT_WEBHOOK_URL.
 function broadcastAlerts(payload) {
+  if (_suppressAlertBroadcast) return; // see connection handler
   try {
     broadcastPayload(JSON.stringify({ type: "alerts", ...payload }));
   } catch (err) {
@@ -2498,8 +2508,8 @@ function broadcastPayload(payload) {
  * Used after a user action (manual refresh / hermes check / update) so the
  * UI reflects the result right away instead of on the next poll tick.
  */
-function forceBroadcast() {
-  const payload = buildSnapshotPayload();
+async function forceBroadcast() {
+  const payload = await buildSnapshotPayload();
   _lastBroadcastPayload = payload;
   broadcastPayload(payload);
 }

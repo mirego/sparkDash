@@ -201,8 +201,8 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     }
     if (m.cpu) {
       pushHistory(`${s.id}:cpu.usage`, m.cpu.usage, at);
-      // Skip 0°C so a missing sensor does not draw a fake floor on the sparkline.
-      if (m.cpu.temperature > 0) {
+      // Skip 0°C / missing sensor so no fake floor is drawn on the sparkline.
+      if (m.cpu.temperature != null && m.cpu.temperature > 0) {
         pushHistory(`${s.id}:cpu.temp`, m.cpu.temperature, at);
       }
     }
