@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
-import { resolveSparkRole } from "../../api/sparkRole";
+import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, updateAllHermes, wakeAllSparks } from "../../api/client";
 import { enginePhaseLabel, decodeSaturationHint, formatWaitReason, waitReasonDetail } from "../../utils/health";
 import { MetricBar } from "../ui/MetricBar";
@@ -12,10 +12,20 @@ import { InferenceHealthPanel } from "./InferenceHealthPanel";
 import { ModelFleetPanel } from "../ModelFleet/ModelFleetPanel";
 import { fmtEnergyWh, fmtCost } from "../../utils/energy";
 import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
+import { FleetEnergyCard } from "./FleetEnergyCard";
+import { FleetAlertStrip } from "./FleetAlertStrip";
+import { FleetTokenTotals } from "./FleetTokenTotals";
+import { formatMb } from "../../shared/formatBytes";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
   hideOffline?: boolean;
+  hideWorkers?: boolean;
+  showFleetEnergy?: boolean;
+  showFleetExceptions?: boolean;
+  showOverviewSearch?: boolean;
+  /** Overview LLM token totals card (cumulative tokens per model). */
+  showLlmTokenTotals?: boolean;
   temperatureUnit?: "celsius" | "fahrenheit";
   onSelectSpark?: (id: string) => void;
 }
@@ -24,10 +34,7 @@ function celsiusToFahrenheit(c: number): number {
   return Math.round(c * 9 / 5 + 32);
 }
 
-function formatMb(mb: number): string {
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-  return `${Math.round(mb)} MB`;
-}
+
 
 function fmtStorage(mb: number, unit: boolean): string {
   const val = mb >= 1024 ? mb / 1024 : mb;
@@ -468,13 +475,17 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
               );
             })()}
             <MetricBar
-              label={spark.kind === "host" ? "GPU" : "Temperature"}
+              label={
+                spark.kind === "host" || (spark.metrics.cpu?.temperature ?? 0) > 0
+                  ? "GPU"
+                  : "Temperature"
+              }
               value={displayTemp}
               max={temperatureUnit === "fahrenheit" ? 212 : 100}
               color={tempBarColor}
               caption={tempLabel}
             />
-            {spark.kind === "host" && (spark.metrics.cpu?.temperature ?? 0) > 0 && (() => {
+            {(spark.metrics.cpu?.temperature ?? 0) > 0 && (() => {
               const cpuRaw = spark.metrics.cpu?.temperature ?? 0;
               const cpuDisplay =
                 temperatureUnit === "fahrenheit" ? celsiusToFahrenheit(cpuRaw) : cpuRaw;
@@ -514,8 +525,14 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
             })()}
             {(() => {
               const role = resolveSparkRole(spark);
+
+              // Workers have no local LLM API — show cluster/model label instead.
+              // Priority: manual workerLabel override > derived head-model
+              // mirror > generic fallback. Derived never shows a stale model:
+              // the backend nulls it when the head is unresolvable/offline.
               if (role === "worker") {
-                const label = spark.workerLabel?.trim() || "distributed";
+                const label =
+                  spark.workerLabel?.trim() || spark.workerDerivedLabel?.trim() || "distributed";
                 const title = headSparkName
                   ? `${label} · worker of ${headSparkName}`
                   : `${label} · distributed LLM worker`;
@@ -541,7 +558,11 @@ function SparkCard({ spark, headSparkName, temperatureUnit, onSelect, onOpenDial
                           ? "sgLang"
                           : llm.backend === "exl3"
                             ? "EXL3"
-                            : llm.backend ?? "LLM"
+                            : llm.backend === "q27"
+                              ? "q27"
+                              : llm.backend === "tensorfold"
+                                ? "TensorFold"
+                                : llm.backend ?? "LLM"
                   }
                   value={llm.modelId ?? "unknown"}
                   tone="accent"
@@ -833,8 +854,29 @@ function FleetHealthBanner({ sparks }: { sparks: SparkSnapshot[] }) {
   );
 }
 
-export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "celsius", onSelectSpark }: OverviewPageProps) {
-  const visibleSparks = hideOffline ? sparks.filter((s) => s.online) : sparks;
+export function OverviewPage({
+  sparks,
+  hideOffline = false,
+  hideWorkers = false,
+  showFleetEnergy = false,
+  showFleetExceptions = false,
+  showOverviewSearch = false,
+  showLlmTokenTotals = false,
+  temperatureUnit = "celsius",
+  onSelectSpark,
+}: OverviewPageProps) {
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "online" | "offline" | "issues">("all");
+  const withoutWorkers = hideWorkers ? sparks.filter((s) => !isWorkerSpark(s)) : sparks;
+  const visibleSparks = withoutWorkers.filter((spark) => {
+    if (hideOffline && !spark.online) return false;
+    if (showOverviewSearch && query && !spark.name.toLowerCase().includes(query.toLowerCase())) return false;
+    if (showOverviewSearch && statusFilter === "online" && !spark.online) return false;
+    if (showOverviewSearch && statusFilter === "offline" && spark.online) return false;
+    if (showOverviewSearch && statusFilter === "issues" && spark.online && !spark.metrics.storage.some((disk) => disk.percentage >= 90)) return false;
+    return true;
+  });
+  const hiddenWorkerCount = hideWorkers ? sparks.filter(isWorkerSpark).length : 0;
   const [energyOpen, setEnergyOpen] = useState(false);
   const [dialogSparkId, setDialogSparkId] = useState<string | null>(null);
   const [dialogTab, setDialogTab] = useState<"gen" | "prefill">("gen");
@@ -968,13 +1010,26 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
     }
   }
 
-  if (visibleSparks.length === 0) {
-    const allOffline = hideOffline && sparks.length > 0;
+  if (withoutWorkers.length === 0 || (hideOffline && withoutWorkers.every((spark) => !spark.online))) {
+    const allWorkersHidden = hideWorkers && sparks.length > 0 && withoutWorkers.length === 0;
+    const allOffline = hideOffline && withoutWorkers.length > 0;
+    const title = allWorkersHidden
+      ? "Worker nodes are hidden"
+      : allOffline
+        ? "All Sparks are offline"
+        : "No Sparks registered";
+    const detail = allWorkersHidden
+      ? "Hide worker nodes is on in Settings. Turn it off to show Worker-role Sparks again."
+      : allOffline
+        ? "Auto-hide is enabled and no Sparks are currently online."
+        : "Click the + tab to add a DGX Spark unit.";
     return (
       <div className="panel mx-auto mt-16 max-w-md p-8 text-center">
-        <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft text-accent"><ActivityIcon className="h-5 w-5" /></div>
-        <h2 className="text-sm font-semibold text-text-strong">{allOffline ? "All Sparks are offline" : "No Sparks registered"}</h2>
-        <p className="mt-1 text-xs text-muted">{allOffline ? "Auto-hide is enabled and no Sparks are currently online." : "Click the + tab to add a DGX Spark unit."}</p>
+        <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <ActivityIcon className="h-5 w-5" />
+        </div>
+        <h2 className="text-sm font-semibold text-text-strong">{title}</h2>
+        <p className="mt-1 text-xs text-muted">{detail}</p>
       </div>
     );
   }
@@ -985,6 +1040,8 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-overview-rhythm)" }}>
+      {showFleetEnergy ? <FleetEnergyCard nodeCount={sparks.length} /> : null}
+      {showFleetExceptions ? <FleetAlertStrip sparks={sparks} onSelect={onSelectSpark} /> : null}
       <div className="flex flex-wrap items-end justify-between gap-6">
         <div className="flex items-center gap-3">
           <h1 className="font-normal leading-tight tracking-tight text-text-strong" style={{ fontSize: "var(--density-overview-title)" }}>Overview</h1>
@@ -1081,9 +1138,39 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
               </button>
             </div>
           )}
-          <span className="online-chip"><span className="dot" />{onlineCount}/{visibleSparks.length} online</span>
+          <span className="online-chip">
+            <span className="dot" />
+            {onlineCount}/{visibleSparks.length} online
+          </span>
+          {hiddenWorkerCount > 0 && (
+            <span className="text-[11px] text-muted">
+              {hiddenWorkerCount} worker{hiddenWorkerCount === 1 ? "" : "s"} hidden
+            </span>
+          )}
         </div>
       </div>
+      {showOverviewSearch ? (
+      <div className="flex flex-wrap gap-2" role="search" aria-label="Filter fleet units">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search up to 12 units"
+          aria-label="Search units by name"
+          className="min-h-11 min-w-52 flex-1 rounded border border-border bg-surface-elevated px-3 text-sm text-text"
+        />
+        <select
+          value={statusFilter}
+          onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+          aria-label="Filter units by status"
+          className="min-h-11 rounded border border-border bg-surface-elevated px-3 text-sm text-text"
+        >
+          <option value="all">All status</option>
+          <option value="online">Online</option>
+          <option value="offline">Offline</option>
+          <option value="issues">Issues</option>
+        </select>
+      </div>
+      ) : null}
       <ConfirmShutdownDialog
         open={shutdownOpen}
         onClose={() => setShutdownOpen(false)}
@@ -1093,8 +1180,15 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         confirmLabel="Shut down all"
       />
       {/* FleetHealthBanner removed — alert states still visible via per-Spark
-          health badges and the InferenceHealthPanel below the cards. */}
+          health badges and the InferenceHealthPanel below the cards. Upstream's
+          token-totals strip is kept behind its feature flag. */}
+      {showLlmTokenTotals ? <FleetTokenTotals /> : null}
       <div className="overview-page grid sm:grid-cols-2 lg:grid-cols-3" style={{ gap: "var(--density-page-gap)" }}>
+        {visibleSparks.length === 0 && (
+          <p className="panel p-6 text-sm text-muted sm:col-span-2 lg:col-span-3">
+            No units match the current search and status filters.
+          </p>
+        )}
         {visibleSparks.map((spark) => (
           <SparkCard key={spark.id} spark={spark}
             headSparkName={spark.workerHeadId ? sparks.find((s) => s.id === spark.workerHeadId)?.name ?? null : null}
