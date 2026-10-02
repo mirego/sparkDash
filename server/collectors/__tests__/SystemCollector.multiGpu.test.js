@@ -94,6 +94,13 @@ test("_buildGpuDevices: a lone GB10 (memory N/A) inherits the aggregate VRAM", (
   const gpus = c._buildGpuDevices(devices, c._parseVramLines("[N/A], [N/A]"), [], aggregate);
   assert.equal(gpus.length, 1);
   assert.deepEqual(gpus[0].vram, aggregate);
+  // 13-field upstream short layout: sm clock at index 4, max at 5 — assert the
+  // tail-indexed clocks are not swapped (1500 current < 1800 max).
+  const [dev] = devices;
+  assert.equal(dev.clockSm, 1500);
+  assert.equal(dev.throttle.smClockMHz, 1500);
+  assert.equal(dev.throttle.smClockMaxMHz, 1800);
+  assert.equal(dev.throttle.smClockPct, 83.3);
 });
 
 test("_describeGpus: header label for one, identical, and mixed cards", () => {

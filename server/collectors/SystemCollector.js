@@ -511,8 +511,8 @@ export class SystemCollector {
         usage = parseFloat(parts[1]) || 0;
         powerDraw = parseFloat(parts[2]) || 0;
         powerLimit = num(3) ?? 120;
-        smClockMHz = num(n - 8);
-        smClockMaxMHz = num(n - 9);
+        smClockMHz = num(n - 9);
+        smClockMaxMHz = num(n - 8);
         hwThermal = this._parseSmiActive(parts[n - 7]);
         swThermal = this._parseSmiActive(parts[n - 6]);
         hwSlowdown = this._parseSmiActive(parts[n - 5]);
