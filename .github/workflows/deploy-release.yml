@@ -112,12 +112,10 @@ jobs:
           fi
 
           # Sparks registry must be reachable and parse as JSON.
-          python3 - <<'PY'
-          import json, sys
-          data = json.load(open('/tmp/smoke-sparks.json'))
-          assert 'sparks' in data, data
-          print(f"sparks registry: {len(data['sparks'])} sparks, healthy")
-          PY
+          # (python -c, not a heredoc: an indented heredoc terminator inside
+          # the run block makes bash read the doc to EOF and python sees an
+          # indented body -> IndentationError on every deploy.)
+          python3 -c "import json; d = json.load(open('/tmp/smoke-sparks.json')); assert 'sparks' in d, d; print('sparks registry:', len(d['sparks']), 'sparks, healthy')"
 
           echo "smoke: ALL OK"
 
