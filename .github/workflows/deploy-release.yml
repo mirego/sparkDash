@@ -1,0 +1,141 @@
+# Deploy-on-merge — release/custom only. NOT enabled until the pr-validate
+# gate is merged, green on a real PR, and marked required (see docs/CI-CD.md).
+# Runs on the anton self-hosted runner where the live deploy worktree, the
+# docker-compose.deploy.yml override and the anton-local .env exist. Those are
+# NOT in the repo — the runner checks out release/custom into its own workdir
+# and the compose overrides come from the repo (docker-compose.yml +
+# docker-compose.override.yml) plus anton-local files referenced by
+# COMPOSE_FILE / COMPOSE_PATH_SEPARATOR. Zero secrets: the deploy compose
+# reads anton-local env only.
+name: Deploy Release
+
+on:
+  push:
+    branches: [release/custom]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-release
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build + recreate + smoke (anton)
+    runs-on: [self-hosted, anton]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout release/custom
+        uses: actions/checkout@v4
+        with:
+          ref: release/custom
+          clean: recursive
+          fetch-depth: 0
+
+      - name: Stage anton-local deploy files
+        run: |
+          # docker-compose.deploy.yml and .env live ONLY on anton (deploy
+          # worktree), not in the repo. The runner workdir needs both before
+          # any compose command. If the anton-local copies are missing, fail
+          # loudly — silently deploying without the live-config override would
+          # ship a container with the stock ./config mount (state loss).
+          DEPLOY_WT=/home/gilfoyle/sparkDash-deploy
+          test -f "$DEPLOY_WT/docker-compose.deploy.yml" || { echo "missing $DEPLOY_WT/docker-compose.deploy.yml" >&2; exit 1; }
+          cp "$DEPLOY_WT/docker-compose.deploy.yml" ./docker-compose.deploy.yml
+          if [ -f "$DEPLOY_WT/.env" ]; then
+            cp "$DEPLOY_WT/.env" ./.env
+            chmod 600 ./.env
+          fi
+          test -f ./.env || { echo "missing .env on anton deploy worktree" >&2; exit 1; }
+          echo "staged anton-local deploy override + .env"
+
+      - name: Show compose command
+        run: |
+          echo "COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.override.yml}"
+          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml config --quiet \
+            && echo "compose config OK"
+
+      - name: Build images
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml build
+
+      - name: Recreate containers
+        run: |
+          # Recreate, never plain restart — the FE is baked into the image.
+          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml up -d --force-recreate
+
+      - name: Smoke checks
+        id: smoke
+        run: |
+          set -euo pipefail
+          PORT="${PORT:-5555}"
+          BASE="http://127.0.0.1:${PORT}"
+
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE/"; then break; fi
+            if [ "$i" -eq 30 ]; then echo "app never came up on :${PORT}" >&2; exit 1; fi
+            sleep 2
+          done
+
+          echo "--- GET $BASE/"
+          curl -fsS -o /tmp/smoke-index.html "$BASE/"
+          echo "--- GET $BASE/api/models/export/opencode"
+          curl -fsS -o /tmp/smoke-opencode.json "$BASE/api/models/export/opencode"
+          echo "--- GET $BASE/api/models/export/pimono"
+          curl -fsS -o /tmp/smoke-pimono.json "$BASE/api/models/export/pimono"
+          echo "--- GET $BASE/api/sparks"
+          curl -fsS -o /tmp/smoke-sparks.json "$BASE/api/sparks"
+
+          # Export endpoints must contain env placeholders, never plaintext keys.
+          if grep -qE 'sk-[A-Za-z0-9]{8,}' /tmp/smoke-opencode.json /tmp/smoke-pimono.json; then
+            echo "PLAINTEXT KEY LEAK in an export endpoint — failing deploy" >&2
+            exit 1
+          fi
+          echo "no plaintext keys in exports: OK"
+
+          # FE is baked into the image; confirm the served bundle is real.
+          # Extract WITH the /assets/ prefix: a bare index-*.js curls to the
+          # SPA fallback (200 text/html, no marker) and would fail every
+          # healthy deploy.
+          BUNDLE=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/smoke-index.html | head -1)
+          if [ -z "$BUNDLE" ]; then
+            echo "no built frontend bundle served at / — is dist baked in?" >&2
+            exit 1
+          fi
+          echo "served bundle: $BUNDLE"
+
+          # Feature marker: Export Configs modal (v1.8.10+) present in the FE bundle.
+          if curl -fsS "$BASE${BUNDLE}" | grep -q "Export Configs"; then
+            echo "feature marker 'Export Configs' found in bundle: OK"
+          else
+            echo "feature marker 'Export Configs' NOT in bundle $BUNDLE" >&2
+            exit 1
+          fi
+
+          # Sparks registry must be reachable and parse as JSON.
+          # (python -c, not a heredoc: an indented heredoc terminator inside
+          # the run block makes bash read the doc to EOF and python sees an
+          # indented body -> IndentationError on every deploy.)
+          python3 -c "import json; d = json.load(open('/tmp/smoke-sparks.json')); assert 'sparks' in d, d; print('sparks registry:', len(d['sparks']), 'sparks, healthy')"
+
+          echo "smoke: ALL OK"
+
+      - name: Deploy summary
+        if: always()
+        run: |
+          {
+            echo "## Deploy to anton"
+            echo ""
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- smoke: ${{ steps.smoke.outcome }}"
+            echo "- container: docker compose up -d --force-recreate (deploy override)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail loudly on smoke failure
+        if: failure()
+        run: |
+          echo "DEPLOY FAILED at commit ${{ github.sha }} — docker compose state:" >&2
+          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml ps 2>&1 || true
+          exit 1

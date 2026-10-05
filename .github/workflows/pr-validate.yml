@@ -1,0 +1,55 @@
+# PR validation gate — runs on every PR targeting release/custom.
+# This check is the required gate for merge (see docs/CI-CD.md). Once green on
+# a real PR, mark "Validate PR (test / tsc / build)" required in
+# Settings → Branches → release/custom protection rules.
+name: PR Validate
+
+on:
+  pull_request:
+    branches: [release/custom]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate PR (test / tsc / build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Server tests
+        run: npm run test:server
+
+      - name: Frontend tests
+        run: npm run test:frontend
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## PR validation"
+            echo ""
+            echo "All gates passed: server tests, frontend tests (vitest), typecheck (tsc --noEmit), frontend build (vite)."
+            echo "This check must be green before merge into \`release/custom\`."
+          } >> "$GITHUB_STEP_SUMMARY"
