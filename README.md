@@ -35,6 +35,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - [Hermes Agent monitoring](#hermes-agent-monitoring)
 - [Tailnet monitoring](#tailnet-monitoring)
 - [Full changelog](./CHANGELOG.md)
+- [CI/CD pipeline](./docs/CI-CD.md) — PR validate → merge → auto-deploy → smoke → failure watcher
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
 - [Tech stack](#tech-stack)
