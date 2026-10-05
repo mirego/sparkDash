@@ -19,9 +19,9 @@ Runs on every pull_request targeting `release/custom`:
 
 The e2e suite is **not** part of the gate: it needs CPA API credentials, the
 live config files and a real browser runner (TesterArmy framework) — see
-`docs/CI-CD.md` "Why e2e stays local" above. Reviewers run e2e locally
+"why e2e stays local" below. Reviewers run e2e locally
 against the PR staging pattern (sparkdash-factory skill, "PR staging for
-e2e"). The gate proves test/tsc/build green on every PR; e2e proof lives in
+e2e"). The gate proves test/tsc/build on every PR; e2e proof lives in
 the review round (videos attached to the PR).
 
 Once this workflow is green on a real PR, mark its check required:
@@ -31,6 +31,26 @@ Once this workflow is green on a real PR, mark its check required:
 
 (Note: the fine-grained PAT has no `administration:write`, so branch
 protection must be clicked by a human admin.)
+
+### Credential reality check (2026-10-05, t_0f7041be)
+
+Neither host credential can push files under `.github/workflows/`:
+
+- hosts.yml OAuth token (`gho_…`, `gh auth git-credential`): scopes
+  `repo` — pushes normal code fine, but GitHub rejects workflow files
+  without the `workflow` scope.
+- "Anton - Mirego" fine-grained PAT (`github_p…`): **read-only** in
+  practice — 403 `Resource not accessible by personal access token` on
+  git refs + contents writes (its repo-permissions block reflects the
+  owner user, not the token).
+
+Fix (either one, then push the workflow commit of this branch):
+
+    # option A: add workflow scope to the gh CLI token
+    gh auth refresh -h github.com -s workflow
+    # option B: regenerate the fine-grained PAT with
+    # Contents: Read and write + Workflows: Read and write, update
+    # GH_TOKEN in every profile .env
 
 ### 2. Deploy on merge — `.github/workflows/deploy-release.yml`
 
