@@ -6,7 +6,7 @@ import { enginePhaseLabel, decodeSaturationHint, formatWaitReason, waitReasonDet
 import { MetricBar } from "../ui/MetricBar";
 import { Sparkline } from "../ui/Sparkline";
 import { useMetricsHistory, useMetricsHistoryTail } from "../../hooks/metricsStore";
-import { ActivityIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
+import { ActivityIcon, ExternalLinkIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 import { EnergyModal } from "../EnergyModal";
 import { InferenceHealthPanel } from "./InferenceHealthPanel";
 import { ModelFleetPanel } from "../ModelFleet/ModelFleetPanel";
@@ -16,6 +16,7 @@ import { FleetEnergyCard } from "./FleetEnergyCard";
 import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
 import { formatMb } from "../../shared/formatBytes";
+import { AgentConfigExportModal } from "./AgentConfigExportModal";
 
 interface OverviewPageProps {
   sparks: SparkSnapshot[];
@@ -888,6 +889,7 @@ export function OverviewPage({
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
   const [batchRun, setBatchRun] = useState<string[] | null>(null);
 
@@ -1118,6 +1120,15 @@ export function OverviewPage({
               )}
               <button
                 type="button"
+                onClick={() => setExportOpen(true)}
+                title="Copy agent CLI configs (opencode / pi-mono) pointing at the CPA fleet endpoint"
+                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:bg-accent/20 hover:text-accent"
+              >
+                <ExternalLinkIcon className="h-3 w-3" />
+                Export Configs
+              </button>
+              <button
+                type="button"
                 onClick={() => void handleWakeAll()}
                 disabled={batchLoading}
                 title="Wake all Sparks that have a MAC configured (WoL)"
@@ -1179,6 +1190,7 @@ export function OverviewPage({
         description={`Gracefully shut down all ${onlineShutdownCount} online Spark${onlineShutdownCount === 1 ? "" : "s"}? Offline nodes will be skipped.`}
         confirmLabel="Shut down all"
       />
+      <AgentConfigExportModal open={exportOpen} onClose={() => setExportOpen(false)} />
       {/* FleetHealthBanner removed — alert states still visible via per-Spark
           health badges and the InferenceHealthPanel below the cards. Upstream's
           token-totals strip is kept behind its feature flag. */}
