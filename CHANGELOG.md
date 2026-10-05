@@ -11,6 +11,16 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.10] — 2026-10-05
+
+### Added
+- **Export Configs modal (PR #8)** — an **Export Configs** button on Overview opens a modal with ready-to-use agent CLI configs generated from the live fleet registry: `opencode.json` (opencode, `{env:CPA_API_KEY}` placeholder) and pi-mono `models.json` (`"$CPA_API_KEY"` placeholder). Copy per section or copy all; clipboard fallback (select-all + hint) on non-secure origins.
+
+### Fixed
+- **GPU clock swap on n=13 (PR #7 carry)** — unswapped graphics/mem clocks; count-based alert suppression.
+
+---
+
 ## [1.8.5] — 2026-08-28
 
 ### Fixed

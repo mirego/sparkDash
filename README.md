@@ -51,6 +51,10 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ## Latest version changelog
 
+### Version 1.8.10 — Export Configs modal
+- **Export Configs** button on Overview opens a modal with ready-to-use agent CLI configs from the live fleet registry: `opencode.json` and pi-mono `models.json`, both with `CPA_API_KEY` placeholders (no plaintext credentials). Copy per section or all at once; clipboard fallback on non-secure origins.
+- Fixes the GPU clock swap on n=13 (graphics/mem unswapped) and count-based alert suppression.
+
 ### Version 1.8.9 — TensorFold backend
 - **TensorFold** ([ashhart/TensorFold](https://github.com/ashhart/TensorFold)) is detected from `/v1/models` (`owned_by: tensorfold`) and labeled on the LLM card and Overview. Live tok/s reads cumulative token totals from `/health` when the server publishes them; stock TensorFold does not yet, so it shows 0 tok/s until it does. Benches and the showcase work as on any OpenAI-compatible server.
 - **q27 backend**, **custom prefill size**, **remote-Spark benches** over an SSH tunnel, an on-demand **Remote** bench host, **hide worker nodes**, and a **share-as-image** card for bench results.
