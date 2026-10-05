@@ -96,7 +96,10 @@ jobs:
           echo "no plaintext keys in exports: OK"
 
           # FE is baked into the image; confirm the served bundle is real.
-          BUNDLE=$(grep -oE 'index-[A-Za-z0-9_-]+\.js' /tmp/smoke-index.html | head -1)
+          # Extract WITH the /assets/ prefix: a bare index-*.js curls to the
+          # SPA fallback (200 text/html, no marker) and would fail every
+          # healthy deploy.
+          BUNDLE=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/smoke-index.html | head -1)
           if [ -z "$BUNDLE" ]; then
             echo "no built frontend bundle served at / — is dist baked in?" >&2
             exit 1
@@ -104,7 +107,7 @@ jobs:
           echo "served bundle: $BUNDLE"
 
           # Feature marker: Export Configs modal (v1.8.10+) present in the FE bundle.
-          if curl -fsS "$BASE/${BUNDLE}" | grep -q "Export Configs"; then
+          if curl -fsS "$BASE${BUNDLE}" | grep -q "Export Configs"; then
             echo "feature marker 'Export Configs' found in bundle: OK"
           else
             echo "feature marker 'Export Configs' NOT in bundle $BUNDLE" >&2
