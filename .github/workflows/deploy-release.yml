@@ -1,12 +1,16 @@
 # Deploy-on-merge — release/custom only. NOT enabled until the pr-validate
 # gate is merged, green on a real PR, and marked required (see docs/CI-CD.md).
-# Runs on the anton self-hosted runner where the live deploy worktree, the
-# docker-compose.deploy.yml override and the anton-local .env exist. Those are
-# NOT in the repo — the runner checks out release/custom into its own workdir
-# and the compose overrides come from the repo (docker-compose.yml +
-# docker-compose.override.yml) plus anton-local files referenced by
-# COMPOSE_FILE / COMPOSE_PATH_SEPARATOR. Zero secrets: the deploy compose
-# reads anton-local env only.
+#
+# Runs on a GitHub-hosted runner (ubuntu-latest — the same label sibling mirego
+# repos use: accent, trikot, telemetry_ui, elixir-boilerplate; all three
+# ubuntu-2x.04 pinned labels verified to have capacity via a probe run).
+# No self-hosted runner required: the job SSHes into the anton host
+# (10.4.0.15) and runs docker compose THERE, because that is where the app
+# lives (port 5555) and where the anton-local deploy files
+# (docker-compose.deploy.yml + .env in the ~/sparkDash-deploy worktree) exist.
+# Those files are NOT in the repo and are NOT copied anywhere — the deploy
+# compose reads anton-local env only. Zero app secrets in this workflow: it
+# only needs ANTON_HOST + ANTON_SSH_KEY (repo secrets) to reach anton.
 name: Deploy Release
 
 on:
@@ -23,119 +27,144 @@ concurrency:
 
 jobs:
   deploy:
-    name: Build + recreate + smoke (anton)
-    runs-on: [self-hosted, anton]
+    name: Build + recreate + smoke (ssh -> anton)
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout release/custom
+      - name: Checkout (for sha context only)
         uses: actions/checkout@v4
         with:
           ref: release/custom
-          clean: recursive
           fetch-depth: 0
 
-      - name: Stage anton-local deploy files
+      - name: Set up SSH key
+        # ANTON_SSH_KEY: the PRIVATE half of the anton deploy key (repo
+        # secret). The public half must already be in gilfoyle@anton's
+        # authorized_keys (one-time setup — see docs/CI-CD.md).
         run: |
-          # docker-compose.deploy.yml and .env live ONLY on anton (deploy
-          # worktree), not in the repo. The runner workdir needs both before
-          # any compose command. If the anton-local copies are missing, fail
-          # loudly — silently deploying without the live-config override would
-          # ship a container with the stock ./config mount (state loss).
-          DEPLOY_WT=/home/gilfoyle/sparkDash-deploy
-          test -f "$DEPLOY_WT/docker-compose.deploy.yml" || { echo "missing $DEPLOY_WT/docker-compose.deploy.yml" >&2; exit 1; }
-          cp "$DEPLOY_WT/docker-compose.deploy.yml" ./docker-compose.deploy.yml
-          if [ -f "$DEPLOY_WT/.env" ]; then
-            cp "$DEPLOY_WT/.env" ./.env
-            chmod 600 ./.env
-          fi
-          test -f ./.env || { echo "missing .env on anton deploy worktree" >&2; exit 1; }
-          echo "staged anton-local deploy override + .env"
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.ANTON_SSH_KEY }}" > ~/.ssh/id_ed25519_anton
+          chmod 600 ~/.ssh/id_ed25519_anton
+          # Trust-on-first-use disabled: we pin the expected behavior via
+          # StrictHostKeyChecking=accept-new against the documented host.
+          ssh-keyscan -H "${{ secrets.ANTON_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # Fail fast if the key is malformed before any long steps run.
+          ssh-keygen -y -f ~/.ssh/id_ed25519_anton > /dev/null
 
-      - name: Show compose command
+      - name: Verify anton deploy worktree
         run: |
-          echo "COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml:docker-compose.override.yml}"
-          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml config --quiet \
-            && echo "compose config OK"
+          ssh -i ~/.ssh/id_ed25519_anton -o StrictHostKeyChecking=accept-new \
+            gilfoyle@${{ secrets.ANTON_HOST }} '
+              set -euo pipefail
+              test -d ~/sparkDash-deploy || { echo "missing ~/sparkDash-deploy on anton" >&2; exit 1; }
+              test -f ~/sparkDash-deploy/docker-compose.deploy.yml || { echo "missing ~/sparkDash-deploy/docker-compose.deploy.yml" >&2; exit 1; }
+              test -f ~/sparkDash-deploy/.env || { echo "missing ~/sparkDash-deploy/.env on anton" >&2; exit 1; }
+              echo "anton deploy worktree OK"
+            '
 
-      - name: Build images
+      - name: Fetch and checkout deploy sha on anton
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml build
+          ssh -i ~/.ssh/id_ed25519_anton gilfoyle@${{ secrets.ANTON_HOST }} '
+            set -euo pipefail
+            cd ~/sparkDash-deploy
+            git fetch --all --prune
+            git checkout --force '"${{ github.sha }}"'
+            git clean -ffd
+            git log --oneline -1
+          '
 
-      - name: Recreate containers
+      - name: Build images on anton
         run: |
-          # Recreate, never plain restart — the FE is baked into the image.
-          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml up -d --force-recreate
+          ssh -i ~/.ssh/id_ed25519_anton gilfoyle@${{ secrets.ANTON_HOST }} '
+            set -euo pipefail
+            cd ~/sparkDash-deploy
+            # Recreate, never plain restart — the FE is baked into the image.
+            docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml build
+          '
 
-      - name: Smoke checks
+      - name: Recreate containers on anton
+        run: |
+          ssh -i ~/.ssh/id_ed25519_anton gilfoyle@${{ secrets.ANTON_HOST }} '
+            set -euo pipefail
+            cd ~/sparkDash-deploy
+            docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml up -d --force-recreate
+          '
+
+      - name: Smoke checks (via ssh curl on anton)
         id: smoke
         run: |
           set -euo pipefail
-          PORT="${PORT:-5555}"
-          BASE="http://127.0.0.1:${PORT}"
+          ssh -i ~/.ssh/id_ed25519_anton gilfoyle@${{ secrets.ANTON_HOST }} "bash -s" <<'SMOKE'
+            set -euo pipefail
+            PORT="${PORT:-5555}"
+            BASE="http://127.0.0.1:${PORT}"
 
-          for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null "$BASE/"; then break; fi
-            if [ "$i" -eq 30 ]; then echo "app never came up on :${PORT}" >&2; exit 1; fi
-            sleep 2
-          done
+            for i in $(seq 1 30); do
+              if curl -fsS -o /dev/null "$BASE/"; then break; fi
+              if [ "$i" -eq 30 ]; then echo "app never came up on :${PORT}" >&2; exit 1; fi
+              sleep 2
+            done
 
-          echo "--- GET $BASE/"
-          curl -fsS -o /tmp/smoke-index.html "$BASE/"
-          echo "--- GET $BASE/api/models/export/opencode"
-          curl -fsS -o /tmp/smoke-opencode.json "$BASE/api/models/export/opencode"
-          echo "--- GET $BASE/api/models/export/pimono"
-          curl -fsS -o /tmp/smoke-pimono.json "$BASE/api/models/export/pimono"
-          echo "--- GET $BASE/api/sparks"
-          curl -fsS -o /tmp/smoke-sparks.json "$BASE/api/sparks"
+            echo "--- GET $BASE/"
+            curl -fsS -o /tmp/smoke-index.html "$BASE/"
+            echo "--- GET $BASE/api/models/export/opencode"
+            curl -fsS -o /tmp/smoke-opencode.json "$BASE/api/models/export/opencode"
+            echo "--- GET $BASE/api/models/export/pimono"
+            curl -fsS -o /tmp/smoke-pimono.json "$BASE/api/models/export/pimono"
+            echo "--- GET $BASE/api/sparks"
+            curl -fsS -o /tmp/smoke-sparks.json "$BASE/api/sparks"
 
-          # Export endpoints must contain env placeholders, never plaintext keys.
-          if grep -qE 'sk-[A-Za-z0-9]{8,}' /tmp/smoke-opencode.json /tmp/smoke-pimono.json; then
-            echo "PLAINTEXT KEY LEAK in an export endpoint — failing deploy" >&2
-            exit 1
-          fi
-          echo "no plaintext keys in exports: OK"
+            # Export endpoints must contain env placeholders, never plaintext keys.
+            if grep -qE 'sk-[A-Za-z0-9]{8,}' /tmp/smoke-opencode.json /tmp/smoke-pimono.json; then
+              echo "PLAINTEXT KEY LEAK in an export endpoint — failing deploy" >&2
+              exit 1
+            fi
+            echo "no plaintext keys in exports: OK"
 
-          # FE is baked into the image; confirm the served bundle is real.
-          # Extract WITH the /assets/ prefix: a bare index-*.js curls to the
-          # SPA fallback (200 text/html, no marker) and would fail every
-          # healthy deploy.
-          BUNDLE=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/smoke-index.html | head -1)
-          if [ -z "$BUNDLE" ]; then
-            echo "no built frontend bundle served at / — is dist baked in?" >&2
-            exit 1
-          fi
-          echo "served bundle: $BUNDLE"
+            # FE is baked into the image; confirm the served bundle is real.
+            # Extract WITH the /assets/ prefix: a bare index-*.js curls to the
+            # SPA fallback (200 text/html, no marker) and would fail every
+            # healthy deploy.
+            BUNDLE=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/smoke-index.html | head -1)
+            if [ -z "$BUNDLE" ]; then
+              echo "no built frontend bundle served at / — is dist baked in?" >&2
+              exit 1
+            fi
+            echo "served bundle: $BUNDLE"
 
-          # Feature marker: Export Configs modal (v1.8.10+) present in the FE bundle.
-          if curl -fsS "$BASE${BUNDLE}" | grep -q "Export Configs"; then
-            echo "feature marker 'Export Configs' found in bundle: OK"
-          else
-            echo "feature marker 'Export Configs' NOT in bundle $BUNDLE" >&2
-            exit 1
-          fi
+            # Feature marker: Export Configs modal (v1.8.10+) present in the FE bundle.
+            if curl -fsS "$BASE${BUNDLE}" | grep -q "Export Configs"; then
+              echo "feature marker 'Export Configs' found in bundle: OK"
+            else
+              echo "feature marker 'Export Configs' NOT in bundle $BUNDLE" >&2
+              exit 1
+            fi
 
-          # Sparks registry must be reachable and parse as JSON.
-          # (python -c, not a heredoc: an indented heredoc terminator inside
-          # the run block makes bash read the doc to EOF and python sees an
-          # indented body -> IndentationError on every deploy.)
-          python3 -c "import json; d = json.load(open('/tmp/smoke-sparks.json')); assert 'sparks' in d, d; print('sparks registry:', len(d['sparks']), 'sparks, healthy')"
+            # Sparks registry must be reachable and parse as JSON.
+            # (python -c, not a heredoc: an indented heredoc terminator inside
+            # the run block makes bash read the doc to EOF and python sees an
+            # indented body -> IndentationError on every deploy.)
+            python3 -c "import json; d = json.load(open('/tmp/smoke-sparks.json')); assert 'sparks' in d, d; print('sparks registry:', len(d['sparks']), 'sparks, healthy')"
 
-          echo "smoke: ALL OK"
+            echo "smoke: ALL OK"
+          SMOKE
 
       - name: Deploy summary
         if: always()
         run: |
           {
-            echo "## Deploy to anton"
+            echo "## Deploy to anton (via SSH from github-hosted runner)"
             echo ""
             echo "- commit: \`${{ github.sha }}\`"
+            echo "- host: \`${{ secrets.ANTON_HOST }}\` (gilfoyle)"
             echo "- smoke: ${{ steps.smoke.outcome }}"
-            echo "- container: docker compose up -d --force-recreate (deploy override)"
+            echo "- container: docker compose up -d --force-recreate (deploy override, on anton)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail loudly on smoke failure
         if: failure()
         run: |
-          echo "DEPLOY FAILED at commit ${{ github.sha }} — docker compose state:" >&2
-          docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml ps 2>&1 || true
+          echo "DEPLOY FAILED at commit ${{ github.sha }} — fetching docker compose state from anton:" >&2
+          ssh -i ~/.ssh/id_ed25519_anton gilfoyle@${{ secrets.ANTON_HOST }} \
+            'cd ~/sparkDash-deploy && docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.deploy.yml ps' 2>&1 || true
           exit 1

@@ -2,9 +2,9 @@
 
 ## Flow
 
-    PR → validate (GitHub Actions) → merge into release/custom
-       → auto-deploy on anton (self-hosted runner)
-       → smoke checks → on failure: 15-min cron DMs gilfoyle
+    PR → validate (GitHub Actions, ubuntu-latest) → merge into release/custom
+       → deploy job (GitHub-hosted runner) SSHes into anton → docker compose there
+       → smoke checks (via ssh curl on anton) → on failure: 15-min cron DMs gilfoyle
 
 ## Components
 
@@ -56,24 +56,52 @@ Fix (either one, then push the workflow commit of this branch):
 
 On push to `release/custom` (and manual `workflow_dispatch`):
 
-- runs-on `[self-hosted, anton]` — requires a registered runner:
+- **runs-on: `ubuntu-latest`** — a GitHub-hosted runner. No self-hosted
+  runner is required. (Verified 2026-10-05: a probe workflow ran green on
+  `ubuntu-latest`, `ubuntu-24.04` and `ubuntu-22.04` in the mirego org;
+  sibling repos accent/trikot/telemetry_ui/elixir-boilerplate also use only
+  standard hosted labels.)
+- The job does **not** build locally — it **SSHes into the anton host** and
+  runs everything there, because that is where the app lives (port 5555)
+  and where the anton-local deploy files exist:
 
-      # one-time, on anton (human: generate registration token in
-      # Settings → Actions → Runners → New self-hosted runner)
-      mkdir ~/actions-runner && cd ~/actions-runner
-      ./config.sh --url https://github.com/mirego/sparkDash --token <TOKEN> --labels anton
-      ./svc.sh install gilfoyle && ./svc.sh start
+      ssh gilfoyle@$ANTON_HOST
+        cd ~/sparkDash-deploy
+        git fetch --all --prune && git checkout --force <sha> && git clean -ffd
+        docker compose -f docker-compose.yml -f docker-compose.override.yml \
+                       -f docker-compose.deploy.yml build
+        docker compose ... up -d --force-recreate   # never plain restart — FE baked into image
 
-- Stages the anton-local `docker-compose.deploy.yml` + `.env` from
-  `/home/gilfoyle/sparkDash-deploy` into the runner workdir (they are not in
-  the repo — live config mounts + BIND_HOST=0.0.0.0 PORT=5555).
-- `docker compose -f docker-compose.yml -f docker-compose.override.yml -f
-  docker-compose.deploy.yml build` then `up -d --force-recreate` (never plain
-  restart — the FE is baked into the image).
-- Smoke: loopback `/` serves a real built bundle, both export endpoints
+- The anton-local `docker-compose.deploy.yml` + `.env` (live config mounts +
+  BIND_HOST=0.0.0.0 PORT=5555) are never copied off anton — the workflow
+  verifies they exist, then runs compose in the deploy worktree itself.
+- Smoke checks run **on anton via ssh** (loopback curl), unchanged in
+  substance: `/` serves a real built bundle, both export endpoints
   (`/api/models/export/opencode`, `/api/models/export/pimono`) return 200
   with env placeholders only (a `sk-…` plaintext key fails the deploy),
   `/api/sparks` parses and reports the registry.
+
+#### Repo secrets required (one-time human step — Gilfoyle)
+
+The deploy token cannot create repo secrets (no `administration:write`);
+Settings → Secrets and variables → Actions → New repository secret:
+
+| Secret           | Value                                                                 |
+|------------------|-----------------------------------------------------------------------|
+| `ANTON_HOST`     | `10.4.0.15`                                                           |
+| `ANTON_SSH_KEY`  | PRIVATE half of a dedicated deploy key (ed25519), single line incl. final newline |
+
+One-time setup:
+
+    # 1. generate a dedicated deploy key (NOT gilfoyle's personal key)
+    ssh-keygen -t ed25519 -f ~/sparkdash-deploy-key -N "" -C sparkdash-ci-deploy
+    # 2. allow it on anton for user gilfoyle:
+    cat ~/sparkdash-deploy-key.pub >> ~/.ssh/authorized_keys
+    # 3. paste the CONTENTS of ~/sparkdash-deploy-key into the ANTON_SSH_KEY
+    #    repo secret (private key — never commit it)
+
+The workflow pins the host key via `ssh-keyscan` (accept-new) and fails
+fast with `ssh-keygen -y` if the secret is malformed.
 
 ### 3. Failure watcher — `deploy-watch.py` (profiles/dinesh/scripts/)
 
@@ -115,7 +143,8 @@ against live :5555.
 ## Sequencing (safety)
 
 The deploy workflow is committed but **not to be relied on** until the
-validation gate is merged, green on a real PR, and marked required. Until
-then gilfoyle's manual deploy (sparkdash-factory skill, "Deploy stage") is
-the flow of record; the runner registration + branch-protection click are the
-remaining one-time human steps.
+validation gate is merged, green on a real PR, and marked required — and
+until the `ANTON_HOST` + `ANTON_SSH_KEY` repo secrets are added (see
+above). Until then gilfoyle's manual deploy (sparkdash-factory skill,
+"Deploy stage") is the flow of record; adding the repo secrets +
+branch-protection click are the remaining one-time human steps.
