@@ -11,6 +11,20 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.11] — 2026-10-06
+
+### Added
+- **Reworked config exports (PRs #5, #13, #14)** — the opencode and pi-mono generators now emit **two models** from the live fleet registry (the currently loaded model plus the fleet's other entries) with per-model parameters (reasoning/thinking levels, modalities, context/output limits). `AgentConfigExportModal` got **opencode | pi-mono tabs** with per-tab copy, a select-all clipboard fallback, and warnings rendering dropped.
+- **CI: PR validation gate (PR #9)** — GitHub Actions compiles/typechecks every PR; a deploy-on-merge workflow was **removed again (PR #10)** — deploys stay local on anton via the merge-tracker release train.
+
+### Fixed
+- e2e test payload aligned with the reworked opencode schema (PR #14).
+
+### Security
+- Dependency bumps: undici 8.11.2 (PR #6), source-map-js 1.2.2 (PR #11), proxy-addr 2.0.8 (PR #12).
+
+---
+
 ## [1.8.10] — 2026-10-05
 
 ### Added

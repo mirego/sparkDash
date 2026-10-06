@@ -52,6 +52,11 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ## Latest version changelog
 
+### Version 1.8.11 — Reworked config exports + CI gate
+- Config exports reworked: opencode and pi-mono generators emit **two models** from the live fleet registry with per-model parameters (reasoning/thinking levels, modalities, context/output limits). The **Export Configs modal** now has **opencode | pi-mono tabs** with per-tab copy, a select-all clipboard fallback, and no warnings rendering.
+- GitHub Actions runs a **PR validation gate** (compile + typecheck) on every PR; deploys remain local on anton via the merge-tracker release train.
+- Dependency bumps: undici 8.11.2, source-map-js 1.2.2, proxy-addr 2.0.8.
+
 ### Version 1.8.10 — Export Configs modal
 - **Export Configs** button on Overview opens a modal with ready-to-use agent CLI configs from the live fleet registry: `opencode.json` and pi-mono `models.json`, both with `CPA_API_KEY` placeholders (no plaintext credentials). Copy per section or all at once; clipboard fallback on non-secure origins.
 - Fixes the GPU clock swap on n=13 (graphics/mem unswapped) and count-based alert suppression.
