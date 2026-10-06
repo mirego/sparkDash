@@ -60,7 +60,6 @@ import {
 import {
   buildOpencodeConfig,
   validateOpencodeConfig,
-  DEFAULT_CPA_HOST,
 } from "./collectors/OpenCodeExport.js";
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
@@ -2076,18 +2075,19 @@ app.get("/api/models/fleet", async (_req, res) => {
 
 // ─── opencode.json provider block export ─────────────────
 /**
- * GET /api/models/export/opencode?host=<cpa-host>
+ * GET /api/models/export/opencode
  *
  * Generates a ready-to-paste opencode.json provider block from the LIVE
  * model-registry.json — re-read per request (d-001: copy artifact only; we do
  * not write files anywhere, and nothing here is cached between requests).
- * Endpoint + alias + apiKey rules follow d-002:
- *   baseURL http://<cpa-host>:8317/v1, apiKey {env:CPA_API_KEY}, models keyed
- *   by the claude-* alias ids CPA accepts (live-models-status.json as truth,
- *   registry aliases as fallback).
+ * Rework spec (t_da2e5d5e): provider `gilfoyle` ("Local DGX Sparks"),
+ * baseURL http://10.4.0.15:8317/v1, apiKey literal placeholder "YOUR_API_KEY"
+ * (user-approved — supersedes the {env:} indirection for this export), and a
+ * models map with EXACTLY two entries: gilfoyle-current-model + the model
+ * currently loaded on Anton (live probe signal), with per-model-typed
+ * variant mechanics (reasoningEffort vs chat_template_kwargs).
  */
-app.get("/api/models/export/opencode", (req, res) => {
-  const hostRaw = typeof req.query.host === "string" ? req.query.host.trim() : "";
+app.get("/api/models/export/opencode", (_req, res) => {
   // registry getter hot-reloads on mtime change — no sparkDash restart needed.
   const registry = modelRegistry.registry;
   if (!Array.isArray(registry?.models) || registry.models.length === 0) {
@@ -2100,10 +2100,7 @@ app.get("/api/models/export/opencode", (req, res) => {
   let built;
   try {
     built = buildOpencodeConfig(registry, {
-      host: hostRaw || DEFAULT_CPA_HOST,
-      cpaStatus: readCpaStatus(),
-      // Live probe truth (canonicalised); buildOpencodeConfig falls back to
-      // CPA working_set when the probe has no served id yet.
+      // Live probe truth (canonicalised) — the model currently loaded on Anton.
       servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
     });
   } catch (err) {
@@ -2118,7 +2115,6 @@ app.get("/api/models/export/opencode", (req, res) => {
   }
   res.json({
     format: "opencode.json",
-    host: hostRaw || DEFAULT_CPA_HOST,
     warnings: built.warnings,
     config: built.config,
     text: JSON.stringify(built.config, null, 2),
@@ -2126,19 +2122,17 @@ app.get("/api/models/export/opencode", (req, res) => {
 });
 
 // Generate the pi-mono (Pi coding agent) ~/.pi/agent/models.json config from
-// LIVE sources on demand (registry + CPA alias status re-read per request —
-// fleet-sync updates show up without restarting sparkDash). Sibling of the
-// opencode export (t_03552241); same binding decisions d-001/d-002:
-// baseUrl = CPA :8317/v1, apiKey = "$CPA_API_KEY" env placeholder only (pi's
-// $VAR syntax — NOT {env:VAR}), zero plaintext secrets. `?host=` sets the CPA
-// host the consuming CLI reaches (default 127.0.0.1; tailnet IP for remotes).
-// `defaultModel` is a suggestion for the UI only: pi keeps its default in
-// settings.json, and models.json rejects unknown keys.
-app.get("/api/models/export/pimono", (req, res) => {
+// LIVE sources on demand (registry re-read per request — fleet-sync updates
+// show up without restarting sparkDash). Rework spec (t_da2e5d5e): provider
+// `gilfoyle` with baseUrl "Replaced by extensions/providers.ts", api
+// "openai-completions", compat {supportsDeveloperRole,supportsReasoningEffort}
+// false, and NO apiKey anywhere — pi resolves auth via env variables. Models
+// array carries exactly gilfoyle-current-model + the loaded model with
+// per-model thinkingLevelMap mechanics. `defaultModel` is a suggestion for
+// the UI only: pi keeps its default in settings.json.
+app.get("/api/models/export/pimono", (_req, res) => {
   const { config, defaultModel, warnings } = buildPimonoConfig({
     registry: modelRegistry.registry,
-    cpaStatus: readCpaStatus(),
-    host: req.query?.host,
     servedId: modelRegistry.coalesce(resolveLiveCurrentModel()),
   });
   // `text` is the exact clipboard payload the UI copies — serialized here so
