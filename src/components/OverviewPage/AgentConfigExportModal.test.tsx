@@ -17,9 +17,8 @@ const fetchPiMono = vi.mocked(fetchPiMonoExport);
 function opencodePayload(overrides: Partial<OpencodeExportResponse> = {}): OpencodeExportResponse {
   return {
     format: "opencode.json",
-    host: "127.0.0.1",
     warnings: ["model foo/bar: canonical id not CPA-accepted; skipped"],
-    config: { $schema: "https://opencode.ai/schema.json", provider: {} },
+    config: { $schema: "https://opencode.ai/schema.json", model: "gilfoyle-current-model", provider: {} },
     text: '{"opencode":"config"}',
     ...overrides,
   };
