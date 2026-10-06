@@ -2,13 +2,38 @@
 
 ## Flow
 
-    PR → validate (GitHub Actions) → merge into release/custom
-       → auto-deploy on anton (self-hosted runner)
-       → smoke checks → on failure: 15-min cron DMs gilfoyle
+    PR → PR Validate (GitHub Actions, ubuntu-latest) → merge into release/custom
+       → merge-tracker cron detects the merge → files the Release-train card
+       → deploy runs locally on anton (gilfoyle: docker compose) → smoke checks
 
-## Components
+## Deploy model
 
-### 1. PR validation gate — `.github/workflows/pr-validate.yml`
+GitHub Actions is **CI-only**: the single workflow is the PR Validate gate.
+**Deploys are NOT GitHub-driven** — there is no deploy workflow and no runner
+ever SSHes anywhere. The flow after merge:
+
+- The merge-tracker cron (merge-poll) detects merges into `release/custom`
+  and files the **Release-train card** on the sparkDash board for gilfoyle.
+- gilfoyle runs the deploy **locally on anton** from the `~/sparkDash-deploy`
+  worktree (its `docker-compose.deploy.yml` + `.env` carry the live config
+  mounts and `BIND_HOST=0.0.0.0 PORT=5555` — those files are never copied
+  off anton):
+
+        docker compose -f docker-compose.yml -f docker-compose.override.yml \
+                       -f docker-compose.deploy.yml build
+        docker compose ... up -d --force-recreate   # never plain restart — FE baked into image
+
+- Post-deploy smoke checks on anton (loopback curl): `/` serves a real
+  built bundle, both export endpoints (`/api/models/export/opencode`,
+  `/api/models/export/pimono`) return 200 with env placeholders only (a
+  `sk-…` plaintext key fails the check), `/api/sparks` parses and reports
+  the registry.
+
+**No repo secrets are required for CI** — nothing in `.github/workflows/`
+reads a secret; the deploy path touches GitHub only through the merge-tracker
+polling API.
+
+## PR Validate — the only workflow: `.github/workflows/pr-validate.yml`
 
 Runs on every pull_request targeting `release/custom`:
 
@@ -32,70 +57,7 @@ Once this workflow is green on a real PR, mark its check required:
 (Note: the fine-grained PAT has no `administration:write`, so branch
 protection must be clicked by a human admin.)
 
-### Credential reality check (2026-10-05, t_0f7041be)
-
-Neither host credential can push files under `.github/workflows/`:
-
-- hosts.yml OAuth token (`gho_…`, `gh auth git-credential`): scopes
-  `repo` — pushes normal code fine, but GitHub rejects workflow files
-  without the `workflow` scope.
-- "Anton - Mirego" fine-grained PAT (`github_p…`): **read-only** in
-  practice — 403 `Resource not accessible by personal access token` on
-  git refs + contents writes (its repo-permissions block reflects the
-  owner user, not the token).
-
-Fix (either one, then push the workflow commit of this branch):
-
-    # option A: add workflow scope to the gh CLI token
-    gh auth refresh -h github.com -s workflow
-    # option B: regenerate the fine-grained PAT with
-    # Contents: Read and write + Workflows: Read and write, update
-    # GH_TOKEN in every profile .env
-
-### 2. Deploy on merge — `.github/workflows/deploy-release.yml`
-
-On push to `release/custom` (and manual `workflow_dispatch`):
-
-- runs-on `[self-hosted, anton]` — requires a registered runner:
-
-      # one-time, on anton (human: generate registration token in
-      # Settings → Actions → Runners → New self-hosted runner)
-      mkdir ~/actions-runner && cd ~/actions-runner
-      ./config.sh --url https://github.com/mirego/sparkDash --token <TOKEN> --labels anton
-      ./svc.sh install gilfoyle && ./svc.sh start
-
-- Stages the anton-local `docker-compose.deploy.yml` + `.env` from
-  `/home/gilfoyle/sparkDash-deploy` into the runner workdir (they are not in
-  the repo — live config mounts + BIND_HOST=0.0.0.0 PORT=5555).
-- `docker compose -f docker-compose.yml -f docker-compose.override.yml -f
-  docker-compose.deploy.yml build` then `up -d --force-recreate` (never plain
-  restart — the FE is baked into the image).
-- Smoke: loopback `/` serves a real built bundle, both export endpoints
-  (`/api/models/export/opencode`, `/api/models/export/pimono`) return 200
-  with env placeholders only (a `sk-…` plaintext key fails the deploy),
-  `/api/sparks` parses and reports the registry.
-
-### 3. Failure watcher — `deploy-watch.py` (profiles/dinesh/scripts/)
-
-Registered as cron `sparkdash-deploy-watch` (15-min family, zero LLM tokens):
-
-    hermes cron create --name sparkdash-deploy-watch \
-      --script deploy-watch.py --no-agent --deliver bot-chat:gilfoyle '*/15 * * * *'
-
-Polls the latest `deploy-release.yml` run via `gh api`; if `conclusion ==
-failure` and that run id hasn't been notified yet, the script PRINTS the
-alert to stdout — the cron gateway delivers it verbatim into gilfoyle's Bot
-Chat (empty stdout = silent, same convention as merge-poll.py):
-
-> Message from 🤖 deploy-watcher (@deploy-watcher): deploy-release failed at
-> <run_url> — fix the release.
-
-Idempotent via `~/.hermes/factory/deploy-watch.json` (last notified run id);
-a successful or newer run clears the latch so each new failure notifies
-exactly once. A 404 on the runs endpoint (workflow not yet on the default
-branch) is treated as "no runs" and stays silent.
-
-### Why e2e stays local
+## Why e2e stays local
 
 The TesterArmy e2e suite (e2e.config.ts + tests/*.e2e.ts, lives in the
 `sparkDash-deploy` worktree on anton) targets a running server and needs:
@@ -111,11 +73,3 @@ In CI the app would start with scratch config and fail for env reasons, not
 PR reasons. So the validation gate proves test/tsc/build; e2e proof is
 produced during review (videos attached to the PR) and re-run post-deploy
 against live :5555.
-
-## Sequencing (safety)
-
-The deploy workflow is committed but **not to be relied on** until the
-validation gate is merged, green on a real PR, and marked required. Until
-then gilfoyle's manual deploy (sparkdash-factory skill, "Deploy stage") is
-the flow of record; the runner registration + branch-protection click are the
-remaining one-time human steps.
