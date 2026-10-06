@@ -131,6 +131,12 @@ function ConfigTab({ tab, targetHint, state, active }: ConfigTabProps) {
         </div>
       )}
 
+      {copyHint && (
+        <div className="mb-2 rounded border border-warning/30 bg-warning/10 px-2 py-1 text-[10px] text-warning">
+          {copyHint}
+        </div>
+      )}
+
       {state.data && (
         <pre
           ref={preRef}
