@@ -6,22 +6,33 @@ import type { OpencodeExportResponse, PiMonoExportResponse } from "../../api/typ
 import { BotIcon, RotateIcon } from "../ui/icons";
 
 /**
- * "Export Configs" modal for the Overview header (story t_af27512e).
+ * "Export Configs" modal for the Overview header (story t_da2e5d5e, rework of
+ * t_af27512e).
  *
- * Shows the copy-paste-ready agent CLI configs generated server-side from the
- * LIVE model registry — opencode.json (provider block) and pi-mono
- * models.json — each in a scrollable <pre> with a per-section clipboard copy
- * button and a copy-failure fallback (selectable text + hint), matching the
- * ModelFleetPanel / PiMonoCopyButton UX. Configs load lazily on modal open,
+ * Two side-by-side TABS — `opencode` | `pi-mono` — each showing the
+ * generated config in a scrollable <pre> with a clipboard copy button and a
+ * copy-failure fallback (selectable text + hint). Switching tabs swaps the
+ * config; Copy applies to the active tab. Configs load lazily on modal open,
  * never on page load; the server regenerates them per call, so every open is
  * fresh.
  *
+ * The server payload may carry `warnings[]`; the UI deliberately ignores
+ * them — no warning text is rendered anywhere in this modal (AC #6).
+ *
  * Zero plaintext secrets: the payloads come straight from the export
- * endpoints (`text`), which carry only env placeholders (wiki d-001/d-002).
- * Nothing here transforms the text.
+ * endpoints (`text`), which carry only the approved placeholders
+ * ("YOUR_API_KEY" literal / env-var indirection). Nothing here transforms
+ * the text.
  */
 
 const OPENCODE_TARGET_HINT = "~/.config/opencode/opencode.json";
+
+type TabId = "opencode" | "pimono";
+
+const TABS: Array<{ id: TabId; label: string }> = [
+  { id: "opencode", label: "opencode" },
+  { id: "pimono", label: "pi-mono" },
+];
 
 interface SectionState<T> {
   data: T | null;
@@ -44,13 +55,13 @@ function selectContents(el: HTMLElement | null) {
   sel.addRange(range);
 }
 
-interface ConfigSectionProps {
-  label: string;
+interface ConfigTabProps {
+  tab: TabId;
   targetHint: string;
   state: SectionState<OpencodeExportResponse | PiMonoExportResponse>;
 }
 
-function ConfigSection({ label, targetHint, state }: ConfigSectionProps) {
+function ConfigTab({ tab, targetHint, state }: ConfigTabProps) {
   const [copied, setCopied] = useState(false);
   const [copyHint, setCopyHint] = useState<string | null>(null);
   const preRef = useRef<HTMLPreElement | null>(null);
@@ -84,17 +95,19 @@ function ConfigSection({ label, targetHint, state }: ConfigSectionProps) {
   const text = state.data?.text ?? "";
 
   return (
-    <section className="rounded border border-border bg-surface-hover/30 px-3 py-3" data-testid={`agent-config-section-${label.includes("opencode") ? "opencode" : "pimono"}`}>
+    <section
+      className="rounded border border-border bg-surface-hover/30 px-3 py-3"
+      data-testid={`agent-config-section-${tab}`}
+    >
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</span>
         <span className="font-mono text-[10px] text-muted opacity-80">→ {targetHint}</span>
         <button
           type="button"
-          data-testid={`copy-${label.includes("opencode") ? "opencode" : "pimono"}-config`}
+          data-testid={`copy-${tab}-config`}
           onClick={() => void copy()}
           disabled={!state.data || state.loading}
           className="ml-auto rounded border border-accent/50 bg-accent/10 px-2 py-0.5 text-[10px] font-semibold text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
-          title="Copy the config text to the clipboard (env placeholder key — no secrets)"
+          title="Copy the config text to the clipboard (placeholder key — no secrets)"
         >
           {copied ? "copied ✓" : "Copy"}
         </button>
@@ -109,7 +122,7 @@ function ConfigSection({ label, targetHint, state }: ConfigSectionProps) {
 
       {state.error && (
         <div
-          data-testid={`agent-config-error-${label.includes("opencode") ? "opencode" : "pimono"}`}
+          data-testid={`agent-config-error-${tab}`}
           className="rounded border border-danger/30 bg-danger/10 px-2 py-1 text-[10px] text-danger"
         >
           {state.error}
@@ -123,25 +136,14 @@ function ConfigSection({ label, targetHint, state }: ConfigSectionProps) {
       )}
 
       {state.data && (
-        <>
-          {state.data.warnings.length > 0 && (
-            <div className="mb-2 flex flex-col gap-1">
-              {state.data.warnings.map((w, i) => (
-                <div key={i} className="text-[10px] text-muted">
-                  ⚠ {w}
-                </div>
-              ))}
-            </div>
-          )}
-          <pre
-            ref={preRef}
-            tabIndex={0}
-            spellCheck={false}
-            className="max-h-72 cursor-text overflow-auto rounded border border-border bg-surface px-2 py-2 font-mono text-[10px] leading-relaxed text-text-strong select-text"
-          >
-            <code>{text}</code>
-          </pre>
-        </>
+        <pre
+          ref={preRef}
+          tabIndex={0}
+          spellCheck={false}
+          className="max-h-72 cursor-text overflow-auto rounded border border-border bg-surface px-2 py-2 font-mono text-[10px] leading-relaxed text-text-strong select-text"
+        >
+          <code>{text}</code>
+        </pre>
       )}
     </section>
   );
@@ -155,6 +157,7 @@ interface AgentConfigExportModalProps {
 export function AgentConfigExportModal({ open, onClose }: AgentConfigExportModalProps) {
   const { mounted, visible } = useModalPresence(open);
   const titleId = "agent-config-export-title";
+  const [activeTab, setActiveTab] = useState<TabId>("opencode");
   const [opencode, setOpencode] = useState<SectionState<OpencodeExportResponse>>(initialSection);
   const [pimono, setPimono] = useState<SectionState<PiMonoExportResponse>>(initialSection);
   // Guard so the lazy fetch fires once per open, not on every render.
@@ -202,6 +205,13 @@ export function AgentConfigExportModal({ open, onClose }: AgentConfigExportModal
 
   if (!mounted) return null;
 
+  const sectionState: SectionState<OpencodeExportResponse | PiMonoExportResponse> =
+    activeTab === "opencode" ? opencode : pimono;
+  const targetHint =
+    activeTab === "opencode"
+      ? OPENCODE_TARGET_HINT
+      : (pimono.data?.targetPath ?? "~/.pi/agent/models.json");
+
   return createPortal(
     <div
       className={`modal-overlay${visible ? " is-open" : ""}`}
@@ -223,18 +233,36 @@ export function AgentConfigExportModal({ open, onClose }: AgentConfigExportModal
         <div className="modal-sheet__body space-y-3">
           <p className="text-[11px] leading-relaxed text-muted">
             Copy-paste configs pointing your CLIs at the CPA fleet endpoint — regenerated from the
-            live registry on every open. Env placeholder key only; no secrets are included.
+            live registry on every open. Placeholder key only; no secrets are included.
           </p>
-          <ConfigSection
-            label="opencode.json"
-            targetHint={OPENCODE_TARGET_HINT}
-            state={opencode}
-          />
-          <ConfigSection
-            label="pi-mono models.json"
-            targetHint={pimono.data?.targetPath ?? "~/.pi/agent/models.json"}
-            state={pimono}
-          />
+
+          {/* Side-by-side tabs: switching swaps the config below; Copy
+              applies to the active tab. */}
+          <div
+            className="flex gap-1"
+            role="tablist"
+            aria-label="Agent CLI config format"
+          >
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === t.id}
+                data-testid={`agent-config-tab-${t.id}`}
+                onClick={() => setActiveTab(t.id)}
+                className={`rounded-t border-b-2 px-3 py-1 text-[11px] font-semibold transition-colors ${
+                  activeTab === t.id
+                    ? "border-accent text-accent"
+                    : "border-transparent text-muted hover:text-text"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <ConfigTab tab={activeTab} targetHint={targetHint} state={sectionState} />
         </div>
 
         <div className="modal-sheet__footer flex justify-end">

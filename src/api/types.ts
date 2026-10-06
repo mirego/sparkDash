@@ -798,25 +798,37 @@ export interface ModelFleetResponse {
   models: FleetModel[];
 }
 
-/** One model entry inside an exported opencode provider block. */
+/** Variant value in an exported opencode model entry — either an effort
+ * selector (`reasoningEffort`) or chat-template kwargs for exl3-style models. */
+export interface OpencodeExportVariant {
+  reasoningEffort?: string;
+  chat_template_kwargs?: { enable_thinking: boolean; reasoning_effort?: string };
+}
+
+/** One model entry inside an exported opencode provider block (t_da2e5d5e). */
 export interface OpencodeExportModelEntry {
   name: string;
+  tool_call: boolean;
+  temperature: boolean;
+  reasoning: boolean;
+  limit: { context: number; output: number };
+  modalities: { input: string[]; output: string[] };
+  cost: { input: number; output: number };
+  variants: Record<string, OpencodeExportVariant>;
 }
 
 /** GET /api/models/export/opencode response — copy-paste-ready artifact. */
 export interface OpencodeExportResponse {
   format: "opencode.json";
-  host: string;
   warnings: string[];
   config: {
     $schema: string;
-    model?: string;
+    model: string;
     provider: Record<
       string,
       {
         npm: string;
         name: string;
-        env: string[];
         options: { baseURL: string; apiKey: string };
         models: Record<string, OpencodeExportModelEntry>;
       }
@@ -827,11 +839,11 @@ export interface OpencodeExportResponse {
 
 /** GET /api/models/export/pimono response — copy-paste-ready pi-mono config.
  * `text` is the exact clipboard payload; `config` is the parsed document
- * (pi-mono schema: { providers: { <id>: { baseUrl, api, apiKey:"$CPA_API_KEY",
- * authHeader, models:[...] } } }). `targetPath` is where the user pastes it
- * (~/.pi/agent/models.json) and `defaultModel` is a `sparkdash/<id>` suggestion
- * for pi's settings.json — never part of models.json itself.
- * The server never emits plaintext secrets; the key is an env placeholder. */
+ * (pi-mono schema: { providers: { <id>: { baseUrl, api, compat, models:[...]
+ * } } } — NO apiKey: pi resolves auth via env variables).
+ * `targetPath` is where the user pastes it (~/.pi/agent/models.json) and
+ * `defaultModel` is a `gilfoyle/<id>` suggestion for pi's settings.json —
+ * never part of models.json itself. */
 export interface PiMonoExportResponse {
   format: string;
   targetPath: string;

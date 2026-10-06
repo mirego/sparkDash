@@ -2,325 +2,147 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildPimonoConfig,
-  buildModelDefs,
-  cpaBaseUrl,
-  liveCpaAliases,
-  piEnvPlaceholder,
-  resolveCpaHost,
-  resolveServedFromCpa,
   PROVIDER_KEY,
-  CPA_PORT,
-  DEFAULT_CPA_HOST,
+  PI_API,
   CURRENT_MODEL_ALIAS,
+  SENTINEL_BASE_URL,
 } from "../PimonoConfigExport.js";
 
 /* ---------------------------------------------------------------- fixtures */
 
 // Shape-mirror of the live config/model-registry.json (fleet-sync output).
-const REG = {
+const REGISTRY = {
   version: 1,
-  nodes: {
-    A: { host: "127.0.0.1", name: "anton", pin: "" },
-    B: { host: "192.168.100.11", name: "son-of-anton", pin: "" },
-  },
   models: [
     {
-      id: "deepseek-v4-flash-0731",
-      aliases: [
-        "deepseek-v4-flash-dspark",
-        "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-        "claude-deepseek-v4-flash-0731",
-      ],
+      id: "glm-5.3-exl3",
+      aliases: ["GLM-5.3-Flash-EXL3", "glm53-exl3", "claude-glm-5.3-exl3"],
       engine: "vllm",
-      weights: "hf://deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
-      quantization: "",
-      hbm_gb: 90.0,
-      tensor_parallel: 2,
-      min_healthy: 1,
-      node_ports: [
-        { node: "A", host: "127.0.0.1", port: 8888, pin: "anton", host_port: "127.0.0.1:8888" },
-      ],
+      recipe: "GLM-5.3-Flash-EXL3-2x-DGX-Sparks",
+      quantization: "exl3",
     },
     {
-      id: "qwen3.8-flash-next",
-      aliases: ["RadixArk/Qwen3.8-Flash-Next-NVFP4", "qwen38-fn", "claude-qwen3.8-flash-next"],
-      engine: "vllm",
-      weights: "hf://RadixArk/Qwen3.8-Flash-Next-NVFP4",
+      id: "qwen3.8-27b",
+      aliases: ["Qwen3.8-27B-NVFP4", "claude-qwen3.8-27b-sglang"],
+      engine: "sglang",
+      recipe: "Qwen3.8-27B-SGLang-DGX-Spark",
       quantization: "nvfp4",
-      hbm_gb: 110.0,
-      tensor_parallel: 2,
-      min_healthy: 1,
-      node_ports: [
-        { node: "B", host: "192.168.100.11", port: 8888, pin: "son-of-anton", host_port: "192.168.100.11:8888" },
-      ],
     },
   ],
-  alias_to_id: {
-    "deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
-    "claude-deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
-    "qwen3.8-flash-next": "qwen3.8-flash-next",
-    "claude-qwen3.8-flash-next": "qwen3.8-flash-next",
-  },
+  alias_to_id: {},
 };
-
-// live-models-status.json shape (alias truth per d-002).
-const CPA = {
-  working_set: ["deepseek-v4-flash-0731"],
-  providers: [
-    {
-      name: "vllm",
-      aliases: [
-        "claude-deepseek-v4-flash-0731",
-        "claude-qwen3.8-flash-next",
-        CURRENT_MODEL_ALIAS,
-      ],
-    },
-  ],
-};
-
-const PROVIDER_KEYS = new Set([
-  "name", "baseUrl", "api", "apiKey", "headers", "authHeader", "oauth",
-  "compat", "models", "modelOverrides",
-]);
-const MODEL_KEYS = new Set([
-  "id", "name", "api", "baseUrl", "reasoning", "thinkingLevelMap", "input",
-  "contextWindow", "maxTokens", "cost", "samplingParams", "headers", "compat",
-  "inputLimits", "promptCache",
-]);
 
 /* ------------------------------------------------- AC: generated cfg shape */
 
 test("emits top-level object with EXACTLY { providers } — no extra keys", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "qwen3.8-27b" });
   assert.deepEqual(Object.keys(config), ["providers"]);
-  assert.equal(typeof config.providers, "object");
   assert.deepEqual(Object.keys(config.providers), [PROVIDER_KEY]);
 });
 
-test("provider block carries only schema-whitelisted pi ProviderConfig keys", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
+test("provider block: sentinel baseUrl, openai-completions api, compat flags, NO apiKey", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "qwen3.8-27b" });
   const prov = config.providers[PROVIDER_KEY];
-  for (const k of Object.keys(prov)) assert.ok(PROVIDER_KEYS.has(k), `unknown provider key: ${k}`);
-  assert.equal(prov.baseUrl, `http://${DEFAULT_CPA_HOST}:${CPA_PORT}/v1`);
+  assert.equal(prov.baseUrl, "Replaced by extensions/providers.ts");
   assert.equal(prov.api, "openai-completions");
-  assert.equal(prov.authHeader, true);
-  assert.equal(prov.name, "Spark Fleet");
-  assert.ok(Array.isArray(prov.models));
-});
-
-test("every model def carries only schema-whitelisted ModelDefinition keys", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
-  for (const def of config.providers[PROVIDER_KEY].models) {
-    for (const k of Object.keys(def)) assert.ok(MODEL_KEYS.has(k), `unknown model key: ${k}`);
-    assert.equal(typeof def.id, "string");
-    assert.ok(def.id.length > 0);
-    if (def.name !== undefined) assert.equal(typeof def.name, "string");
-    // contextWindow/maxTokens only when registry actually carries them
-    if (def.contextWindow !== undefined) assert.ok(Number.isInteger(def.contextWindow) && def.contextWindow > 0);
-    if (def.maxTokens !== undefined) assert.ok(Number.isInteger(def.maxTokens) && def.maxTokens > 0);
-    if (def.reasoning !== undefined) assert.equal(typeof def.reasoning, "boolean");
-    if (def.input !== undefined) assert.deepEqual([...def.input].sort(), ["image", "text"].slice(2 - def.input.length));
-  }
-});
-
-test("models is an ARRAY of defs (pi format) — not the opencode id-map", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
-  assert.ok(Array.isArray(config.providers[PROVIDER_KEY].models));
-  assert.ok(!("npm" in config.providers[PROVIDER_KEY]), "no opencode npm field");
-  assert.ok(!("$schema" in config), "pi rejects unknown top-level keys — no $schema");
-});
-
-test("baseUrl ends at /v1 — never /chat/completions, never a direct node port", () => {
-  const { config } = buildPimonoConfig({
-    registry: REG, cpaStatus: CPA, host: "192.168.100.55",
+  assert.deepEqual(prov.compat, {
+    supportsDeveloperRole: false,
+    supportsReasoningEffort: false,
   });
-  const u = config.providers[PROVIDER_KEY].baseUrl;
-  assert.equal(u, "http://192.168.100.55:8317/v1");
-  assert.ok(!u.includes("chat/completions"));
-  assert.ok(!u.includes(":8888"), "direct vLLM node port rejected (d-002)");
+  // NO apiKey anywhere — pi resolves auth via env variables (AC #2).
+  assert.equal(prov.apiKey, undefined);
+  assert.equal(prov.authHeader, undefined);
+  assert.equal(JSON.stringify(config).includes("apiKey"), false);
 });
 
-test("output serializes as valid strict JSON (no JSON5/undefined leakage)", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
-  const round = JSON.parse(JSON.stringify(config));
-  assert.deepEqual(round, config);
-});
-
-/* ----------------------------------------------------- AC: secret redaction */
-
-test("apiKey is the $-prefixed env placeholder, never a literal name", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
-  const key = config.providers[PROVIDER_KEY].apiKey;
-  assert.equal(key, "$CPA_API_KEY");
-  // pi gotcha: "CPA_API_KEY" without $ is treated as a LITERAL key.
-  assert.notEqual(key, "CPA_API_KEY");
-  // and it is NOT opencode's {env:VAR} syntax (pi would take it literally).
-  assert.ok(!key.startsWith("{env:"));
-});
-
-test("config JSON string contains no key-looking values and no registry pins", () => {
-  const dirty = JSON.parse(JSON.stringify(REG));
-  dirty.models[0].api_key = "sk-supersecretplaintext123";
-  dirty.models[0].token = "tok_live_abc";
-  const { config } = buildPimonoConfig({ registry: dirty, cpaStatus: CPA });
-  const s = JSON.stringify(config);
-  assert.ok(!s.includes("sk-supersecretplaintext123"), "registry secrets must never be projected");
-  assert.ok(!s.includes("tok_live_abc"));
-  assert.ok(!s.includes("sk-"), "no provider-style key literals anywhere in output");
-});
-
-test("node registry pin fields are not emitted", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
-  const s = JSON.stringify(config);
-  assert.ok(!s.includes("anton"), "node names/pins from registry must not leak");
-  assert.ok(!s.includes("192.168.100.11"), "direct node hosts must not leak");
-});
-
-test("resolveCpaHost sanitizes injection attempts back to loopback default", () => {
-  assert.equal(resolveCpaHost("http://evil.example/x"), DEFAULT_CPA_HOST);
-  assert.equal(resolveCpaHost("1.2.3.4:8888/../"), DEFAULT_CPA_HOST);
-  assert.equal(resolveCpaHost("evil.com /v1"), DEFAULT_CPA_HOST);
-  assert.equal(resolveCpaHost(""), DEFAULT_CPA_HOST);
-  assert.equal(resolveCpaHost(null), DEFAULT_CPA_HOST);
-  assert.equal(resolveCpaHost(" 192.168.100.55 "), "192.168.100.55");
-  assert.equal(cpaBaseUrl("evil#host"), `http://${DEFAULT_CPA_HOST}:8317/v1`);
-});
-
-test("piEnvPlaceholder always carries the leading $", () => {
-  assert.equal(piEnvPlaceholder(), "$CPA_API_KEY");
-  assert.equal(piEnvPlaceholder("MY_KEY"), "$MY_KEY");
-});
-
-/* --------------------------------------------------- AC: registry population */
-
-test("one def per registry model, keyed by CPA-accepted claude-* alias", () => {
-  const { config } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
+test("models array contains EXACTLY gilfoyle-current-model + the loaded model", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "qwen3.8-27b" });
   const defs = config.providers[PROVIDER_KEY].models;
-  assert.equal(defs.length, 3); // 2 models + current-model alias entry
-  const ids = defs.map((d) => d.id);
-  // current-model entry rides directly after the served model it aliases
-  assert.deepEqual(ids, ["claude-deepseek-v4-flash-0731", CURRENT_MODEL_ALIAS, "claude-qwen3.8-flash-next"]);
-  // canonical id is display name, not a duplicate entry (d-002)
-  assert.equal(defs[0].name, "deepseek-v4-flash-0731");
-  assert.ok(!ids.includes("deepseek-v4-flash-0731"), "canonical id must not duplicate the alias entry");
+  assert.equal(defs.length, 2);
+  assert.equal(defs[0].id, CURRENT_MODEL_ALIAS);
+  assert.equal(defs[1].id, "qwen3.8-27b");
+  assert.ok(!defs.some((d) => d.id.startsWith("claude-")));
 });
 
-test("registry models without claude alias fall back to canonical id", () => {
-  const reg = { models: [{ id: "bare-model", aliases: ["some-nick"] }] };
-  const { config } = buildPimonoConfig({ registry: reg, cpaStatus: null });
+test("no loaded model detected ⇒ only gilfoyle-current-model", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: null });
   const defs = config.providers[PROVIDER_KEY].models;
-  assert.deepEqual(defs.map((d) => d.id), ["bare-model"]);
-  assert.equal(defs[0].name, "bare-model");
+  assert.equal(defs.length, 1);
+  assert.equal(defs[0].id, CURRENT_MODEL_ALIAS);
 });
 
-test("live CPA aliases win over registry claude-* aliases", () => {
-  const reg = {
-    models: [{ id: "m1", aliases: ["claude-m1-old", "claude-m1"] }],
-  };
-  const cpa = { providers: [{ aliases: ["claude-m1"] }] };
-  const { config } = buildPimonoConfig({ registry: reg, cpaStatus: cpa });
-  assert.equal(config.providers[PROVIDER_KEY].models[0].id, "claude-m1");
-});
-
-test("reflects a registry change without restart (pure live-input projection)", () => {
-  const a = buildPimonoConfig({ registry: REG, cpaStatus: CPA }).config;
-  const grown = JSON.parse(JSON.stringify(REG));
-  grown.models.push({ id: "new-model", aliases: ["claude-new-model"] });
-  const b = buildPimonoConfig({ registry: grown, cpaStatus: CPA }).config;
-  assert.ok(!JSON.stringify(a).includes("claude-new-model"));
-  assert.ok(b.providers[PROVIDER_KEY].models.some((d) => d.id === "claude-new-model"));
-});
-
-test("optional registry enrichment (contextWindow/reasoning/input) passes through", () => {
-  const reg = {
-    models: [{
-      id: "rich", aliases: ["claude-rich"],
-      contextWindow: 262144, maxTokens: 32768, reasoning: true, input: ["text", "image"],
-    }],
-  };
-  const { config } = buildPimonoConfig({ registry: reg, cpaStatus: null });
-  assert.deepEqual(config.providers[PROVIDER_KEY].models[0], {
-    id: "claude-rich", name: "rich",
-    contextWindow: 262144, maxTokens: 32768, reasoning: true, input: ["text", "image"],
-  });
-});
-
-test("garbage enrichment values are dropped, not emitted (schema validity)", () => {
-  const reg = {
-    models: [{
-      id: "junk", aliases: ["claude-junk"],
-      contextWindow: -5, maxTokens: "lots", reasoning: "yes", input: ["text", "audio"],
-    }],
-  };
-  const { config } = buildPimonoConfig({ registry: reg, cpaStatus: null });
+test("baseline entry carries the canonical sample values", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: null });
   const def = config.providers[PROVIDER_KEY].models[0];
-  assert.deepEqual(def, { id: "claude-junk", name: "junk" });
+  assert.equal(def.name, "Current model loaded on Gilfoyle");
+  assert.equal(def.reasoning, true);
+  assert.deepEqual(def.input, ["text", "image"]);
+  assert.equal(def.contextWindow, 1000000);
+  assert.equal(def.maxTokens, 128000);
+  assert.deepEqual(def.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.ok(Object.values(def.thinkingLevelMap).length >= 7);
 });
 
-test("empty/missing registry degrades to valid skeleton + warning", () => {
-  for (const reg of [null, {}, { models: [] }]) {
-    const { config, warnings } = buildPimonoConfig({ registry: reg, cpaStatus: CPA });
-    assert.ok(warnings.includes("registry_unavailable"));
-    assert.deepEqual(Object.keys(config), ["providers"]);
-    assert.deepEqual(config.providers[PROVIDER_KEY].models, []);
-  }
+/* ------------------------------- AC: per-model thinking differentiation */
+
+test("effort-capable model gets the effort thinkingLevelMap, no chat-template compat", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "qwen3.8-27b" });
+  const def = config.providers[PROVIDER_KEY].models[1];
+  assert.deepEqual(def.thinkingLevelMap, {
+    off: null, minimal: null, low: "low", medium: "medium",
+    high: "high", xhigh: "xhigh", max: "max",
+  });
+  assert.equal(def.compat, undefined);
 });
 
-test("missing CPA status falls back to registry aliases + warning", () => {
-  const { config, warnings } = buildPimonoConfig({ registry: REG, cpaStatus: null });
-  assert.ok(warnings.includes("cpa_aliases_unavailable"));
-  const ids = config.providers[PROVIDER_KEY].models.map((d) => d.id);
-  assert.deepEqual(ids, ["claude-deepseek-v4-flash-0731", "claude-qwen3.8-flash-next"]);
+test("chat-template-gated model (exl3) gets the pi-native qwen-chat-template mechanics", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "glm-5.3-exl3" });
+  const def = config.providers[PROVIDER_KEY].models[1];
+  assert.equal(def.compat.thinkingFormat, "qwen-chat-template");
+  assert.deepEqual(def.compat.chatTemplateKwargs.enable_thinking, { $var: "thinking.enabled" });
+  assert.deepEqual(def.compat.chatTemplateKwargs.reasoning_effort, { $var: "thinking.effort", omitWhenOff: true });
+  // high → xhigh (template validates xhigh|medium|low); unsupported hidden.
+  assert.equal(def.thinkingLevelMap.high, "xhigh");
+  assert.equal(def.thinkingLevelMap.max, null);
+  assert.equal(def.thinkingLevelMap.off, "off");
+  // The two model types genuinely differ (AC #4).
+  const qwen = buildPimonoConfig({ registry: REGISTRY, servedId: "qwen3.8-27b" }).config.providers[PROVIDER_KEY].models[1];
+  assert.notDeepEqual(qwen.thinkingLevelMap, def.thinkingLevelMap);
+  assert.equal(qwen.compat, undefined);
 });
 
-test("defaultModel points at served model's current alias for the UI", () => {
-  const { config, defaultModel } = buildPimonoConfig({ registry: REG, cpaStatus: CPA });
+test("loaded id resolves through registry aliases (HF weights name from /v1/models)", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "GLM-5.3-Flash-EXL3" });
+  const defs = config.providers[PROVIDER_KEY].models;
+  assert.equal(defs.length, 2);
+  assert.equal(defs[1].id, "glm-5.3-exl3");
+  assert.equal(defs[1].compat.thinkingFormat, "qwen-chat-template");
+});
+
+test("loaded id unknown to registry ⇒ emitted with baseline shape + warning", () => {
+  const { config, warnings } = buildPimonoConfig({ registry: REGISTRY, servedId: "mystery-model" });
+  const defs = config.providers[PROVIDER_KEY].models;
+  assert.equal(defs.length, 2);
+  assert.equal(defs[1].id, "mystery-model");
+  assert.ok(warnings.some((w) => w.includes("mystery-model")));
+});
+
+test("defaultModel is the gilfoyle-current-model suggestion (settings.json, not models.json)", () => {
+  const { defaultModel, config } = buildPimonoConfig({ registry: REGISTRY, servedId: "qwen3.8-27b" });
   assert.equal(defaultModel, `${PROVIDER_KEY}/${CURRENT_MODEL_ALIAS}`);
-  // pi puts the default in settings.json — models.json must NOT carry it
-  assert.ok(!("defaultModel" in config) && !("model" in config));
-  assert.ok(JSON.stringify(config).includes(CURRENT_MODEL_ALIAS));
+  assert.equal(JSON.stringify(config).includes("defaultModel"), false);
 });
 
-test("served id resolution falls back to CPA working_set", () => {
-  assert.equal(resolveServedFromCpa(REG.models, CPA), "deepseek-v4-flash-0731");
-  assert.equal(resolveServedFromCpa(REG.models, null), null);
-});
-
-test("buildModelDefs dedupes colliding alias ids across models", () => {
-  const reg = {
-    models: [
-      { id: "a", aliases: ["claude-shared"] },
-      { id: "b", aliases: ["claude-shared"] },
-    ],
-  };
-  const { defs } = buildModelDefs(reg.models, new Set(), null);
-  assert.equal(defs.filter((d) => d.id === "claude-shared").length, 1);
-});
-
-test("liveCpaAliases unions across providers", () => {
-  const s = liveCpaAliases({ providers: [{ aliases: ["x"] }, { aliases: ["y", "x"] }, {}] });
-  assert.deepEqual([...s].sort(), ["x", "y"]);
-  assert.equal(liveCpaAliases(null).size, 0);
-});
-
-/* ------------------------------------------------- integration: live repo file */
-
-test("generated config for the LIVE repo registry is schema-clean", async () => {
-  const fs = await import("node:fs");
-  const url = new URL("../../../../../config/model-registry.json", import.meta.url);
-  let live;
-  try {
-    live = JSON.parse(fs.readFileSync(url, "utf8"));
-  } catch {
-    return; // dev worktree without config file — skip, unit fixtures cover shape
-  }
-  const { config, defaultModel } = buildPimonoConfig({ registry: live, cpaStatus: null });
+test("schema whitelist: every emitted key is a pi ModelDefinition/ProviderConfig key", () => {
+  const { config } = buildPimonoConfig({ registry: REGISTRY, servedId: "glm-5.3-exl3" });
+  const PROVIDER_KEYS = new Set(["name", "baseUrl", "api", "apiKey", "headers", "authHeader", "oauth", "compat", "models", "modelOverrides"]);
+  const MODEL_KEYS = new Set(["id", "name", "api", "baseUrl", "reasoning", "thinkingLevelMap", "input", "contextWindow", "maxTokens", "cost", "samplingParams", "headers", "compat", "inputLimits", "promptCache"]);
   const prov = config.providers[PROVIDER_KEY];
-  assert.deepEqual(Object.keys(config), ["providers"]);
-  assert.equal(prov.models.length, live.models.length);
-  for (const m of live.models) {
-    const claude = (m.aliases || []).find((a) => a.startsWith("claude-"));
-    assert.ok(prov.models.some((d) => d.id === (claude || m.id)), `missing ${m.id}`);
+  for (const k of Object.keys(prov)) assert.ok(PROVIDER_KEYS.has(k), `provider key ${k}`);
+  for (const def of prov.models) {
+    for (const k of Object.keys(def)) assert.ok(MODEL_KEYS.has(k), `model key ${k}`);
+    for (const k of Object.keys(def.compat || {})) {
+      assert.ok(["supportsDeveloperRole", "supportsReasoningEffort", "thinkingFormat", "chatTemplateKwargs"].includes(k), `compat key ${k}`);
+    }
   }
-  assert.ok(defaultModel.startsWith(`${PROVIDER_KEY}/`));
 });
