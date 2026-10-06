@@ -103,6 +103,26 @@ describe("AgentConfigExportModal tabs", () => {
     expect(writeText).toHaveBeenCalledTimes(2);
   });
 
+  it("copy-failure fallback selects the pre and shows the hint", async () => {
+    const writeText = vi.fn().mockRejectedValue(new DOMException("denied", "NotAllowedError"));
+    Object.assign(navigator, { clipboard: { writeText } });
+    fetchOpencode.mockResolvedValue(opencodePayload());
+    fetchPiMono.mockResolvedValue(pimonoPayload());
+    render(<AgentConfigExportModal open onClose={() => {}} />);
+    await flush();
+    act(() => {
+      document.querySelector<HTMLButtonElement>('[data-testid="copy-opencode-config"]')!.click();
+    });
+    await flush();
+    const pre = document.querySelector('[data-testid="agent-config-section-opencode"] pre');
+    // jsdom's containsNode() always returns false, so assert on the selection itself.
+    const sel = window.getSelection();
+    expect(sel?.rangeCount).toBeGreaterThan(0);
+    expect(sel?.containsNode(pre as Node, true)).not.toBe(true);
+    expect(sel?.toString()).toBe('{"opencode":"config"}');
+    expect(document.body.textContent).toContain("press Ctrl+C to copy");
+  });
+
   it("renders zero warning lines under any payload", async () => {
     fetchOpencode.mockResolvedValue(opencodePayload({ warnings: ["⚠ model a: canonical id not CPA-accepted; skipped"] }));
     fetchPiMono.mockResolvedValue(pimonoPayload({ warnings: ["⚠ model b: canonical id not CPA-accepted; skipped"] }));
