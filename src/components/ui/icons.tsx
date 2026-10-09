@@ -264,14 +264,6 @@ export function CompactIcon({ className = "" }: { className?: string }) {
   );
 }
 
-/** Chevron right — expand indicator. */
-export function ChevronRightIcon({ className = "" }: { className?: string }) {
-  return (
-    <svg {...baseProps(className)}>
-      <polyline points="9 18 15 12 9 6" />
-    </svg>
-  );
-}
 /* ─── Redesign additions ──────────────────────────────── */
 
 export function SearchIcon({ className = "" }: { className?: string }) {
