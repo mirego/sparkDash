@@ -1003,11 +1003,6 @@ export function LlmPanel({
             </div>
           )}
 
-          <div className="grid grid-cols-4 gap-2 border-t border-border pt-3">
-            <div className="space-y-0.5">
-              <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
-              <div className="font-tabular text-sm text-text">
-          <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
           <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
 
           <div className="grid grid-cols-4 gap-2 border-t border-border pt-3">
@@ -1019,8 +1014,7 @@ export function LlmPanel({
                   : (llm?.slotsActive ?? 0) > 0
                     ? `${llm?.slotsActive} running`
                     : "—"}
-              </b>
-              <span>Slots</span>
+              </div>
             </div>
             <div className="sp-tile">
               <b>{llm?.contextLength ? llm.contextLength.toLocaleString() : "—"}</b>
@@ -1252,165 +1246,6 @@ export function LlmPanel({
             </div>
           )}
 
-          <div className="border-t border-border pt-3 space-y-2">
-            <button
-              type="button"
-              onClick={() => setBenchOpen(true)}
-              className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-text transition-colors hover:border-accent hover:bg-accent-soft"
-            >
-              Run decode benchmark
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const params = new URLSearchParams();
-                if (llmPort) params.set("port", String(llmPort));
-                if (llm?.modelId) params.set("model", llm.modelId);
-                const q = params.toString() ? `?${params.toString()}` : "";
-                window.open(
-                  `/showcase/${encodeURIComponent(sparkId)}${q}`,
-                  "_blank",
-                  "noopener,noreferrer"
-                );
-              }}
-              className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-text transition-colors hover:border-accent hover:bg-accent-soft"
-            >
-              Showcase
-            </button>
-          </div>
-          {llm && (llm.backend === "vllm" || llm.backend === "q27") && (
-            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="kvCache"
-                  label="KV Cache"
-                  text={VLLM_METRIC_INFO.kvCache}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div
-                  className={`font-tabular text-sm ${
-                    llm.kvCacheUsage == null
-                      ? "text-text"
-                      : llm.kvCacheUsage >= 0.8
-                        ? "text-danger"
-                        : llm.kvCacheUsage >= 0.5
-                          ? "text-warning"
-                          : "text-success"
-                  }`}
-                >
-                  {llm.kvCacheUsage != null
-                    ? `${(llm.kvCacheUsage * 100).toFixed(1)}%`
-                    : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="requests"
-                  label="Requests"
-                  text={VLLM_METRIC_INFO.requests}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.requestsRunning != null
-                    ? `${Math.round(llm.requestsRunning)} run${
-                        llm.requestsWaiting != null
-                          ? ` / ${Math.round(llm.requestsWaiting)} wait`
-                          : ""
-                      }`
-                    : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="ttftP95"
-                  label="TTFT p95"
-                  text={VLLM_METRIC_INFO.ttftP95}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.ttftP95Seconds != null ? `${llm.ttftP95Seconds.toFixed(3)}s` : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="preempts"
-                  label="Preempts"
-                  text={VLLM_METRIC_INFO.preempts}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.preemptionsTotal != null
-                    ? Math.round(llm.preemptionsTotal).toLocaleString()
-                    : "—"}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {llm && (llm.backend === "vllm" || llm.backend === "q27") && (
-            <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="prefixCache"
-                  label="Prefix Cache"
-                  text={VLLM_METRIC_INFO.prefixCache}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.prefixCacheHitRate != null
-                    ? `${(llm.prefixCacheHitRate * 100).toFixed(1)}%`
-                    : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="e2eP95"
-                  label="E2E p95"
-                  text={VLLM_METRIC_INFO.e2eP95}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.e2eP95Seconds != null ? `${llm.e2eP95Seconds.toFixed(3)}s` : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="itlP95"
-                  label="ITL p95"
-                  text={VLLM_METRIC_INFO.itlP95}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.itlP95Seconds != null ? `${llm.itlP95Seconds.toFixed(3)}s` : "—"}
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <MetricInfoTip
-                  id="mtpAccept"
-                  label="MTP Accept"
-                  text={VLLM_METRIC_INFO.mtpAccept}
-                  openId={metricInfoId}
-                  setOpenId={setMetricInfoId}
-                  align="right"
-                />
-                <div className="font-tabular text-sm text-text">
-                  {llm.mtpAcceptanceRate != null
-                    ? `${(llm.mtpAcceptanceRate * 100).toFixed(1)}%`
-                    : "—"}
-                </div>
-              </div>
-            </div>
-          )}
           <LlmLaunchers
             sparkId={sparkId}
             llmPort={llmPort}
