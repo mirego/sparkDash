@@ -158,6 +158,33 @@ function pushHistory(key: string, value: number, at: number) {
   _saveToStorage();
 }
 
+/**
+ * Merge older samples (fetched from the server) in front of what this tab has collected, so a freshly
+ * opened page does not start empty. Only samples older than the first local one are added; live
+ * ingestion carries on from there.
+ */
+export function backfillHistory(sparkId: string, metric: string, older: readonly TimedSample[]): void {
+  if (older.length === 0) return;
+  const key = `${sparkId}:${metric}`;
+  const existing = history.get(key)?.toArray() ?? [];
+  const firstLocal = existing.length ? existing[0].at : Infinity;
+  const prefix = older.filter((s) => s.at < firstLocal).sort((a, b) => a.at - b.at);
+  if (prefix.length === 0) return;
+  const ring = new TimedRingBuffer(HISTORY_MAX);
+  let lastAt = -Infinity;
+  for (const s of [...prefix, ...existing]) {
+    if (s.at <= lastAt) continue;
+    ring.push(s);
+    lastAt = s.at;
+  }
+  history.set(key, ring);
+  const samples = ring.toArray();
+  historySamples.set(key, samples);
+  historyValues.set(key, samples.map((sample) => sample.value));
+  setHistoryTail(key, ring.tail(SPARKLINE_TAIL).map((sample) => sample.value));
+  notify();
+}
+
 function removeHistoryForSpark(sparkId: string) {
   const prefix = `${sparkId}:`;
   for (const key of history.keys()) {
@@ -187,6 +214,11 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
       }
       if (typeof m.gpu.power?.draw === "number") {
         pushHistory(`${s.id}:gpu.power`, m.gpu.power.draw, at);
+      }
+      const draw = m.gpu.power?.draw;
+      const limit = m.gpu.power?.limit;
+      if (draw != null && limit != null && limit > 0) {
+        pushHistory(`${s.id}:gpu.powerPct`, Math.min(100, (draw / limit) * 100), at);
       }
       if (typeof m.gpu.vram?.percentage === "number") {
         pushHistory(`${s.id}:gpu.vram`, m.gpu.vram.percentage, at);
