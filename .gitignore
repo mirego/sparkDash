@@ -10,6 +10,8 @@ config/token-lifetimes.json
 config/bench-active.json
 config/prefill-bench-history.json
 config/prefill-bench-active.json
+config/quality-bench-history.json
+config/quality-bench-active.json
 config/showcase-history.json
 config/llm-daily.json
 config/llm-token-totals.json
@@ -36,3 +38,11 @@ HANDOFF.md
 HANDOFF-HERMES.md
 handoff.md
 test/
+config/events.json
+config/llm-launchers.json
+config/tool-eval-runs.json
+config/tool-eval-results/
+config/gpu-history.json
+config/fleet-energy.scope-*.json
+config/*.tmp
+config/*.json.*.tmp

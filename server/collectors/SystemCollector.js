@@ -7,6 +7,31 @@ import { sshExec } from "./ssh.js";
 const NVERR_JOURNAL_CMD =
   'journalctl -k --no-pager -q --grep=NV_ERR_NO_MEMORY 2>/dev/null | grep -c NV_ERR_NO_MEMORY || true';
 
+// One journal pass for kernel-level GPU / memory trouble: NVIDIA Xid errors and
+// OOM-killer kills. Output: "xid=<n> oom=<n>" then the latest Xid line (if any).
+const KERNEL_ERRORS_CMD =
+  "x=$(journalctl -k --no-pager -q --grep='NVRM: Xid' 2>/dev/null | grep 'NVRM: Xid' || true); " +
+  "o=$(journalctl -k --no-pager -q --grep='Out of memory: Killed process|oom-kill:' 2>/dev/null | grep -c -E 'Out of memory: Killed process|oom-kill:' || true); " +
+  'echo "xid=$(printf \'%s\' "$x" | grep -c . || true) oom=${o:-0}"; printf \'%s\\n\' "$x" | tail -1';
+
+/**
+ * Parse KERNEL_ERRORS_CMD output. Exported for tests. Returns null when the
+ * output has no counters (journal unreadable), so callers keep the last value.
+ * @param {unknown} raw
+ * @returns {{ xid: number, oomKills: number, lastXid: string|null } | null}
+ */
+export function parseKernelErrors(raw) {
+  const lines = String(raw ?? "").split("\n");
+  const m = /xid=(\d+)\s+oom=(\d+)/.exec(lines[0] ?? "");
+  if (!m) return null;
+  const xid = Number.parseInt(m[1], 10);
+  const oomKills = Number.parseInt(m[2], 10);
+  const lastLine = (lines[1] ?? "").trim();
+  const code = /Xid \([^)]*\):\s*(\d+)/.exec(lastLine);
+  const lastXid = xid > 0 && lastLine ? (code ? `Xid ${code[1]}` : lastLine.replace(/[^\x20-\x7e]/g, "").slice(0, 80)) : null;
+  return { xid, oomKills, lastXid };
+}
+
 /**
  * Parse `grep -c` stdout into a non-negative integer. Exported for tests.
  * @param {unknown} raw
@@ -116,6 +141,8 @@ export class SystemCollector {
     this._hardwareInfo = null;
     /** Cached NVRM NV_ERR_NO_MEMORY count (slow journal scan). */
     this._nvErrCache = { count: 0, at: 0 };
+    /** Cached kernel error counters (Xid / OOM kills), same slow cadence. */
+    this._kernelErrCache = { value: null, at: 0 };
   }
 
   /** Collect GPU metrics (temperature, usage, power, VRAM). */
@@ -153,15 +180,21 @@ export class SystemCollector {
       const usageFraction = totalDiff > 0 ? usedDiff / totalDiff : 0;
       // Temperature and power can run in parallel — power is now a pure
       // function of the usage fraction (no extra /proc/stat read).
-      const [temp, power] = await Promise.all([
-        this._getCPUTemperature(),
+      const [tempReading, power] = await Promise.all([
+        this._getCPUTemperatureReading(),
         this._getCPUPower(usageFraction),
       ]);
       if (collectionSequence === this._cpuCollectionSequence) {
         this.lastCpuStat = usage;
         this.lastCpuUsagePct = cpuPercentage;
       }
-      const cpuData = { usage: cpuPercentage, temperature: temp, ...power };
+      const cpuData = {
+        usage: cpuPercentage,
+        temperature: tempReading.temperature,
+        temperatureLabel: tempReading.temperatureLabel,
+        temperatureSource: tempReading.temperatureSource,
+        ...power,
+      };
       return tagCollectionResult(cpuData, this._isSuccessfulCpuCollection(cpuData));
     } catch (err) {
       console.error(`[SystemCollector] CPU error for ${this.spark.id}:`, err.message);
@@ -210,7 +243,10 @@ export class SystemCollector {
 
   /** Collect RAM metrics. */
   async collectRam() {
-    if (!this.spark.isLocal) return this._getRemoteRam();
+    if (!this.spark.isLocal) {
+      if (this.isMac) return this._getRemoteRamMac();
+      return this._getRemoteRam();
+    }
     try {
       return await this._getRamUsage();
     } catch (err) {
@@ -221,7 +257,10 @@ export class SystemCollector {
 
   /** Collect storage metrics per mount. */
   async collectStorage() {
-    if (!this.spark.isLocal) return this._getRemoteStorage();
+    if (!this.spark.isLocal) {
+      if (this.isMac) return this._getRemoteStorageMac();
+      return this._getRemoteStorage();
+    }
     try {
       return await this._getDiskUsage();
     } catch (err) {
@@ -296,6 +335,7 @@ export class SystemCollector {
       processes,
       throttle: gpu.throttle,
       nvErrNoMemory: await this._nvErrNoMemory(),
+      kernelErrors: await this._kernelErrors(),
       gpus: this._buildGpuDevices(devices, this._lastVramPerDevice ?? [], apps, vram),
     };
   }
@@ -406,7 +446,7 @@ export class SystemCollector {
       // Free VRAM = total − used (unlike the shared pool, GPU memory is dedicated).
       if (totalMB <= 0 && memTotalMB > 0) totalMB = memTotalMB;
       else if (totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
-      if (totalMB > 0 && usedMB > 0) availableMB = Math.max(0, totalMB - usedMB);
+      if (totalMB > 0) availableMB = Math.max(0, totalMB - usedMB);
     } else {
       // GB10 shared HBM pool: prefer the OS-visible pool (MemTotal) as the total,
       // fall back to nvidia-smi, then the hardware spec (HBM) only if nothing known.
@@ -826,75 +866,116 @@ export class SystemCollector {
     return { total, used };
   }
 
-  async _getCPUTemperature() {
-    // Try hwmon sysfs first
+  /**
+   * Sensor names that really are the CPU package, in preference order. Everything
+   * else (acpitz and friends) is a board or SoC thermal zone: worth showing, not
+   * worth calling "CPU" (#142).
+   */
+  _isCpuSensorName(name) {
+    return ["coretemp", "k10temp", "zenpower", "x86_pkg_temp", "cpu-thermal", "cpu0-thermal"].includes(
+      String(name || "").toLowerCase()
+    );
+  }
+
+  /**
+   * What to call a non-CPU sensor: `acpitz` on a GB10 is the ACPI SoC zone, and
+   * saying "CPU" there is a ~15 °C lie. Unknown names label themselves.
+   */
+  _cpuTempSourceLabel(source) {
+    const name = String(source || "").toLowerCase();
+    if (!name) return null;
+    if (this._isCpuSensorName(name)) return "CPU";
+    if (name === "acpitz") return "ACPI";
+    if (name === "soc_thermal" || name === "soc-thermal") return "SoC";
+    return source;
+  }
+
+  /**
+   * Pick the CPU temperature from named candidates, in order.
+   *
+   * A real CPU sensor always wins, wherever it appears in the order; otherwise
+   * the first plausible reading is used with its own name as the label. The
+   * reading is never dropped just because no CPU sensor exists — a board zone is
+   * still a temperature, it just is not the CPU's.
+   *
+   * @param {Array<{ source: string | null, millidegrees: number }>} candidates
+   * @returns {{ temperature: number, temperatureLabel: string | null, temperatureSource: string | null }}
+   */
+  _pickCpuTemperature(candidates) {
+    const plausible = (candidates || []).filter(
+      (c) => Number.isFinite(c?.millidegrees) && c.millidegrees > 0 && c.millidegrees < 200000
+    );
+    if (plausible.length === 0) {
+      return { temperature: 0, temperatureLabel: null, temperatureSource: null };
+    }
+    const cpu = plausible.find((c) => this._isCpuSensorName(c.source));
+    const chosen = cpu || plausible[0];
+    return {
+      temperature: Math.round((chosen.millidegrees / 1000) * 10) / 10,
+      temperatureLabel: cpu ? "CPU" : this._cpuTempSourceLabel(chosen.source),
+      temperatureSource: chosen.source || null,
+    };
+  }
+
+  /** Local sensor candidates: hwmon chips by allowlist, then thermal zones. */
+  _localCpuTempCandidates() {
+    const candidates = [];
     try {
       const hwmonDir = path.join(HOST_PATHS.SYS, "class/hwmon");
       if (fs.existsSync(hwmonDir)) {
-        const entries = fs.readdirSync(hwmonDir);
-        for (const entry of entries) {
+        for (const entry of fs.readdirSync(hwmonDir)) {
           const nameFile = path.join(hwmonDir, entry, "name");
-          if (fs.existsSync(nameFile)) {
-            const name = fs.readFileSync(nameFile, "utf-8").trim();
-            if (["coretemp", "k10temp", "zenpower", "acpitz"].includes(name)) {
-              const tempFiles = fs.readdirSync(path.join(hwmonDir, entry)).filter((f) => f.startsWith("temp") && f.endsWith("_input"));
-              if (tempFiles.length > 0) {
-                const tempRaw = parseInt(fs.readFileSync(path.join(hwmonDir, entry, tempFiles[0]), "utf-8").trim());
-                if (tempRaw > 0 && tempRaw < 200000) return tempRaw / 1000;
-              }
-            }
-          }
+          if (!fs.existsSync(nameFile)) continue;
+          const name = fs.readFileSync(nameFile, "utf-8").trim();
+          // GB10 also exposes nvme/mlx5 sensors; the allowlist keeps those out.
+          if (!["coretemp", "k10temp", "zenpower", "acpitz", "soc_thermal"].includes(name)) continue;
+          const dir = path.join(hwmonDir, entry);
+          const tempFile = fs
+            .readdirSync(dir)
+            .filter((f) => f.startsWith("temp") && f.endsWith("_input"))
+            .sort()[0];
+          if (!tempFile) continue;
+          const millidegrees = parseInt(fs.readFileSync(path.join(dir, tempFile), "utf-8").trim());
+          candidates.push({ source: name, millidegrees });
         }
       }
-    } catch {}
-
-    // Try thermal zones
+    } catch {
+      /* fall through to thermal zones */
+    }
     try {
       const thermalDir = path.join(HOST_PATHS.SYS, "class/thermal");
       if (fs.existsSync(thermalDir)) {
         const zones = fs.readdirSync(thermalDir).filter((z) => z.startsWith("thermal_zone"));
         for (const zone of zones) {
-          const tempFile = path.join(thermalDir, zone, "temp");
-          if (fs.existsSync(tempFile)) {
-            const temp = parseInt(fs.readFileSync(tempFile, "utf-8").trim());
-            if (temp > 0 && temp < 200000) return temp / 1000;
+          const dir = path.join(thermalDir, zone);
+          const tempFile = path.join(dir, "temp");
+          if (!fs.existsSync(tempFile)) continue;
+          let type = null;
+          try {
+            type = fs.readFileSync(path.join(dir, "type"), "utf-8").trim() || null;
+          } catch {
+            /* type is optional */
           }
+          candidates.push({
+            source: type,
+            millidegrees: parseInt(fs.readFileSync(tempFile, "utf-8").trim()),
+          });
         }
       }
-    } catch {}
-
-    // No readable temperature source → null (not 0°C). A 0 read is indistinguishable
-    // from a genuinely cold host and violates the "no silent failures" rule; the UI
-    // renders null as "—" instead of a real cold value.
-    return null;
+    } catch {
+      /* nothing readable */
+    }
+    return candidates;
   }
 
-  /**
-   * Read CPU temperature over SSH (remote Sparks). Mirrors the local hwmon/thermal
-   * walk using shell reads instead of direct sysfs access. Returns null when the
-   * remote host exposes no readable temperature source — NOT a fabricated 0.
-   * @returns {Promise<number | null>} degrees C, or null when unavailable.
-   */
-  async _getRemoteCpuTemperature() {
-    const script = [
-      // Wrapper that echoes only the first valid temp in °C across all zones.
-      `for z in /sys/class/thermal/thermal_zone*/temp; do [ -r "$z" ] || continue;`,
-      `  v=$(cat "$z" 2>/dev/null); [ -n "$v" ] && { d=$((v/1000)); [ "$d" -gt 0 ] && [ "$d" -lt 200 ] && { echo "$d"; exit 0; }; };`,
-      `done;`,
-      // Fallback: sensors (lm-sensors) first Core temp line, if installed.
-      `command -v sensors >/dev/null 2>&1 && sensors 2>/dev/null | grep -iEo 'Core [0-9]+: +[+-]?[0-9.]+' | head -1 || true`,
-    ].join(" ");
-    try {
-      const out = await sshExec(this.spark, script);
-      const trimmed = String(out).trim();
-      if (!trimmed) return null;
-      const m = trimmed.match(/[+-]?(\d+)(?:\.\d+)?/);
-      if (!m) return null;
-      const t = parseFloat(m[1]);
-      return Number.isFinite(t) && t > 0 && t < 200 ? t : null;
-    } catch {
-      return null;
-    }
+  /** @returns {Promise<{ temperature: number, temperatureLabel: string | null, temperatureSource: string | null }>} */
+  async _getCPUTemperatureReading() {
+    return this._pickCpuTemperature(this._localCpuTempCandidates());
+  }
+
+  /** Backwards-compatible number-only view of the reading. */
+  async _getCPUTemperature() {
+    return (await this._getCPUTemperatureReading()).temperature;
   }
 
   /**
@@ -1325,7 +1406,7 @@ export class SystemCollector {
   }
 
   // ─── Remote collection via SSH ────────────────────────────
-  async _getRemoteGpu() {
+  async _getRemoteGpu(executor = sshExec) {
     try {
       const cmd = [
         `nvidia-smi --query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits 2>/dev/null`,
@@ -1337,7 +1418,7 @@ export class SystemCollector {
         "grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null",
       ].join("; ");
 
-      const output = await sshExec(this.spark, cmd);
+      const output = await executor(this.spark, cmd);
       const sections = output.split("---");
       const gpuOut = sections[0]?.trim() || "";
       const memFields = sections[1]?.trim() || "";
@@ -1379,7 +1460,7 @@ export class SystemCollector {
         // Discrete GPU VRAM: trust nvidia-smi's memory.total; free VRAM = total − used.
         if (totalMB <= 0 && memTotalMB > 0) totalMB = memTotalMB;
         else if (totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
-        if (totalMB > 0 && usedMB > 0) availableMB = Math.max(0, totalMB - usedMB);
+        if (totalMB > 0) availableMB = Math.max(0, totalMB - usedMB);
       } else {
         // GB10 shared HBM pool: prefer the OS-visible pool (MemTotal) as the total,
         // fall back to nvidia-smi, then the hardware spec (HBM) only if nothing known.
@@ -1409,6 +1490,7 @@ export class SystemCollector {
         processes,
         throttle: gpu.throttle,
         nvErrNoMemory: await this._nvErrNoMemory(),
+        kernelErrors: await this._kernelErrors(),
         gpus: this._buildGpuDevices(devices, perDeviceVram, cachedApps, vram),
       };
     } catch (err) {
@@ -1430,8 +1512,10 @@ export class SystemCollector {
       "cat /proc/cpuinfo | grep -E 'CPU architecture|aarch64' | head -1",
       "echo '---'",
       // GB10 also exposes nvme/mlx5 sensors; the name allowlist keeps those out.
-      'for h in /sys/class/hwmon/*; do n=$(cat "$h/name" 2>/dev/null); case "$n" in coretemp|k10temp|zenpower|acpitz) for t in "$h"/temp*_input; do cat "$t" 2>/dev/null; break; done;; esac; done',
-      "cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null || true",
+      // Every line is "<name> <millidegrees>" so the reader can say which sensor
+      // it used — an ACPI zone must not be reported as the CPU (#142).
+      'for h in /sys/class/hwmon/*; do n=$(cat "$h/name" 2>/dev/null); case "$n" in coretemp|k10temp|zenpower|acpitz|soc_thermal) for t in "$h"/temp*_input; do v=$(cat "$t" 2>/dev/null); [ -n "$v" ] && echo "$n $v"; break; done;; esac; done',
+      'for z in /sys/class/thermal/thermal_zone*; do n=$(cat "$z/type" 2>/dev/null); v=$(cat "$z/temp" 2>/dev/null); [ -n "$v" ] && echo "$n $v"; done || true',
     ].join("; ");
   }
 
@@ -1473,9 +1557,12 @@ export class SystemCollector {
       const idleWatts = tdp * 0.08;
       const draw = idleWatts + (tdp - idleWatts) * Math.min(usage / 100, 1);
 
+      const tempReading = this._pickCpuTemperature(this._parseSensorCandidates(tempOut));
       return {
         usage,
-        temperature: this._parseSensorTemp(tempOut),
+        temperature: tempReading.temperature,
+        temperatureLabel: tempReading.temperatureLabel,
+        temperatureSource: tempReading.temperatureSource,
         draw: Math.round(draw * 10) / 10,
         tdp: Math.round(tdp),
       };
@@ -1486,9 +1573,32 @@ export class SystemCollector {
   }
 
   /**
-   * First plausible temperature from a remote sensor dump (raw millidegrees,
-   * one per line, highest priority first). Same accept range as local
-   * `_getCPUTemperature()`; returns 0 when nothing is readable.
+   * Named sensor lines from the remote dump ("<name> <millidegrees>"), tolerating
+   * a bare number from an older command shape.
+   *
+   * @param {string} raw
+   * @returns {Array<{ source: string | null, millidegrees: number }>}
+   */
+  _parseSensorCandidates(raw) {
+    const candidates = [];
+    for (const line of String(raw).split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const pair = trimmed.match(/^(\S+)\s+(\d+)$/);
+      if (pair) {
+        candidates.push({ source: pair[1], millidegrees: parseInt(pair[2], 10) });
+        continue;
+      }
+      const bare = parseInt(trimmed, 10);
+      if (Number.isFinite(bare)) candidates.push({ source: null, millidegrees: bare });
+    }
+    return candidates;
+  }
+
+  /**
+   * First plausible temperature from a bare millidegree dump (one per line,
+   * highest priority first). Same accept range as local `_getCPUTemperature()`;
+   * returns 0 when nothing is readable.
    *
    * @param {string} raw
    * @returns {number} degrees Celsius, or 0
@@ -1574,6 +1684,129 @@ export class SystemCollector {
     } catch (err) {
       console.error(`[SystemCollector] Remote Storage error for ${this.spark.id}:`, err.message);
       return [];
+    }
+  }
+
+  /**
+   * macOS units (platform: "darwin"): /proc is absent, so Linux commands are
+   * replaced with darwin equivalents. All other kinds are unaffected.
+   */
+  get isMac() {
+    return this.spark.platform === "darwin";
+  }
+
+  /** macOS RAM via sysctl + memory_pressure (one SSH round trip). */
+  async _getRemoteRamMac() {
+    try {
+      const output = await sshExec(
+        this.spark,
+        "sysctl -n hw.memsize; memory_pressure -Q 2>/dev/null | grep -i 'memory free percentage' || vm_stat 2>/dev/null | head -4",
+      );
+      const lines = output.trim().split("\n");
+      const totalBytes = parseInt(lines[0], 10) || 0;
+      const totalMB = Math.round(totalBytes / 1024 / 1024);
+      // Prefer the free-percentage line; fall back to vm_stat free pages.
+      let availableMB = 0;
+      const pctLine = lines.find((l) => /memory free percentage/i.test(l));
+      const pctMatch = pctLine?.match(/([\d.]+)%/);
+      if (pctMatch && totalMB > 0) {
+        availableMB = Math.round((totalMB * parseFloat(pctMatch[1])) / 100);
+      } else {
+        const freeMatch = output.match(/free.*?:\s+(\d+)(?:\.\d+)?\s*\(?/i);
+        const freePages = freeMatch ? parseInt(freeMatch[1], 10) : 0;
+        availableMB = Math.round((freePages * 16384) / 1024 / 1024); // 16KiB pages (arm64)
+      }
+      const usedMB = totalMB > 0 ? Math.max(0, totalMB - availableMB) : 0;
+      return {
+        used: usedMB,
+        total: totalMB,
+        percentage: totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0,
+      };
+    } catch (err) {
+      console.error(`[SystemCollector] Remote macOS RAM error for ${this.spark.id}:`, err.message);
+      return this._defaultRam();
+    }
+  }
+
+  /** macOS storage: BSD df has no -x excludes; filter by mount/type instead. */
+  async _getRemoteStorageMac() {
+    try {
+      const output = await sshExec(this.spark, "df -k 2>/dev/null");
+      const lines = output.trim().split("\n").slice(1); // skip header
+      const disks = [];
+      const disabledDevices = this.spark.disabledDevices || [];
+      const PSEUDO = new Set(["devfs", "autofs", "apfs", "tmpfs", "overlay"]);
+      for (const line of lines) {
+        const parts = line.split(/\s+/);
+        // BSD df (no -T): Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted (9 cols)
+        // GNU df -T: Filesystem Type 1024-blocks Used Available Capacity Mounted (7 cols)
+        if (parts.length < 6) continue;
+        const isTyped = /^[a-z]+$/.test(parts[1] || "");
+        let fsys, type, size, used, avail, pct, mountRest;
+        if (isTyped) {
+          [fsys, type, size, used, avail, pct, ...mountRest] = parts;
+        } else {
+          // 9-col BSD: parts = fs,1024blocks,used,avail,cap,iused,ifree,%iused,mount
+          if (parts.length < 9) continue;
+          [fsys, size, used, avail, pct, , , , ...mountRest] = parts;
+          type = "apfs";
+        }
+        const mount = mountRest.join(" ") || "/";
+        if (PSEUDO.has((type || "").toLowerCase()) && type !== "apfs") continue;
+        if (mount === "/boot/efi" || mount.includes("/snap") || /^\/System\/Volumes\//.test(mount)) continue;
+        if (!mount.startsWith("/") || mount === "/dev") continue;
+        const device = fsys.split("/").pop() || fsys;
+        const isDisabled =
+          disabledDevices.includes(device) || disabledDevices.includes(mount);
+        disks.push({
+          device,
+          label: mount,
+          used: Math.round(parseInt(used) / 1024),
+          total: Math.round(parseInt(size) / 1024),
+          available: Math.round(parseInt(avail) / 1024),
+          percentage: parseInt(pct) || 0,
+          readSpeed: 0,
+          writeSpeed: 0,
+          disabled: isDisabled,
+        });
+      }
+      return disks;
+    } catch (err) {
+      console.error(`[SystemCollector] Remote macOS Storage error for ${this.spark.id}:`, err.message);
+      return [];
+    }
+  }
+
+  /**
+   * macOS model inventory (presence only, no serving probe): ollama tags +
+   * ~/models/* sizes. Enables the dashboard to show what a Mac host holds.
+   */
+  async collectMacModels() {
+    if (!this.isMac || this.spark.isLocal) return null;
+    try {
+      const output = await sshExec(
+        this.spark,
+        "ollama list 2>/dev/null || $HOME/.ollama/bin/ollama list 2>/dev/null || /usr/local/bin/ollama list 2>/dev/null || /opt/homebrew/bin/ollama list 2>/dev/null; echo '---'; du -sh $HOME/models/* 2>/dev/null",
+      );
+      const sections = output.split("---");
+      const ollama = [];
+      for (const line of (sections[0] || "").trim().split("\n").slice(1)) {
+        const toks = line.trim().split(/\s+/);
+        if (toks.length >= 4 && toks[0] !== "NAME" && !toks[0].startsWith("/")) {
+          ollama.push({ tag: toks[0], size: toks[2] });
+        }
+      }
+      const filesystem = [];
+      for (const line of (sections[1] || "").trim().split("\n")) {
+        const toks = line.trim().split(/\s+/);
+        if (toks.length === 2 && toks[1].startsWith("/Users/")) {
+          filesystem.push({ path: toks[1], size: toks[0] });
+        }
+      }
+      return { ollama, filesystem };
+    } catch (err) {
+      console.error(`[SystemCollector] macOS model inventory error for ${this.spark.id}:`, err.message);
+      return null;
     }
   }
 
@@ -1960,6 +2193,30 @@ export class SystemCollector {
    * Cached for POLL_INTERVAL_NVERR — never on the 2s GPU/memory loop uncached.
    * @returns {Promise<number>}
    */
+  /** Xid / OOM-kill counters since boot (cached; journal scans are slow). null when unreadable. */
+  async _kernelErrors() {
+    const now = Date.now();
+    if (this._kernelErrCache.at > 0 && now - this._kernelErrCache.at < POLL_INTERVAL_NVERR) {
+      return this._kernelErrCache.value;
+    }
+    try {
+      let out;
+      if (this.spark.isLocal) {
+        out = this._hasHostProc()
+          ? await this._execOnHost(KERNEL_ERRORS_CMD)
+          : await this._exec(KERNEL_ERRORS_CMD);
+      } else {
+        out = await sshExec(this.spark, KERNEL_ERRORS_CMD, { timeoutMs: 8000 });
+      }
+      const parsed = parseKernelErrors(out);
+      if (parsed) this._kernelErrCache = { value: parsed, at: now };
+      else this._kernelErrCache.at = now;
+    } catch {
+      this._kernelErrCache.at = now;
+    }
+    return this._kernelErrCache.value;
+  }
+
   async _nvErrNoMemory() {
     const now = Date.now();
     if (this._nvErrCache.at > 0 && now - this._nvErrCache.at < POLL_INTERVAL_NVERR) {
@@ -2003,7 +2260,14 @@ export class SystemCollector {
   }
 
   _defaultCpu() {
-    return { usage: 0, temperature: null, draw: 0, tdp: 0 };
+    return {
+      usage: 0,
+      temperature: null,
+      temperatureLabel: null,
+      temperatureSource: null,
+      draw: 0,
+      tdp: 0,
+    };
   }
 
   _defaultRam() {
