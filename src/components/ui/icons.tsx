@@ -272,8 +272,6 @@ export function ChevronRightIcon({ className = "" }: { className?: string }) {
     </svg>
   );
 }
-}
-}
 /* ─── Redesign additions ──────────────────────────────── */
 
 export function SearchIcon({ className = "" }: { className?: string }) {
