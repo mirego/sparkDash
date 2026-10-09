@@ -25,6 +25,29 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.11] — 2026-10-06
+
+### Added
+- **Reworked config exports (PRs #5, #13, #14)** — the opencode and pi-mono generators now emit **two models** from the live fleet registry (the currently loaded model plus the fleet's other entries) with per-model parameters (reasoning/thinking levels, modalities, context/output limits). `AgentConfigExportModal` got **opencode | pi-mono tabs** with per-tab copy, a select-all clipboard fallback, and warnings rendering dropped.
+- **CI: PR validation gate (PR #9)** — GitHub Actions compiles/typechecks every PR; a deploy-on-merge workflow was **removed again (PR #10)** — deploys stay local on anton via the merge-tracker release train.
+
+### Fixed
+- e2e test payload aligned with the reworked opencode schema (PR #14).
+
+### Security
+- Dependency bumps: undici 8.11.2 (PR #6), source-map-js 1.2.2 (PR #11), proxy-addr 2.0.8 (PR #12).
+
+---
+
+## [1.8.10] — 2026-10-05
+
+### Added
+- **Export Configs modal (PR #8)** — an **Export Configs** button on Overview opens a modal with ready-to-use agent CLI configs generated from the live fleet registry: `opencode.json` (opencode, `{env:CPA_API_KEY}` placeholder) and pi-mono `models.json` (`"$CPA_API_KEY"` placeholder). Copy per section or copy all; clipboard fallback (select-all + hint) on non-secure origins.
+
+### Fixed
+- **GPU clock swap on n=13 (PR #7 carry)** — unswapped graphics/mem clocks; count-based alert suppression.
+
+---
 ## [2.0.0] — 2026-10-09
 
 A major release: a redesigned application shell, a rebuilt Overview, a Benchmarks section with a new Tool Eval Bench, in-app Showcase, launchers for your own models, fleet-wide Token totals / Energy / Activity pages, a rewritten Quality bench, and a long list of correctness and security fixes. Everything under **Added**, **Changed** and **Fixed** below ships in 2.0.0.

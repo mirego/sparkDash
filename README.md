@@ -39,6 +39,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - [Glance integration](#glance-integration)
 - [Quality bench](#quality-bench)
 - [Full changelog](./CHANGELOG.md)
+- [CI/CD pipeline](./docs/CI-CD.md) — PR validate → merge → auto-deploy → smoke → failure watcher
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
 - [Tech stack](#tech-stack)
@@ -62,6 +63,23 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - **Benchmarks section**: Decode, Prefill, Quality and the new **Tool Eval Bench** (trials, side-by-side compare, one-click upgrade).
 - **Showcase** is now an in-app page with much smoother streaming; **Token totals**, **Fleet energy** and **Activity** get their own pages.
 - Start and stop your own LLMs from the dashboard; live prefill tok/s during long prefills; Quality bench with GSM8K and MMLU.
+### Version 1.8.11 — Reworked config exports + CI gate
+- Config exports reworked: opencode and pi-mono generators emit **two models** from the live fleet registry with per-model parameters (reasoning/thinking levels, modalities, context/output limits). The **Export Configs modal** now has **opencode | pi-mono tabs** with per-tab copy, a select-all clipboard fallback, and no warnings rendering.
+- GitHub Actions runs a **PR validation gate** (compile + typecheck) on every PR; deploys remain local on anton via the merge-tracker release train.
+- Dependency bumps: undici 8.11.2, source-map-js 1.2.2, proxy-addr 2.0.8.
+
+### Version 1.8.10 — Export Configs modal
+- **Export Configs** button on Overview opens a modal with ready-to-use agent CLI configs from the live fleet registry: `opencode.json` and pi-mono `models.json`, both with `CPA_API_KEY` placeholders (no plaintext credentials). Copy per section or all at once; clipboard fallback on non-secure origins.
+- Fixes the GPU clock swap on n=13 (graphics/mem unswapped) and count-based alert suppression.
+
+### Version 1.8.9 — TensorFold backend
+- **TensorFold** ([ashhart/TensorFold](https://github.com/ashhart/TensorFold)) is detected from `/v1/models` (`owned_by: tensorfold`) and labeled on the LLM card and Overview. Live tok/s reads cumulative token totals from `/health` when the server publishes them; stock TensorFold does not yet, so it shows 0 tok/s until it does. Benches and the showcase work as on any OpenAI-compatible server.
+- **q27 backend**, **custom prefill size**, **remote-Spark benches** over an SSH tunnel, an on-demand **Remote** bench host, **hide worker nodes**, and a **share-as-image** card for bench results.
+- Fixes for the decode-bench request quota and 24×/32× budget, long prefills dying at ~5 min, SGLang prefill latching, `SPARKDASH_TOKEN` in compose, Tailscale address classification, and remote SSH session churn.
+
+### Version 1.8.5 — decode Structured default + code prompt
+- **Decode picker defaults to Structured** even after a Prose/Code/JSON run. A live running job still shows its type.
+- **Code type** is `clamp_00`…`clamp_49` Python helpers (no comments). The old LRU + comments prompt was prose-speed.
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -91,6 +109,10 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Power controls** | Graceful shutdown (SSH host script). Wake-on-LAN is for dedicated GPU hosts whose NIC supports it. DGX Spark does not wake from a magic packet |
 | **Spark roles** | **Head** / **Worker** / **Standalone** — worker label + head link; standalone can disable LLM monitoring; optional hide workers from Overview and tabs |
 | **Unified memory** | GB10 128 GB LPDDR5X pool (~273 GB/s), GPU/CPU split, bandwidth via `nvidia-smi dmon`. Non-Spark hosts show discrete **VRAM** (nvidia-smi) and system **RAM** separately |
+| **Health telemetry** | Passive-cooling (fan), memory-junction temperature, SM/memory clocks, power state, and ECC error counters per GPU; null-safe so a missing read shows “—” instead of a false 0 |
+| **CPU temperature** | Reads real hwmon/thermal temperature locally and over SSH (was previously a hardcoded 0°C), shown on the CPU panel |
+| **Fleet alerting** | Threshold-based alert engine over offline, GPU junction/memory temp, fan, ECC, OOM risk, disk free, and TTFT — colored per-Spark health badges, a fleet warning banner, a live WS alert feed, `/api/alerts` (+ history), and an optional outbound webhook (`ALERT_WEBHOOK_URL`) |
+| **Trending** | Server-fed history for GPU power, VRAM %, GPU memory temp and CPU temp on top of usage/temperature/token series |
 | **Themes** | Dark, light, cool white, OLED — neutral palettes, persisted in `localStorage` |
 | **Secrets** | SSH passwords AES-256-GCM encrypted; never in `sparks.json` or API responses |
 | **Docker-first** | Single privileged container for host metrics; prod and dev Compose files |
@@ -437,13 +459,15 @@ sparkDash/
 | POST | `/api/sparks/:id/llm-ports` | Add an LLM port (hot) |
 | DELETE | `/api/sparks/:id/llm-ports/:port` | Remove an LLM port (hot) |
 | PUT | `/api/sparks/:id/llm-port` | LLM port — backward-compat (hot) |
+| GET | `/api/alerts` | Current per-Spark alert state + transition history |
+| GET | `/api/alerts/history` | Alert transition history only |
 | GET | `/api/sparks/:id/llm/daily` | Daily busy decode/prefill tok/s (`port`, `days`) |
 | POST | `/api/sparks/:id/llm/bench` | Start decode benchmark (202); poll/cancel/clear on the same path |
 | POST | `/api/sparks/:id/llm/prefill-bench` | Start prefill + TTFT context sweep (202); poll/cancel/clear on the same path |
 | POST | `/api/sparks/:id/llm/quality-bench` | Start quality suite (202); `GET` lists active / last / history summaries, `GET :benchId` returns a full run, `DELETE :benchId` cancels, `DELETE` clears history |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
-| WS | `/ws` | Real-time metrics stream |
+| WS | `/ws` | Real-time metrics stream (`type: "snapshot"`) + fleet health transitions (`type: "alerts"`) |
 
 There is no application authentication on the HTTP/WebSocket API. sparkDash therefore binds to loopback and refuses direct LAN binding. Use an SSH tunnel, authenticated TLS reverse proxy, or Tailscale Serve; see [Remote access](./docs/REMOTE-ACCESS.md).
 
@@ -455,6 +479,25 @@ persisted at mode `0600` for rolling 24-hour and 31-day windows. Wh/output-token
 `standalone` node (workers are skipped, since they front their head's engine).
 These values are estimates, not wall-meter measurements. Restart sparkDash after changing fleet
 membership so the persisted series has one stable node set.
+
+## Fleet health & alerting
+
+The server evaluates every Spark snapshot against the `DGX_SPARK` thermal/fan thresholds (previously dead constants) plus OOM / disk / TTFT / offline rules (`server/collectors/AlertMonitor.js`). Each snapshot carries a compact `health` object (`{ level, badges }`) used by the per-Spark **Health** panel and the Overview **fleet banner**. When a Spark's level transitions, the server pushes a WebSocket message `{ type: "alerts" }` (live feed) and records it in `/api/alerts/history`.
+
+Rules and their thresholds:
+
+| Badge | Warn | Critical |
+|-------|------|----------|
+| GPU junction temp | ≥ 85 °C | ≥ 95 °C |
+| GPU memory temp | ≥ 75 °C | ≥ 85 °C |
+| Fan (stalled under load) | stopped | stopped with > 20 % GPU usage |
+| ECC | ≥ 100 corrected | any uncorrected |
+| OOM risk | — | < 1 GB unified memory remaining |
+| Disk free | ≥ 90 % used | ≥ 95 % used |
+| TTFT p95 | ≥ 1.0 s | ≥ 3.0 s |
+| Node | — | offline |
+
+Outbound notifications: set `ALERT_WEBHOOK_URL` to an HTTP(S) endpoint; the server POSTs a JSON payload on transitions into `warn`/`danger` and on recovery (deduped per Spark, 5-minute cooldown). Works with Pushover / generic webhook gateways. Without it, alerts remain visible in-dashboard.
 
 ---
 
@@ -500,6 +543,7 @@ Copy `.env.example` to `.env` if needed:
 | `POLL_INTERVAL_NVERR` | `60000` | Kernel journal scan for NVRM `NV_ERR_NO_MEMORY` (ms) |
 | `HERMES_UPDATE_TIMEOUT_MS` | `600000` | Hard timeout for running `hermes update` over SSH (ms) |
 | `POLL_INTERVAL_LIVENESS` | `5000` | Online/SSH liveness check (ms) |
+| `ALERT_WEBHOOK_URL` | _(empty)_ | Optional HTTP(S) endpoint for fleet health webhook notifications |
 | `SPARKDASH_SECRETS_KEY` | _(auto)_ | Passphrase or 64-char hex for secret encryption |
 | `HOST_PROC_PATH` | `/host/proc` | Host proc mount inside container |
 | `HOST_SYS_PATH` | `/host/sys` | Host sys mount |
@@ -580,6 +624,7 @@ Choice is stored in `localStorage`.
 - **Target validation** rejects clearly unsafe IPv4 targets (link-local `169.254.0.0/16`, `0.0.0.0/8`, multicast/reserved ≥ 224). Private, loopback, and public addresses are allowed so LAN and remote Sparks work.
 - SSH and HTTP probes use short timeouts (about 5 s SSH connect, 3 s HTTP) so a hung host cannot stall the poll loop.
 - Prefer **SSH keys** over passwords. In Docker, mount the private key into `/root/.ssh` (see Quick start); passwords are the only SSH secret the app stores itself.
+- Treat the dashboard as **LAN-trusted** when bound beyond loopback without `SPARKDASH_TOKEN`: that includes **power APIs** (shutdown / Wake-on-LAN) — anyone who can reach the dashboard can request fleet power actions.
 - Loopback installs remain local-trust. A remote bind (`BIND_HOST` not loopback) **without** `SPARKDASH_TOKEN` is open by default: anyone who can reach the port can read telemetry, change settings and power units off, and the header shows an **Open access** warning (dismissible per browser). Set `SPARKDASH_TOKEN` to require a bearer token for mutations and remote telemetry/WebSocket, and `SPARKDASH_ALLOW_OPEN_REMOTE=0` to refuse to start a remote bind without one. `GET /api/health` reports which applies as `authMode`: `loopback-open`, `bearer`, `open-remote`, or `required-missing`.
 - One-off remote benchmark hosts must be listed in `SPARKDASH_BENCH_HOSTS`.
 - Tested operator capacity for this remediation: **12 units**.
