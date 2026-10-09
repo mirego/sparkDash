@@ -1522,7 +1522,7 @@ export function OverviewPage({
                 <PowerOffIcon className="h-3 w-3" />
                 Shutdown All
               </button>
-            </div>
+            </>
           )}
           <span className="online-chip">
             <span className="dot" />
@@ -1532,27 +1532,6 @@ export function OverviewPage({
             <span className="text-[11px] text-muted">
               {hiddenWorkerCount} worker{hiddenWorkerCount === 1 ? "" : "s"} hidden
             </span>
-              <button
-                type="button"
-                onClick={() => void handleWakeAll()}
-                disabled={batchLoading}
-                title="Wake all Sparks that have a MAC configured (WoL)"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50"
-              >
-                <PowerOnIcon className="h-3 w-3" />
-                Wake All
-              </button>
-              <button
-                type="button"
-                onClick={() => setShutdownOpen(true)}
-                disabled={batchLoading || onlineShutdownCount === 0}
-                title="Shut down all online Sparks"
-                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:bg-danger/20 hover:text-danger disabled:opacity-50"
-              >
-                <PowerOffIcon className="h-3 w-3" />
-                Shutdown All
-              </button>
-            </div>
           )}
         </div>
       </div>
