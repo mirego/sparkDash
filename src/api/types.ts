@@ -1440,9 +1440,6 @@ export interface EnergyReport {
   month: EnergyBucket[];
   year: EnergyBucket[];
 }
-}
-
-}
 
 export interface ActivityEvent {
   id: number;
