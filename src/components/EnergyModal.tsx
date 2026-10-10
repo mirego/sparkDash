@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchEnergyHistory } from "../api/client";
+import { fetchEnergyReport } from "../api/client";
 import type { EnergyReport } from "../api/types";
 import { EnergyBarChart } from "./EnergyBarChart";
 import { fmtEnergyWh, fmtCost, PRICE_CAD_PER_KWH } from "../utils/energy";
@@ -29,7 +29,7 @@ export function EnergyModal({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetchEnergyHistory()
+    fetchEnergyReport()
       .then((r) => { if (!cancelled) setReport(r); })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load"); })
       .finally(() => { if (!cancelled) setLoading(false); });

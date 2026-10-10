@@ -282,7 +282,6 @@ export interface CpuMetrics {
   usage: number;
   /** °C. null when the host exposes no readable temperature source. */
   temperature: number | null;
-  temperature: number;
   /** What the temperature reading is: "CPU", or "ACPI"/"SoC" for a board zone. */
   temperatureLabel?: string | null;
   /** Raw sensor name behind the reading (e.g. "acpitz", "coretemp"). */
@@ -717,13 +716,8 @@ export interface SparkSnapshot {
   hermes?: HermesStatus;
   hardware: HardwareInfo;
   metrics: SparkMetrics;
-  /**
-   * Compact per-Spark health summary computed server-side from DGX_SPARK
-   * thresholds (absent for older servers). `level` is the fleet-level
-   * classification; `badges` is one entry per monitored subsystem. Alerts are
-   * the badges with level !== "ok", presented highest-severity first.
-   */
-  health?: {
+  /** Compact per-Spark health summary (ours), level + per-subsystem badges. */
+  healthSummary?: {
     level: "ok" | "warn" | "danger";
     badges: HealthBadge[];
   };

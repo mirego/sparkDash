@@ -126,16 +126,16 @@ export function fetchEnergyHistory(): Promise<EnergyHistory> {
   return apiFetch("/api/fleet-energy/history");
 }
 
+/** GPU energy history pre-aggregated into day / week / month buckets. */
+export function fetchEnergyReport(): Promise<EnergyReport> {
+  return apiFetch("/api/energy");
+}
+
 /** Latest metrics snapshot for one Spark (includes per-port LLM modelId). */
 export function fetchSparkMetrics(id: string): Promise<{
   metrics?: { llm?: LlmMetrics[] };
 }> {
   return apiFetch(`/api/sparks/${id}/metrics`);
-}
-
-/** GPU energy history pre-aggregated into day / week / month buckets. */
-export function fetchEnergyHistory(): Promise<EnergyReport> {
-  return apiFetch("/api/energy");
 }
 
 /** Daily busy tok/s rollups for one Spark LLM port. */
