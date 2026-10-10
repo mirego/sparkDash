@@ -2977,9 +2977,12 @@ async function buildSnapshotPayload() {
   // UI can color junction/memory/fan/ecc/oom/disk/ttft without re-deriving the
   // DGX_SPARK thresholds. The dedicated alert engine then diffs this against its
   // prior state and pushes a WS `alerts` message / fires a webhook on change.
+  // NOTE: attached as `healthSummary` — `spark.health` stays the 2.0
+  // HealthFinding[] array produced by SparkMonitor's HealthEvaluator, which the
+  // 2.0 SparkCard/HealthChips UI consumes.
   for (const spark of sparks) {
     const health = evaluateSparkHealth(spark);
-    spark.health = { level: health.level, badges: health.badges };
+    spark.healthSummary = { level: health.level, badges: health.badges };
   }
   if (alertMonitor) {
     alertMonitor.update(sparks, Date.now());
