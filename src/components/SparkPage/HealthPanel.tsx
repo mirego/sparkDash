@@ -37,7 +37,7 @@ function BadgeChip({ level, label, detail }: { level: string; label: string; det
  */
 export function HealthPanel({ spark }: HealthPanelProps) {
   const events = useAlertEvents().filter((e) => e.sparkId === spark.id).slice(0, 5);
-  const health = spark.health;
+  const health = spark.healthSummary;
   const level = health?.level ?? (spark.online ? "ok" : "danger");
   const st = LEVEL_STYLES[level] ?? LEVEL_STYLES.unknown;
   const badges = health?.badges ?? [];

@@ -175,10 +175,34 @@ export function isValidSparkId(id) {
 }
 
 /**
+ * SSH port. Missing or blank becomes 22. Anything else that is not an
+ * integer from 1 to 65535 returns null so callers can reject it.
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+export function normalizeSshPort(value) {
+  if (value == null || value === "") return 22;
+  let n;
+  if (typeof value === "number") {
+    n = value;
+  } else if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    n = Number(value.trim());
+  } else {
+    return null;
+  }
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
+  return n;
+}
+
+/**
  * Validate fields used for SSH/LLM probes. Returns null if ok, else error message.
- * @param {{ lanIp?: string, ssh?: { host?: string, user?: string } }} body
+ * @param {{ lanIp?: string, ssh?: { host?: string, user?: string, port?: unknown } }} body
  */
 export function validateSparkTarget(body) {
+  const user = body?.ssh?.user;
+  if (user != null && user !== "" && !isValidSshUser(user)) {
+    return "Invalid SSH user (allowed: letters, digits, . _ -)";
+  }
   const lanIp = body?.lanIp || "";
   const sshHost = body?.ssh?.host || "";
   const target = sshHost || lanIp;
@@ -191,9 +215,11 @@ export function validateSparkTarget(body) {
   if (lanIp && !isAllowedTargetHost(lanIp)) {
     return `Invalid or disallowed lanIp: ${lanIp}`;
   }
-  const user = body?.ssh?.user;
-  if (user != null && user !== "" && !isValidSshUser(user)) {
-    return "Invalid SSH user (allowed: letters, digits, . _ -)";
+  if (body?.ssh && Object.prototype.hasOwnProperty.call(body.ssh, "port")) {
+    const raw = body.ssh.port;
+    if (raw != null && raw !== "" && normalizeSshPort(raw) == null) {
+      return "SSH port must be an integer from 1 to 65535";
+    }
   }
   return null;
 }
