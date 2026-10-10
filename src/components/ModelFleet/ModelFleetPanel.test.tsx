@@ -32,6 +32,7 @@ function fleetResponse(withUsers: boolean) {
         weights: "hf://test",
         served: [],
         live: [],
+        replicas: [],
         health: { status: "ok" },
         usage: {
           requests: 14,
@@ -73,6 +74,12 @@ describe("ModelFleetPanel api-key-in-use display", () => {
   it("renders the api-key prefix of the key in use for the currently deployed model", async () => {
     const { container } = render(<ModelFleetPanel enabled={true} />);
     await flush();
+    await flush();
+    // Expand the model row — the All Users / api-key block lives in the expanded section.
+    const rowButton = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("deepseek-v4-flash-0731"),
+    );
+    rowButton!.click();
     await flush();
     const text = container.textContent ?? "";
     expect(text).toContain("sk-ant-09");
