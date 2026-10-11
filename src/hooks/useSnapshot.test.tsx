@@ -2,6 +2,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _resetStore, getMetricHistorySamples } from "./metricsStore";
 import { useSnapshot } from "./useSnapshot";
+import { BENCH_PREFIX, ENERGY_ID, OVERVIEW_ID } from "../constants";
 import { makeSpark } from "../testing/fixtures";
 import { onAuthRequired, setToken } from "../api/authToken";
 import { flush, render } from "../testing/render";
@@ -40,6 +41,7 @@ function Probe() {
         error: snapshot.snapshotError,
         last: snapshot.lastValidSnapshotAt,
         count: snapshot.sparks.length,
+        activeId: snapshot.activeId,
       })}
     </pre>
   );
@@ -159,5 +161,109 @@ describe("useSnapshot connection lifecycle", () => {
     } finally {
       off();
     }
+  });
+});
+
+describe("useSnapshot activeId preservation", () => {
+  beforeEach(() => {
+    _resetStore();
+    MockSocket.instances = [];
+    vi.stubGlobal("WebSocket", MockSocket);
+    vi.useFakeTimers();
+    vi.setSystemTime(50_000);
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { protocol: "http:", host: "localhost:5555" },
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    localStorage.removeItem("sparkdashToken");
+  });
+
+  function renderOn(path: string) {
+    const origPathname = Object.getOwnPropertyDescriptor(window.location, "pathname");
+    Object.defineProperty(window.location, "pathname", { configurable: true, value: path });
+    try {
+      render(<Probe />);
+    } finally {
+      if (origPathname) Object.defineProperty(window.location, "pathname", origPathname);
+    }
+  }
+
+  it("keeps a reserved page tab (energy) selected across WS snapshots", async () => {
+    renderOn("/energy");
+    const socket = MockSocket.instances[0];
+    act(() => socket.open());
+    await flush();
+    expect(readProbe().activeId).toBe(ENERGY_ID);
+
+    for (const generatedAt of [50_000, 51_000, 52_000]) {
+      act(() => socket.emit({
+        type: "snapshot",
+        generatedAt,
+        refreshInterval: 1000,
+        sparks: [makeSpark("alpha")],
+      }));
+      await flush();
+      expect(readProbe().activeId).toBe(ENERGY_ID);
+    }
+  });
+
+  it("keeps a bench page tab selected across WS snapshots", async () => {
+    renderOn("/bench/decode");
+    const socket = MockSocket.instances[0];
+    act(() => socket.open());
+    await flush();
+    expect(readProbe().activeId).toBe(BENCH_PREFIX + "decode");
+
+    act(() => socket.emit({
+      type: "snapshot",
+      generatedAt: 50_000,
+      refreshInterval: 1000,
+      sparks: [makeSpark("alpha")],
+    }));
+    await flush();
+    expect(readProbe().activeId).toBe(BENCH_PREFIX + "decode");
+  });
+
+  it("still falls back to overview when the active spark leaves the fleet", async () => {
+    renderOn("/spark/gone");
+    const socket = MockSocket.instances[0];
+    act(() => socket.open());
+    await flush();
+    // initialActiveId reads the URL; the spark is not in any snapshot yet.
+    act(() => socket.emit({
+      type: "snapshot",
+      generatedAt: 50_000,
+      refreshInterval: 1000,
+      sparks: [makeSpark("alpha")],
+    }));
+    await flush();
+    expect(readProbe().activeId).toBe(OVERVIEW_ID);
+  });
+
+  it("keeps a spark tab selected while it is still in the fleet", async () => {
+    renderOn("/spark/alpha");
+    const socket = MockSocket.instances[0];
+    act(() => socket.open());
+    await flush();
+    act(() => socket.emit({
+      type: "snapshot",
+      generatedAt: 50_000,
+      refreshInterval: 1000,
+      sparks: [makeSpark("alpha")],
+    }));
+    await flush();
+    act(() => socket.emit({
+      type: "snapshot",
+      generatedAt: 51_000,
+      refreshInterval: 1000,
+      sparks: [makeSpark("alpha"), makeSpark("beta")],
+    }));
+    await flush();
+    expect(readProbe().activeId).toBe("alpha");
   });
 });

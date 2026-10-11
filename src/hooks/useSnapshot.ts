@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { SparkSnapshot, WsSnapshot, WsAlertMessage } from "../api/types";
 import { ingestSnapshots, ingestAlerts } from "./metricsStore";
-import { initialActiveId, OVERVIEW_ID } from "../constants";
+import { initialActiveId, isPageId, OVERVIEW_ID } from "../constants";
 import { fetchAuthStatus, getToken, onTokenChange, reportAuthRequired } from "../api/authToken";
 
 const RECONNECT_DELAY = 2000;
@@ -86,11 +86,12 @@ export function useSnapshot() {
             Number.isFinite(msg.refreshInterval) ? Number(msg.refreshInterval) : null
           );
           setSnapshotError(null);
-          // Default to the Overview tab; keep the current selection if it
-          // is still valid (Overview is always valid).
+          // Keep the current selection if it is still valid. Reserved page ids
+          // (Tokens, Energy, Activity, Bench, …) are always valid — only an
+          // active *Spark* id that has left the fleet falls back to Overview.
           setActiveId((prev) => {
-            if (prev === OVERVIEW_ID) return OVERVIEW_ID;
-            if (prev && (msg.sparks as SparkSnapshot[]).some((s) => s.id === prev)) return prev;
+            if (!prev || prev === OVERVIEW_ID || isPageId(prev)) return prev ?? OVERVIEW_ID;
+            if ((msg.sparks as SparkSnapshot[]).some((s) => s.id === prev)) return prev;
             return OVERVIEW_ID;
           });
         } else if (msg.type === "alerts" && Array.isArray(msg.changed)) {
