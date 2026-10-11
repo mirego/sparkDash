@@ -5,7 +5,7 @@ import { usableHead } from "../../shared/sparkHead";
 import { wakeSpark } from "../../api/client";
 import { backendLabel } from "../../shared/llmBackends";
 import { formatDiskSize, formatMb } from "../../shared/formatBytes";
-import { Tag } from "../ui/Tag";
+import { Tag, type TagTone } from "../ui/Tag";
 import { HealthChips, worstSeverity } from "../ui/HealthFindings";
 import { AppLink } from "../ui/AppLink";
 import { idToPath } from "../../constants";
@@ -180,6 +180,10 @@ function SparkCardImpl({
         : null
     : null;
 
+  // Per-request in-flight pills (one per open request — a key with several
+  // requests appears once per request). Shared with the Spark page LLM panel.
+  const reqPills = llm ? <InflightReqPills llm={llm} /> : null;
+
   const chips = (
     <div className="ov-chips">
       {online && throttle && slowed ? (
@@ -335,6 +339,7 @@ function SparkCardImpl({
             </div>
           ) : null}
           {chips}
+          {reqPills}
           {rootDisk ? (
             <div className="ov-foot">
               <div className="ov-kv">
@@ -366,6 +371,82 @@ function SparkCardImpl({
         </>
       )}
 
+    </div>
+  );
+}
+
+/**
+ * Per-request in-flight pills shared by the Overview Spark card and the Spark
+ * page LLM panel header. One pill PER OPEN REQUEST — a key with several
+ * requests appears once per request (gilfoyle's requirement). Visual language
+ * mirrors the LlmPanel per-user pills: pre-byte = warning tone, streaming =
+ * success. Capped with a +N fallback so sbre bursts can't blow out layout.
+ */
+export function InflightReqPills({
+  llm,
+  max = 6,
+  testId = "inflight-req-pills",
+}: {
+  llm: SparkSnapshot["metrics"]["llm"][number] | null;
+  max?: number;
+  testId?: string;
+}) {
+  const fmtK = (n: number | null | undefined) => {
+    if (n == null || !Number.isFinite(Number(n))) return null;
+    const v = Number(n);
+    if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
+    return String(Math.round(v));
+  };
+  const openReqs =
+    llm?.activeUsers?.flatMap((u) =>
+      (u.openRequests || []).map((r) => ({ ...r, label: u.label })),
+    ) ?? [];
+  if (openReqs.length === 0) return null;
+  const visibleReqs = openReqs.slice(0, max);
+  const hiddenReqs = openReqs.length - visibleReqs.length;
+  return (
+    <div className="ov-chips" data-testid={testId}>
+      {visibleReqs.map((r) => {
+        const out = fmtK(r.completionEstTokens) ?? "0";
+        const age = r.ageSec != null ? `${r.ageSec}s` : "?";
+        const phase = r.phase === "waiting" ? "pre-byte" : r.phase || "streaming";
+        const tone: TagTone = r.phase === "waiting" ? "warn" : "good";
+        const cachedL = fmtK(r.cachedTokens);
+        const cachePct =
+          r.cacheHitPct != null && Number.isFinite(Number(r.cacheHitPct))
+            ? `${Math.round(Number(r.cacheHitPct))}%`
+            : null;
+        const inBits =
+          r.promptEstTokens == null
+            ? null
+            : cachedL != null
+              ? `in ${fmtK(r.promptEstTokens)} (${cachedL} cached${cachePct ? ` · ${cachePct}` : ""})`
+              : `in ${fmtK(r.promptEstTokens)}`;
+        const title = [
+          `${r.label} · ${phase === "pre-byte" ? "pre-byte (no first token yet)" : "streaming"}`,
+          `${r.model ?? "unknown model"}`,
+          [inBits, `out ${out}${r.maxTokens != null ? ` / max ${fmtK(r.maxTokens)}` : ""}`]
+            .filter(Boolean)
+            .join(" · "),
+          `${age} in flight`,
+          r.ttftSec != null ? `TTFT ${r.ttftSec}s` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          <Tag key={`${r.label}:${r.id}`} tone={tone} title={title} className="font-tabular">
+            {r.label} · {phase} · out {out} · {age}
+          </Tag>
+        );
+      })}
+      {hiddenReqs > 0 ? (
+        <Tag
+          tone="neutral"
+          title={`${hiddenReqs} more open request${hiddenReqs === 1 ? "" : "s"} — full detail on the Spark page LLM panel`}
+        >
+          +{hiddenReqs} more
+        </Tag>
+      ) : null}
     </div>
   );
 }
