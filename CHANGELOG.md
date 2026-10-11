@@ -9,6 +9,13 @@ Format: version sections are listed newest first.
 
 ## [Unreleased]
 
+---
+
+## [2.0.1] — 2026-10-11
+
+### Fixed
+- **Sidebar tab selection survives WebSocket snapshots (PR #15, t_81856622).** Clicking a reserved page (Token totals, Fleet energy, Activity, …) no longer snaps back to Overview about a second later when a WS snapshot arrived: the snapshot handler now keeps the active page id instead of resetting it. Page ids are always valid — only a spark id that left the fleet falls back to Overview. Includes unit coverage in `src/hooks/useSnapshot.test.tsx`.
+
 ### Added
 - **Health findings per Spark.** The server now runs a small set of explainable rules over metrics it already collects and reports them as `health[]` on each Spark snapshot (`server/health/HealthEvaluator.js`). Overview cards show the active findings as chips (details and what to try in the tooltip) and the Spark page lists them in full: **GPU running hot** (85 °C warn, 90 °C critical), **GPU stuck in a low-power state** (≥ 90 % utilisation but under 15 W for 5 samples in a row; normal decode draw does not trigger it), **unified memory running low** (under 3 GB available warns, under 1.5 GB is critical), **several models loaded while memory is busy**, and **network link slower than 1 Gb/s**.
 - **Kernel errors become Activity events.** The GPU collector now reads NVIDIA **Xid errors** and kernel **OOM-killer kills** from the journal (one cached scan per minute; `gpu.kernelErrors` = `{ xid, oomKills, lastXid }`). When a counter rises, Activity records an event (new **Health** category) and the node shows a critical finding for the next hour. The first reading after a restart is only a baseline, so old errors since boot do not raise an alert.
