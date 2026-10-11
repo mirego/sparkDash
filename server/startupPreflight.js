@@ -24,7 +24,19 @@ export function evaluateStartupPreflight(input) {
   }
   if (!input.configWritable) errors.push("Config directory is not writable; fix the config volume ownership/permissions.");
   if (!input.secretsKey?.present) warnings.push("No secrets key exists yet; one will be created when the secrets store is first used. Back it up with the config directory.");
-  if (!input.sshIdentity?.configured) warnings.push("No SSH identity is configured; remote key-auth units will be unavailable.");
+  if (!input.sshIdentity?.configured) {
+    // Loud + specific: a generic "no identity" line scrolls past unnoticed —
+    // the v2.0.1 rebuild lost the key mounts and both key-auth Sparks went
+    // "Permission denied" for hours (card t_4495562c). Name the affected units.
+    const keyAuthIds = input.keyAuthSparks ?? [];
+    if (keyAuthIds.length > 0) {
+      warnings.push(
+        `No SSH identity is available (SSH_IDENTITY_FILE unset or missing, no default key at the container HOME), but ${keyAuthIds.length} Spark${keyAuthIds.length === 1 ? "" : "s"} use key auth: ${keyAuthIds.join(", ")}. Remote polls for those will fail with "Permission denied (publickey,password)" — mount the key into the container (docker-compose.deploy.yml) and redeploy.`
+      );
+    } else {
+      warnings.push("No SSH identity is configured; remote key-auth units will be unavailable.");
+    }
+  }
   if (input.sshIdentity?.configured && input.sshIdentity.safePermissions === false) {
     warnings.push("SSH identity permissions are too open; set the private key to mode 600.");
   }
@@ -52,6 +64,18 @@ function pathWritable(target) {
   }
 }
 
+/** Spark ids that need SSH key auth and would break without a container identity. */
+export function keyAuthSparkIds(sparksJsonPath = SPARKS_JSON_PATH) {
+  try {
+    const registry = JSON.parse(fs.readFileSync(sparksJsonPath, "utf8"));
+    return (registry.sparks ?? [])
+      .filter((s) => !s.isLocal && s.ssh?.host && s.ssh?.auth === "key")
+      .map((s) => s.id);
+  } catch {
+    return [];
+  }
+}
+
 export function inspectStartupPreflight(bindHost) {
   const configDir = path.dirname(SPARKS_JSON_PATH);
   const keyFile = path.join(configDir, ".secrets-key");
@@ -76,6 +100,7 @@ export function inspectStartupPreflight(bindHost) {
       path: identity,
       safePermissions: identityMode == null ? null : (identityMode & 0o077) === 0,
     },
+    keyAuthSparks: keyAuthSparkIds(),
     localCollectors: {
       available: fs.existsSync(path.join(HOST_PATHS.PROC, "meminfo")) && fs.existsSync(HOST_PATHS.SYS),
     },

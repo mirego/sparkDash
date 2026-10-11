@@ -1,0 +1,32 @@
+# Deploy override — NOT stock upstream. Tracked in git (deploy worktree) so
+# the release-train compose invocation is self-contained:
+#   docker compose -f docker-compose.yml -f docker-compose.deploy.yml up -d
+# (docker-compose.override.yml is local-only dev convenience and is NOT part
+# of the deploy; a rebuild using only the two files above must not lose
+# anything — see card t_4495562c, the v2.0.1 SSH-key regression.)
+#
+# The deploy worktree's ./config is the committed snapshot; the LIVE fleet
+# registry/config state lives in /home/gilfoyle/sparkDash/config (fleet_sync
+# and the dashboard write there at runtime). Mount the live dir over the
+# stock ./config mount so runtime state survives image rebuilds.
+# BIND_HOST=0.0.0.0 preserves pre-sync behavior (dashboard reachable on the
+# LAN); upstream default is now loopback-only. Revisit when remote auth
+# lands — docs/REMOTE-ACCESS.md.
+#
+# SSH identity: mounted here (was previously only in the local override, and
+# got silently dropped in the v2.0.1 rebuild — both Sparks went
+# "Permission denied (publickey,password)"). gilfoyle's real host key path is
+# kept as-is. scripts/post-deploy-verify.sh asserts these mounts after any
+# recreate.
+services:
+  sparkdash:
+    network_mode: host
+    volumes:
+      - /home/gilfoyle/sparkDash/config:/app/config
+      - /home/gilfoyle/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      - /home/gilfoyle/.ssh/id_ed25519.pub:/root/.ssh/id_ed25519.pub:ro
+      - /home/gilfoyle/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+    environment:
+      - BIND_HOST=0.0.0.0
+      - PORT=5555
+      - HOME=/root

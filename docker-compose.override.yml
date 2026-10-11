@@ -1,11 +1,14 @@
-# Local override — NOT stock upstream.
-# Mounts gilfoyle cluster SSH key so sparkDash can poll every Spark via SSH (uniform N-node).
+# Local override — NOT stock upstream. Intentionally EMPTY of deploy concerns.
+#
+# The SSH key mounts (id_ed25519 / id_ed25519.pub / known_hosts) and
+# network_mode: host moved into docker-compose.deploy.yml (tracked) after the
+# v2.0.1 rebuild silently dropped them — see card t_4495562c. The deploy
+# stack is now self-contained with just:
+#   docker compose -f docker-compose.yml -f docker-compose.deploy.yml up -d
+# Do NOT re-add SSH mounts here; this file is local-dev convenience only and
+# is not part of the release-train deploy.
+#
+# The running container already has HOME=/root via deploy.yml. If you use this
+# override for local dev without deploy.yml, set HOME=/root yourself.
 services:
-  sparkdash:
-    network_mode: host
-    volumes:
-      - /home/gilfoyle/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
-      - /home/gilfoyle/.ssh/id_ed25519.pub:/root/.ssh/id_ed25519.pub:ro
-      - /home/gilfoyle/.ssh/known_hosts:/root/.ssh/known_hosts:ro
-    environment:
-      - HOME=/root
+  sparkdash: {}

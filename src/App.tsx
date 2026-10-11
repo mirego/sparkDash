@@ -201,6 +201,7 @@ function DashboardApp() {
   }, []);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  const [healthWarnings, setHealthWarnings] = useState<string[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   /** Used when WS is down so add/delete still updates the tab bar */
   const [fallbackSparks, setFallbackSparks] = useState<SparkSnapshot[]>([]);
@@ -303,7 +304,10 @@ function DashboardApp() {
   // Auth posture once on load — drives the "Open access" header warning.
   useEffect(() => {
     fetchHealth()
-      .then((h) => setAuthMode(h.authMode))
+      .then((h) => {
+        setAuthMode(h.authMode);
+        setHealthWarnings(h.warnings);
+      })
       .catch(() => setAuthMode(null));
   }, []);
 
@@ -494,6 +498,7 @@ function DashboardApp() {
           connected={connected}
           refreshInterval={refreshInterval}
           authMode={authMode}
+          healthWarnings={healthWarnings}
         />
         <div className="side-strip" aria-hidden={!sideHidden}>
           <button type="button" className="icon-circle" onClick={toggleSidebar} tabIndex={sideHidden ? 0 : -1} title="Show sidebar (Ctrl+B)" aria-label="Show sidebar">

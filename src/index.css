@@ -491,6 +491,22 @@ input:disabled {
   color: var(--color-muted-strong);
   text-decoration: underline;
 }
+/* SSH-key-missing chip (sidebar foot): same shape as open-access, warn-tinted. */
+.open-access-chip--warn {
+  border-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
+  color: var(--color-warning);
+}
+.open-access-chip--warn:hover {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+.open-access-chip--warn .open-access-dot {
+  width: auto;
+  height: auto;
+  background: none;
+  border-radius: 0;
+  opacity: 1;
+}
 
 /* ─── Form inputs & selects ─────────────────────────── */
 input[type="text"],

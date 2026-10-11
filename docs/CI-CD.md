@@ -19,9 +19,23 @@ ever SSHes anywhere. The flow after merge:
   mounts and `BIND_HOST=0.0.0.0 PORT=5555` — those files are never copied
   off anton):
 
-        docker compose -f docker-compose.yml -f docker-compose.override.yml \
-                       -f docker-compose.deploy.yml build
+        docker compose -f docker-compose.yml -f docker-compose.deploy.yml build
         docker compose ... up -d --force-recreate   # never plain restart — FE baked into image
+
+  `docker-compose.deploy.yml` is tracked and self-contained (config volume +
+  SSH key/pub/known_hosts mounts + BIND_HOST/PORT) — do NOT add
+  `docker-compose.override.yml` to the deploy invocation; a rebuild that
+  omits nothing can no longer lose the SSH key (t_4495562c regression).
+
+- Post-deploy SSH smoke check (runs `docker exec` inside the new container):
+
+        ./scripts/post-deploy-verify.sh
+
+  Asserts the identity file is mounted in the container and BatchMode SSH
+  reaches every non-local `auth: "key"` spark in sparks.json; exits non-zero
+  (deploy fails loudly) if the container lost its key — the v2.0.1 failure
+  mode that left both Sparks "Permission denied (publickey,password)" while
+  the dashboard looked fine.
 
 - Post-deploy smoke checks on anton (loopback curl): `/` serves a real
   built bundle, both export endpoints (`/api/models/export/opencode`,

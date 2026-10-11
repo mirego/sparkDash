@@ -1,4 +1,6 @@
 import { BenchIcon } from "../bench/BenchIcon";
+import { SshIdentityChip } from "../SshIdentityChip";
+import type { HealthResponse } from "../../api/types";
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import {
   DndContext,
@@ -41,6 +43,8 @@ interface AppSidebarProps {
   refreshInterval?: number | null;
   /** Server auth posture; an open remote bind shows a gentle note above the credit line. */
   authMode?: AuthMode | null;
+  /** Server /api/health warnings; a missing SSH identity shows the warn chip above the credit line. */
+  healthWarnings?: string[];
   /** Hide the sidebar (a strip with a show button stays behind). */
   onCollapse?: () => void;
 }
@@ -128,6 +132,7 @@ export function AppSidebar({
   connected,
   refreshInterval,
   authMode = null,
+  healthWarnings = [],
   onCollapse,
 }: AppSidebarProps) {
   const [items, setItems] = useState<string[]>(() => sparks.map((s) => s.id));
@@ -354,6 +359,7 @@ export function AppSidebar({
           <span>{connected ? `Live${refreshInterval ? ` · ${Math.round(refreshInterval / 100) / 10} s poll` : ""}` : "Reconnecting…"}</span>
         </div>
         <OpenAccessChip authMode={authMode} />
+        <SshIdentityChip health={{ warnings: healthWarnings } as HealthResponse} />
         <div className="rail-credit">
           <span>by Mia&apos;s AI Lab</span>
           <span className="rail-credit__links">

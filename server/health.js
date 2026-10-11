@@ -2,8 +2,9 @@ import fs from "fs";
 import path from "path";
 import { HOST_PATHS, SPARKS_JSON_PATH } from "./config.js";
 import { allowOpenRemote, configuredToken, requireRemoteAuth } from "./auth.js";
+import { keyAuthSparkIds } from "./startupPreflight.js";
 
-export function evaluateHealth({ bindHost, configWritable, secretsKeyPresent, sshIdentityPresent }) {
+export function evaluateHealth({ bindHost, configWritable, secretsKeyPresent, sshIdentityPresent, keyAuthSparks = [] }) {
   const remote = requireRemoteAuth(bindHost);
   const token = Boolean(configuredToken());
   const openRemote = remote && !token && allowOpenRemote();
@@ -14,7 +15,17 @@ export function evaluateHealth({ bindHost, configWritable, secretsKeyPresent, ss
   }
   if (!configWritable) errors.push("Config directory is not writable");
   if (!secretsKeyPresent) warnings.push("Secrets key is not present yet");
-  if (!sshIdentityPresent) warnings.push("SSH identity is not mounted");
+  if (!sshIdentityPresent) {
+    // Card t_4495562c: the v2.0.1 rebuild lost the SSH key mounts and both
+    // key-auth Sparks went "Permission denied" with only a generic warning.
+    // Name the affected units so the missing key is visible in the UI, not
+    // just as failed polls.
+    warnings.push(
+      keyAuthSparks.length > 0
+        ? `SSH identity is not mounted — key-auth Sparks will fail to poll: ${keyAuthSparks.join(", ")}`
+        : "SSH identity is not mounted"
+    );
+  }
   return {
     ok: errors.length === 0,
     bindHost,
@@ -37,5 +48,6 @@ export function inspectHealth(bindHost) {
     configWritable: writable,
     secretsKeyPresent: Boolean(process.env.SPARKDASH_SECRETS_KEY) || fs.existsSync(keyFile),
     sshIdentityPresent: fs.existsSync(identity),
+    keyAuthSparks: keyAuthSparkIds(),
   });
 }
