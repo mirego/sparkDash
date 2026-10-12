@@ -26,6 +26,7 @@ import { LlmTrendChart } from "./LlmTrendChart";
 import type { BenchKind } from "./BenchSwitcher";
 import { engineStateLabel } from "./llmEngineState";
 import { idleLabel, isLlmIdle } from "../../shared/llmIdle";
+import { InflightReqPills } from "../OverviewPage/SparkCard";
 
 interface LlmPanelProps {
   llm: LlmMetrics | null;
@@ -580,6 +581,7 @@ export function LlmPanel({
               {backend} · :{llmPort}
             </Tag>
           )}
+          {available ? <InflightReqPills llm={llm} /> : null}
           {onRemovePort && (
             <button
               type="button"

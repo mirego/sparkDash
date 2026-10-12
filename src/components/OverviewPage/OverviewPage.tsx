@@ -13,8 +13,6 @@ import { SparkCard } from "./SparkCard";
 import { ActivityFeed } from "./ActivityFeed";
 import { ActivityIcon, ExternalLinkIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 import { EnergyModal } from "../EnergyModal";
-import { InferenceHealthPanel } from "./InferenceHealthPanel";
-import { ModelFleetPanel } from "../ModelFleet/ModelFleetPanel";
 import { TokenDialog } from "./TokenDialog";
 import { AgentConfigExportModal } from "./AgentConfigExportModal";
 import { fmtEnergyWh, fmtCost } from "../../utils/energy";
@@ -393,8 +391,6 @@ export function OverviewPage({
           </section>
         </div>
       </div>
-      <InferenceHealthPanel sparks={visibleSparks} />
-      <ModelFleetPanel enabled={true} />
       <AgentConfigExportModal open={exportOpen} onClose={() => setExportOpen(false)} />
       {energyOpen && <EnergyModal onClose={() => setEnergyOpen(false)} />}
       {/* Token throughput dialog overlay */}

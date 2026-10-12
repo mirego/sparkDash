@@ -58,4 +58,54 @@ describe("SparkCard", () => {
     expect(container.textContent).toContain("cfg-label");
     expect(container.textContent).toContain("Head is offline");
   });
+
+  describe("per-request in-flight pills", () => {
+    const req = (id: string, phase: string, completionEstTokens = 1200) => ({
+      id,
+      phase,
+      model: "fixture-model",
+      promptEstTokens: 3000,
+      completionEstTokens,
+      cachedTokens: null,
+      ageSec: 14,
+    });
+    function sparkWithReqs(users: Array<{ label: string; openRequests: unknown[] }>): SparkSnapshot {
+      const s = makeSpark("a");
+      (s.metrics.llm[0] as unknown as Record<string, unknown>).activeUsers = users;
+      return s;
+    }
+
+    it("renders one pill per open request, repeating the key for multiple requests", () => {
+      const spark = sparkWithReqs([
+        { label: "sbre", openRequests: [req("r1", "streaming"), req("r2", "streaming"), req("r3", "waiting")] },
+        { label: "other-key", openRequests: [req("r4", "streaming", 900)] },
+      ]);
+      const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
+      const pills = container.querySelectorAll('[data-testid="inflight-req-pills"] .tag');
+      expect(pills).toHaveLength(4);
+      const labels = Array.from(pills).map((p) => p.textContent);
+      // One pill PER REQUEST: the same key prefix appears once per open request.
+      expect(labels.filter((t) => t?.startsWith("sbre"))).toHaveLength(3);
+      expect(labels.filter((t) => t?.startsWith("other-key"))).toHaveLength(1);
+      expect(labels[0]).toMatch(/^sbre · streaming · out 1\.2k · 14s$/);
+      // Pre-byte request gets the warning tone, streaming gets success.
+      expect(pills[2].className).toContain("tag--warn");
+      expect(pills[0].className).toContain("tag--good");
+    });
+
+    it("caps visible pills and falls back to +N more", () => {
+      const spark = sparkWithReqs([
+        { label: "burst", openRequests: Array.from({ length: 8 }, (_, i) => req(`r${i}`, "streaming")) },
+      ]);
+      const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
+      const pills = container.querySelectorAll('[data-testid="inflight-req-pills"] .tag');
+      expect(pills).toHaveLength(7); // 6 visible + "+2 more"
+      expect(pills[6].textContent).toBe("+2 more");
+    });
+
+    it("renders no pill row when there is no in-flight traffic", () => {
+      const { container } = render(<SparkCard spark={makeSpark("a")} temperatureUnit="celsius" />);
+      expect(container.querySelector('[data-testid="inflight-req-pills"]')).toBeNull();
+    });
+  });
 });

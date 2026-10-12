@@ -70,3 +70,14 @@ describe("Overview card", () => {
     expect(container.innerHTML).not.toContain("sgLang");
   });
 });
+
+describe("Overview recomposition (t_db6255db)", () => {
+  it("no longer renders the Inference Health or Model Fleet panels", () => {
+    const { container } = render(<OverviewPage sparks={[host()]} />);
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("Inference Health");
+    expect(text).not.toContain("Model Fleet");
+    expect(container.querySelector('[aria-label="Inference health"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Model fleet"]')).toBeNull();
+  });
+});
