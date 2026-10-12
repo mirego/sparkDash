@@ -11,6 +11,13 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.0.2] — 2026-10-11
+
+### Changed
+- **Overview slimmed down: per-request in-flight pills (PR #16, t_db6255db).** The Inference Health and Model Fleet panels left the Overview page (components, endpoints, and data pipeline untouched — the panels stay on their own pages). In their place each Overview Spark card shows **one pill per open request** from `llm.activeUsers[].openRequests` — a key with several requests appears once per request. Pill text: `<key> · <phase> · out <tok> · <age>s`; waiting phase is a warning tone, streaming is good (mirrors the LLM panel per-user pills). Capped at 6 with a `+N more` fallback. The Spark page LLM panel header gets the same pills.
+
+---
+
 ## [2.0.1] — 2026-10-11
 
 ### Fixed
