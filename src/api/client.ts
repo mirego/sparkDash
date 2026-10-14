@@ -2,13 +2,16 @@ import type {
   ActivityEvent,
   ActivityEventsPage,
   EnergyHistory,
+  MonthlyEnergy,
   TokenHistory,
   DecodeBenchJob,
   DecodeBenchListResponse,
   EnergyReport,
   FleetEnergy,
   HealthResponse,
+  InferenceActivity,
   HermesBatchUpdateResponse,
+  GpuClockStatus,
   HermesUpdatesResponse,
   LauncherAction,
   LauncherJob,
@@ -69,6 +72,11 @@ export function fetchFleetEnergy(): Promise<FleetEnergy> {
   return apiFetch("/api/fleet-energy");
 }
 
+/** Optional, sanitized inference request activity from a configured private source. */
+export function fetchInferenceActivity(): Promise<InferenceActivity> {
+  return apiFetch("/api/inference/activity");
+}
+
 /** Fleet activity log, newest first. */
 export async function fetchEvents(opts?: {
   limit?: number;
@@ -88,6 +96,16 @@ export async function fetchEvents(opts?: {
 export function clearEvents(olderThanMs?: number): Promise<{ removed: number }> {
   const qs = olderThanMs != null ? `?olderThanMs=${Math.floor(olderThanMs)}` : "";
   return apiFetch(`/api/events${qs}`, { method: "DELETE" });
+}
+
+/** Whether this server can restart itself (Docker with a restart policy). */
+export function fetchRestartAvailable(): Promise<{ available: boolean }> {
+  return apiFetch("/api/restart");
+}
+
+/** Ask the server to restart; Docker brings it back a few seconds later. */
+export function restartServer(): Promise<{ restarting: boolean }> {
+  return apiFetch("/api/restart", { method: "POST" });
 }
 
 /** Delete recorded fleet energy: everything, or only minutes older than `olderThanMs`. */
@@ -129,6 +147,11 @@ export function fetchEnergyHistory(): Promise<EnergyHistory> {
 /** GPU energy history pre-aggregated into day / week / month buckets. */
 export function fetchEnergyReport(): Promise<EnergyReport> {
   return apiFetch("/api/energy");
+}
+
+/** Permanent per-month fleet energy (survives resets, restarts and fleet changes). */
+export function fetchMonthlyEnergy(): Promise<MonthlyEnergy> {
+  return apiFetch("/api/fleet-energy/monthly");
 }
 
 /** Latest metrics snapshot for one Spark (includes per-port LLM modelId). */
@@ -573,6 +596,27 @@ export function wakeAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/wake-all", { method: "POST" });
 }
 
+// ─── GPU clock cap (Spark units) ─────────────────────────
+export function fetchGpuClock(id: string): Promise<GpuClockStatus> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/gpu-clock`);
+}
+
+/** Cap the GPU graphics clock now; `persist` also installs the boot service. */
+export function setGpuClock(
+  id: string,
+  body: { maxMHz: number; minMHz?: number; persist: boolean }
+): Promise<{ success: boolean; capMHz: number; persist: boolean }> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/gpu-clock`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Remove the cap and the boot service. */
+export function resetGpuClock(id: string): Promise<{ success: boolean }> {
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/gpu-clock`, { method: "DELETE" });
+}
+
 // ─── Hermes update preview ───────────────────────────────
 /** Per-Spark update preview (release + pending commits + resolved view). */
 export function fetchHermesUpdates(id: string): Promise<HermesUpdatesResponse> {
@@ -781,9 +825,12 @@ export function cancelToolEvalWatch(sparkId: string): Promise<{ success: boolean
 /** Recent GPU history kept by the server (parallel arrays, oldest first; `p` is null where power was unknown). */
 export interface GpuHistoryResponse {
   t: number[];
-  u: number[];
-  c: number[];
+  /** Null where usage / temperature was unknown (e.g. a vendor tool reported no value). */
+  u: Array<number | null>;
+  c: Array<number | null>;
   p: Array<number | null>;
+  /** Per-card series of a multi-GPU host, parallel to `t` (null where the card had no reading). Absent on older servers. */
+  gpus?: Array<{ index: number; name: string | null; u: Array<number | null>; c: Array<number | null>; p: Array<number | null> }>;
 }
 
 export function getGpuHistory(sparkId: string, windowMs: number): Promise<GpuHistoryResponse> {

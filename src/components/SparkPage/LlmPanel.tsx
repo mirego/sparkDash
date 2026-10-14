@@ -49,6 +49,8 @@ const VLLM_METRIC_INFO = {
     "Free tokens left in the engine’s KV-cache pool, over the allocated pool (tokens and memory). The pool is shared across concurrent requests and can be larger than one request’s max context. High usage (≥80% full) means little room for new or long contexts and often leads to queuing or preemptions.",
   requests:
     "ENGINE run/wait from vLLM: Run = in a model batch on the GPU. Wait = accepted but not scheduled. Reason chips (capacity/deferred) come from num_requests_waiting_by_reason. Proxy stream/pre-byte is a different clock (first response byte) — see Queue strip.",
+  ttftMean:
+    "Mean time-to-first-token reported by FreeToken (a mean, not a percentile): how long requests wait until the first output token.",
   ttftP95:
     "95th percentile time-to-first-token from the engine’s request history: how long “slow” requests wait until the first output token. Spikes mean queueing, long prefills, or cold paths—not average decode speed.",
   preempts:
@@ -443,7 +445,7 @@ export function LlmPanel({
   const uncachedPrefillTps = llm?.uncachedPrefillTps ?? 0;
   const available = llm?.available ?? false;
   // While nothing is flowing, say when the endpoint last served.
-  const idleNote = available && isLlmIdle({ generationTps, prefillTps })
+  const idleNote = available && isLlmIdle({ generationTps, prefillTps, prefillActive: llm?.prefillActive })
     ? idleLabel(llm?.lastActiveAt)
     : null;
 
@@ -519,6 +521,9 @@ export function LlmPanel({
   const fmtTps = (n: number) => (n >= 1000 ? Math.round(n).toLocaleString() : n.toFixed(1));
   const fmtAvg = (n: number) => (n >= 100 ? n.toFixed(0) : n.toFixed(1));
   const isVllm = llm != null && (llm.backend === "vllm" || llm.backend === "q27");
+  // FreeToken reports KV use, active requests and a TTFT mean in /v1/stats; the tiles below are null-gated.
+  const isFreeToken = llm?.backend === "freetoken";
+  const showEngineTiles = isVllm || isFreeToken;
   const kvTone =
     llm?.kvCacheUsage == null
       ? ""
@@ -577,9 +582,16 @@ export function LlmPanel({
       actions={
         <div className="sp-actions">
           {available && backend && (
-            <Tag tone="info" title={`Backend: ${backend}`}>
-              {backend} · :{llmPort}
-            </Tag>
+            <>
+              {llm?.via === "ssh-tunnel" && (
+                <Tag title="This engine's port is not reachable from the dashboard, so it is read through an SSH tunnel to the unit">
+                  via SSH
+                </Tag>
+              )}
+              <Tag tone="info" title={`Backend: ${backend}`}>
+                {backend} · :{llmPort}
+              </Tag>
+            </>
           )}
           {available ? <InflightReqPills llm={llm} /> : null}
           {onRemovePort && (
@@ -640,6 +652,33 @@ export function LlmPanel({
               className="sp-input"
             />
           </label>
+          <div className="sp-btns" role="group" aria-label="Server presets">
+            <span className="eyebrow">Presets:</span>
+            <button
+              type="button"
+              title="Fill LM Studio's default port (1234)"
+              onClick={() => setPortDraft("1234")}
+              className="btn btn--sm"
+            >
+              LM Studio :1234
+            </button>
+            <button
+              type="button"
+              title="Fill Ollama's default port (11434)"
+              onClick={() => setPortDraft("11434")}
+              className="btn btn--sm"
+            >
+              Ollama :11434
+            </button>
+            <button
+              type="button"
+              title="Fill TensorFold's default port (8888)"
+              onClick={() => setPortDraft("8888")}
+              className="btn btn--sm"
+            >
+              TensorFold :8888
+            </button>
+          </div>
           <label className="sp-field">
             <span className="eyebrow">LLM host override</span>
             <input

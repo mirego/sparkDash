@@ -5,10 +5,17 @@ export interface SparkConfig {
   /**
    * Unit type:
    * - spark: NVIDIA DGX Spark (default) — DGX Spark specs shown in the header.
-   * - host: any Linux box with an NVIDIA GPU (still monitored via nvidia-smi,
-   *   just not a Spark). Real hardware is auto-detected once online.
+   * - host: any Linux box with supported NVIDIA or AMD GPUs, just not a Spark.
+   *   Real hardware is auto-detected once online.
    */
   kind?: "spark" | "host";
+  /**
+   * Optional OS platform override for SSH-collected units. "linux" (default)
+   * uses /proc + vendor GPU tooling, "darwin" macOS hosts, "windows" Windows hosts
+   * (PowerShell collectors; NVIDIA via nvidia-smi, AMD iGPUs via GPU
+   * performance counters).
+   */
+  platform?: "linux" | "darwin" | "windows";
   lanIp: string;
   cx7Ip?: string | null;
   llmHost?: string | null;
@@ -207,21 +214,55 @@ export interface GpuThrottle {
   smClockMaxMHz: number | null;
   /** Current SM clock as % of max (0–100). null when clocks unavailable. */
   smClockPct: number | null;
+  /** Max graphics clock locked with `nvidia-smi -lgc` (MHz), from the sparkdash
+   *  gpu-clock-cap marker on the host. null/absent when no lock is recorded. */
+  clockCapMHz?: number | null;
   /** Human-readable active reasons (tooltip). */
 
   detail: string;
 }
 
+/** GET /api/sparks/:id/gpu-clock: the GPU clock cap (`nvidia-smi -lgc`) and its boot service. */
+export type GpuClockStatus =
+  | { supported: false; reason?: string }
+  | {
+      supported: true;
+      /** GPU maximum graphics clock (MHz). */
+      hwMaxMHz: number | null;
+      /** Cap in effect right now (MHz), null when none is recorded. */
+      capMHz: number | null;
+      /** "root" runs directly, "yes" = passwordless sudo works, "no" = it does not. */
+      sudo: "root" | "yes" | "no";
+      service: {
+        installed: boolean;
+        /** "min,max" the service applies at boot. */
+        clocks: string | null;
+        enabled: string | null;
+        active: string | null;
+      };
+    };
+
 /** One health finding for a Spark (server rules in server/health/HealthEvaluator.js). */
 export interface HealthFinding {
-  id: "thermal" | "low-power" | "memory" | "xid" | "oom" | "concurrency" | "link-speed";
+  id: "thermal" | "low-power" | "memory" | "xid" | "oom" | "concurrency" | "link-speed" | "roce-link" | "roce-loss";
   severity: "warn" | "critical";
   title: string;
   detail: string;
   hint: string;
 }
 
+export interface GpuMetricAvailability {
+  temperature: boolean;
+  usage: boolean;
+  powerDraw: boolean;
+  powerLimit: boolean;
+  vramUsed: boolean;
+  vramTotal: boolean;
+}
+
 export interface GpuMetrics {
+  vendors?: Array<"amd" | "nvidia">;
+  metricAvailability?: GpuMetricAvailability;
   temperature: number;
   /** Multi-zone thermal: memory-junction temperature (°C), null when N/A. */
   temperatures?: { memory: number | null };
@@ -263,9 +304,14 @@ export interface GpuMetrics {
   gpus?: GpuDevice[];
 }
 
-/** One physical GPU as reported by nvidia-smi (`index,name,uuid`). */
+/** One physical GPU; `index` is a stable dashboard identity and `physicalIndex` is the vendor's index. */
 export interface GpuDevice {
+  /** Stable dashboard identity; AMD indices use a separate internal range. */
   index: number;
+  /** Physical index reported by the vendor tool. */
+  physicalIndex?: number;
+  vendor?: "amd" | "nvidia" | "apple";
+  metricAvailability?: GpuMetricAvailability;
   name: string | null;
   uuid: string | null;
   temperature: number;
@@ -332,6 +378,55 @@ export interface NetworkMetrics {
   wolMac?: string | null;
 }
 
+// ─── RoCE / RDMA (server/collectors/roce.js) ──────────────
+export interface RoceQos {
+  /** "pcp" or "dscp" (mlnx_qos "Priority trust state"). */
+  trust: string | null;
+  /** Priorities with PFC enabled; [] means PFC is off everywhere; null when mlnx_qos is unavailable. */
+  pfcPriorities: number[] | null;
+  cableLen: number | null;
+  /** priority -> DSCP values, present in DSCP trust mode. */
+  dscpMap: Record<string, number[]> | null;
+}
+
+export interface RoceDevice {
+  /** RDMA device, e.g. "rocep1s0f0". */
+  name: string;
+  /** Its network interface, e.g. "enp1s0f0np0". */
+  netdev: string | null;
+  state: string | null;
+  physState: string | null;
+  active: boolean;
+  /** Was ACTIVE at some point while sparkDash watched; an uncabled port never is. */
+  everActive: boolean;
+  rateGbps: number | null;
+  linkLayer: string | null;
+  operstate: string | null;
+  mtu: number | null;
+  speedMbps: number | null;
+  rxBps: number | null;
+  txBps: number | null;
+  rxErrors: number | null;
+  txErrors: number | null;
+  rxDropped: number | null;
+  txDropped: number | null;
+  /** RDMA hw_counters, lifetime totals. */
+  counters: Record<string, number>;
+  /** Change since the previous sample. */
+  deltas: Record<string, number>;
+  loss: { rising: string[]; streak: number };
+  /** ethtool -S subset (discards, CRC, pause frames, per-priority). */
+  eth: Record<string, number> | null;
+  flowControl: { rx: boolean | null; tx: boolean | null } | null;
+  qos: RoceQos | null;
+}
+
+export interface RoceMetrics {
+  available: true;
+  sampledAt: number;
+  devices: RoceDevice[];
+}
+
 // ─── Unified memory metrics ──────────────────────────────
 export interface UnifiedMemoryMetrics {
   total: number;
@@ -349,14 +444,21 @@ export interface UnifiedMemoryMetrics {
 
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
+  /** The LLM port this snapshot came from — lets the UI match panels to probes by port, not array position. */
+  port?: number;
   available: boolean;
-  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | null;
+  /** How the monitor reaches the engine: its own address, or an SSH forward when only SSH gets there. */
+  via?: "direct" | "ssh-tunnel";
   modelId: string | null;
   modelPath: string | null;
+  /** Exact served request IDs from /v1/models, in response order. */
+  models?: string[];
   contextLength: number | null;
   /** GPU memory utilization for the LLM engine (0–1), e.g. 0.9. Only from vLLM internal info. */
   gpuMemoryUtilization: number | null;
-  slotsActive: number;
+  /** Occupied slots; null when the backend does not report occupancy. */
+  slotsActive: number | null;
   slotsTotal: number;
   generationTps: number;
   prefillTps: number;
@@ -654,9 +756,13 @@ export interface SparkMetrics {
   ram: RamMetrics | null;
   storage: StorageMetrics[];
   network: NetworkMetrics | null;
+  /** RoCE / RDMA ports; null when the unit has no RDMA devices. */
+  roce?: RoceMetrics | null;
   unifiedMemory: UnifiedMemoryMetrics | null;
   /** Array of LLM metrics, one per configured port. Empty array when no ports. */
   llm: LlmMetrics[];
+  /** Loaded models discovered in private vLLM containers over SSH; no throughput claim. */
+  residentModels?: Array<{ modelId: string; container: string }>;
   /** ComfyUI probe result when monitoring is enabled; null when off or not yet polled. */
   comfy?: ComfyMetrics | null;
   /** Tailnet probe result when monitoring is enabled; null when off or not yet polled. */
@@ -673,6 +779,8 @@ export interface SparkSnapshot {
   offlineReason?: string | null;
   /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
   kind?: "spark" | "host";
+  /** OS of an SSH-collected unit; Windows units have no model launchers or CPU temperature. */
+  platform?: "linux" | "darwin" | "windows";
   online: boolean;
   /** Today's GPU energy consumption for this spark, in Wh (server-accumulated). */
   energyTodayWh?: number;
@@ -755,6 +863,8 @@ export interface FleetEnergy {
   trackedNodeIds: string[];
   currentNodeIds: string[];
   freshNodeCount: number;
+  /** Tracked nodes without a fresh power reading right now (offline or stale telemetry). */
+  staleNodeIds?: string[];
   currentWatts30s: number | null;
   energy24hKwh: number | null;
   energy31dKwh: number | null;
@@ -906,7 +1016,33 @@ export interface HealthResponse {
   warnings: string[];
 }
 
+export interface InferenceActivity {
+  enabled: boolean;
+  available: boolean;
+  /** Approved non-secret display labels, never API keys. */
+  labels: string[];
+  generatedAt: string | null;
+  error: string | null;
+  active: Array<{
+    principal: string;
+    model: string;
+    count: number;
+    oldestAgeMs: number;
+    newestAgeMs: number;
+  }>;
+  recent: Array<{
+    principal: string;
+    model: string;
+    durationMs: number;
+    status: number | null;
+    observedAt: string;
+  }>;
+  overflowed: boolean;
+}
+
 export interface Settings {
+  /** Read-only server capability; configured through environment variables. */
+  inferenceActivityEnabled?: boolean;
   pollIntervalMs: number;
   defaultLlmPort: number;
   autoHideOffline: boolean;
@@ -924,8 +1060,16 @@ export interface Settings {
   /** Overview search field + status filter. Off by default. */
   showOverviewSearch: boolean;
   showLlmTokenTotals: boolean;
+  /** Overview KPI tiles and the Recent activity card; each can be hidden. All on by default. */
+  showKpiDecode?: boolean;
+  showKpiPower?: boolean;
+  showKpiMemory?: boolean;
+  showKpiTokens?: boolean;
+  showActivityFeed?: boolean;
   /** Benchmark dialogs offer "Copy image" — a PNG share card of the results. */
   benchShareImage: boolean;
+  /** IANA time zone for the Tokens, Energy and Activity charts; "" follows the browser. */
+  timeZone?: string;
   /** Electricity price per kWh for cost estimates on the energy page; null = not set. */
   energyPricePerKwh: number | null;
   /** Currency symbol shown with cost estimates. */
@@ -935,6 +1079,8 @@ export interface Settings {
    * default (server DEFAULTS and the UI's pre-load fallback both say true).
    */
   showVramBreakdown: boolean;
+  /** Serve GET /metrics in Prometheus text format. Off by default (404 when off). */
+  prometheusExport: boolean;
 }
 
 export interface SparksListResponse {
@@ -1074,6 +1220,8 @@ export interface DecodeBenchProgress {
   completedLevels: number;
   totalLevels: number;
   message: string;
+  /** Generation tok/s measured from the streams of the running wave; null before the first token. */
+  liveTps?: number | null;
 }
 
 export interface DecodeBenchJob {
@@ -1541,6 +1689,34 @@ export interface EnergyHistory {
   retentionMs: number;
   nodeIds: string[];
   hourly: EnergyHistoryRow[];
+}
+
+/** One UTC month of the permanent energy roll-up. */
+export interface MonthlyEnergyMonth {
+  /** "YYYY-MM" (UTC). */
+  month: string;
+  startMs: number;
+  /** Exclusive end of the month. */
+  endMs: number;
+  /** False while the month is still the current one. */
+  closed: boolean;
+  /** Nodes that reported in this month (the scope at the time). */
+  nodeIds: string[];
+  nodes: Record<string, { wh: number; coverageMs: number }>;
+  totalWh: number;
+  fleetWh: number;
+  fleetCoverageMs: number;
+  outputTokens: number;
+  coveredOutputTokens: number;
+  whPerOutputToken: number | null;
+}
+
+export interface MonthlyEnergy {
+  estimated: boolean;
+  generatedAt: number;
+  foldedThroughMs: number;
+  /** Oldest first. */
+  months: MonthlyEnergyMonth[];
 }
 
 export interface ActivityEventsPage {
