@@ -11,7 +11,8 @@ describe("TensorFold slot tile", () => {
   it.each([null, 0, 8])("renders occupancy %s with known capacity", (active) => {
     const llm = { ...makeSpark().metrics.llm[0], backend: "tensorfold" as const, slotsActive: active, slotsTotal: 8 };
     const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} llmHost={null} lanIp="10.0.0.1" />);
-    const tile = [...container.querySelectorAll(".sp-tile")].find((el) => el.querySelector("span")?.textContent === "Slots");
-    expect(tile?.querySelector("b")?.textContent).toBe(`${active ?? "?"} / 8`);
+    // Fork 2.0 shell: the Slots tile is a label div + value div (not sp-tile b/span markup).
+    const slotGroup = [...container.querySelectorAll("div")].find((el) => el.children.length === 2 && el.children[0]?.textContent === "Slots");
+    expect(slotGroup?.children[1]?.textContent).toBe(`${active ?? "?"} / 8`);
   });
 });

@@ -1051,7 +1051,7 @@ export function LlmPanel({
               <div className="text-[10px] uppercase tracking-wide text-muted">Slots</div>
               <div className="font-tabular text-sm text-text">
                 {(llm?.slotsTotal ?? 0) > 0
-                  ? `${llm?.slotsActive ?? 0} / ${llm?.slotsTotal ?? 0}`
+                  ? `${llm?.slotsActive ?? "?"} / ${llm?.slotsTotal ?? 0}`
                   : (llm?.slotsActive ?? 0) > 0
                     ? `${llm?.slotsActive} running`
                     : "—"}

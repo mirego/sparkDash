@@ -29,10 +29,18 @@ export const CONFIG_PATH_VARS = [
   "FLEET_ENERGY_JSON_PATH",
   "FLEET_ENERGY_MONTHLY_JSON_PATH",
   "EVENTS_JSON_PATH",
+  // Fork (custom features): per-key usage, energy and model-registry paths.
+  "GPU_WH_PATH",
+  "CPA_LOG_PATH",
+  "PER_KEY_USAGE_PATH",
+  "TOKEN_LIFETIMES_PATH",
+  "MODEL_REGISTRY_PATH",
+  "MODEL_REGISTRY_STATE_PATH",
+  "CPA_STATUS_PATH",
 ];
 
 /** Variables that point at a directory the server writes into. */
-export const CONFIG_DIR_VARS = ["TOOL_EVAL_RESULTS_DIR"];
+export const CONFIG_DIR_VARS = ["TOOL_EVAL_RESULTS_DIR", "CPA_REQUEST_LOG_DIR"];
 
 /** Env entries mapping each config path variable to a file (or directory) inside `dir`. */
 export function isolatedConfigEnv(dir) {

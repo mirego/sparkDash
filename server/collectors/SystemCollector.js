@@ -918,19 +918,23 @@ export class SystemCollector {
         eccCorrected = num(9);
         eccUncorrected = num(10);
       } else {
-        temperature = parseFloat(parts[0]) || 0;
-        usage = parseFloat(parts[1]) || 0;
-        powerDraw = parseFloat(parts[2]) || 0;
+        // Upstream positional layout (12/13 cols): temp,util,draw,limit,sm,max,
+        // 4 throttle flags, then index,name,uuid — used by the Windows adapter
+        // path and fixtures; every field null-guarded.
+        const rawTemperature = num(0);
+        temperature = rawTemperature ?? 0;
+        usage = num(1) ?? 0;
+        powerDraw = num(2) ?? 0;
         powerLimit = num(3) ?? 120;
-        smClockMHz = num(n - 9);
-        smClockMaxMHz = num(n - 8);
-        hwThermal = this._parseSmiActive(parts[n - 7]);
-        swThermal = this._parseSmiActive(parts[n - 6]);
-        hwSlowdown = this._parseSmiActive(parts[n - 5]);
-        powerCap = this._parseSmiActive(parts[n - 4]);
-        index = num(n - 3) ?? i;
-        name = parts[n - 2] && !/^\[?n\/a\]?$/i.test(parts[n - 2]) ? parts[n - 2] : null;
-        uuid = parts[n - 1] && /^GPU-/i.test(parts[n - 1]) ? parts[n - 1] : null;
+        smClockMHz = num(4);
+        smClockMaxMHz = num(5);
+        hwThermal = this._parseSmiActive(parts[6]);
+        swThermal = this._parseSmiActive(parts[7]);
+        hwSlowdown = this._parseSmiActive(parts[8]);
+        powerCap = this._parseSmiActive(parts[9]);
+        index = num(10) ?? i;
+        name = parts[11] && !/^\[?n\/a\]?$/i.test(parts[11]) ? parts[11] : null;
+        uuid = parts[12] && /^GPU-/i.test(parts[12]) ? parts[12] : null;
       }
       const rawTemperature = temperature;
       const rawUsage = usage;
@@ -1014,13 +1018,18 @@ export class SystemCollector {
     const firstOf = (key) => devices.map((d) => d[key]).find((v) => v != null) ?? null;
     const temps = devices.filter((d) => available(d, "temperature")).map((d) => d.temperature);
     const usages = devices.filter((d) => available(d, "usage")).map((d) => d.usage);
+    const draws = devices.filter((d) => available(d, "powerDraw")).map((d) => d.powerDraw);
+    const limits = devices.filter((d) => available(d, "powerLimit")).map((d) => d.powerLimit);
+    // Windows adapters report no draw/limit at all — fold to 0 rather than null
+    // (upstream convention). NVIDIA extended fields degrade to null instead.
+    const anyWindowsAdapter = devices.some((d) => d.vendor && d.vendor !== "nvidia" && d.metricAvailability && d.metricAvailability.powerDraw === false && d.metricAvailability.temperature === false);
     return {
       fan: maxOf("fan"),
       temperature: temps.length ? Math.max(...temps) : 0,
       temperatureMemory: maxOf("temperatureMemory"),
       usage: usages.length ? Math.max(...usages) : 0,
-      powerDraw: sumOf("powerDraw"),
-      powerLimit: sumOf("powerLimit", 120),
+      powerDraw: draws.length ? round2(draws.reduce((sum, n) => sum + n, 0)) : anyWindowsAdapter ? 0 : null,
+      powerLimit: limits.length ? round2(limits.reduce((sum, n) => sum + n, 0)) : anyWindowsAdapter ? 0 : 120,
       clockSm: firstOf("clockSm"),
       clockMem: firstOf("clockMem"),
       pstate: firstOf("pstate"),

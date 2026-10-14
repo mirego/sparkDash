@@ -84,7 +84,7 @@ test("local collection still probes amd-smi when nvidia-smi is present", async (
   const probes = [];
   collector._nvidiaSmi = async (args) => {
     probes.push("nvidia-smi");
-    return args.startsWith("--query-gpu=temperature")
+    return args.startsWith("--query-gpu=")
       ? "51,12,110,250,1500,2500,0,0,0,0,0,NVIDIA RTX,GPU-AAA"
       : "";
   };
