@@ -29,12 +29,23 @@ const DEFAULTS = Object.freeze({
   showOverviewSearch: false,
   /** Overview LLM token totals card (cumulative tokens per model). On by default. */
   showLlmTokenTotals: true,
+  /** Overview KPI tiles (Fleet decode, Fleet power, Memory in use, Tokens today) and the Recent activity card. On by default. */
+  showKpiDecode: true,
+  showKpiPower: true,
+  showKpiMemory: true,
+  showKpiTokens: true,
+  showActivityFeed: true,
   /**
    * Benchmark dialogs offer the share-card format. On by default: the extra
    * control is one caret next to a button that already copies, and anyone who
    * does not want it can turn it off here (see the README's settings table).
    */
   benchShareImage: true,
+  /**
+   * Time zone for the Tokens, Energy and Activity charts (hour and day boundaries,
+   * labels). "" follows each browser; otherwise an IANA name such as "Europe/Paris".
+   */
+  timeZone: "",
   /** Electricity price per kWh, used to show estimated cost on the Fleet energy page. null = hide cost. */
   energyPricePerKwh: null,
   /** Currency symbol shown next to the estimated cost. */
@@ -46,10 +57,28 @@ const DEFAULTS = Object.freeze({
    * falls back to the same value before settings load — keep the two in step.
    */
   showVramBreakdown: true,
+  /**
+   * Serve GET /metrics in Prometheus text format for an external scraper.
+   * Off by default: when off the path answers 404.
+   */
+  prometheusExport: false,
 });
 
 const POLL_INTERVAL_MIN_MS = 500;
 const POLL_INTERVAL_MAX_MS = 60_000;
+
+/** "" (follow the browser) or an IANA zone name this runtime knows. */
+export function isValidTimeZone(value) {
+  if (typeof value !== "string") return false;
+  const name = value.trim();
+  if (!name || name.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Keep only known setting keys. */
 function _whitelist(obj) {
@@ -84,6 +113,11 @@ function _clampSettings(settings) {
   s.showFleetExceptions = Boolean(s.showFleetExceptions);
   s.showOverviewSearch = Boolean(s.showOverviewSearch);
   s.showLlmTokenTotals = Boolean(s.showLlmTokenTotals);
+  s.showKpiDecode = Boolean(s.showKpiDecode);
+  s.showKpiPower = Boolean(s.showKpiPower);
+  s.showKpiMemory = Boolean(s.showKpiMemory);
+  s.showKpiTokens = Boolean(s.showKpiTokens);
+  s.showActivityFeed = Boolean(s.showActivityFeed);
   // Electricity price: a non-negative finite number, otherwise "not set".
   const price = s.energyPricePerKwh == null || s.energyPricePerKwh === "" ? null : Number(s.energyPricePerKwh);
   s.energyPricePerKwh = Number.isFinite(price) && price >= 0 && price <= 100 ? price : null;
@@ -91,7 +125,9 @@ function _clampSettings(settings) {
     typeof s.energyCurrency === "string" && s.energyCurrency.trim() && s.energyCurrency.trim().length <= 4
       ? s.energyCurrency.trim()
       : DEFAULTS.energyCurrency;
+  s.timeZone = isValidTimeZone(s.timeZone) ? String(s.timeZone).trim() : "";
   s.showVramBreakdown = Boolean(s.showVramBreakdown);
+  s.prometheusExport = Boolean(s.prometheusExport);
   // Ensure temperatureUnit is valid
   if (s.temperatureUnit !== "celsius" && s.temperatureUnit !== "fahrenheit") {
     s.temperatureUnit = DEFAULTS.temperatureUnit;

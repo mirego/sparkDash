@@ -207,8 +207,8 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     if (!s.online) continue; // don't record zero-samples for offline hosts
     const m = s.metrics;
     if (m.gpu) {
-      pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
-      pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      if (m.gpu.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
+      if (m.gpu.metricAvailability?.temperature !== false) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
       if (m.gpu.temperatures?.memory != null && Number.isFinite(m.gpu.temperatures.memory)) {
         pushHistory(`${s.id}:gpu.memTemp`, m.gpu.temperatures.memory, at);
       }
@@ -217,7 +217,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
       }
       const draw = m.gpu.power?.draw;
       const limit = m.gpu.power?.limit;
-      if (draw != null && limit != null && limit > 0) {
+      if (m.gpu.metricAvailability?.powerDraw !== false && m.gpu.metricAvailability?.powerLimit !== false && draw != null && limit != null && limit > 0) {
         pushHistory(`${s.id}:gpu.powerPct`, Math.min(100, (draw / limit) * 100), at);
       }
       if (typeof m.gpu.vram?.percentage === "number") {
@@ -226,8 +226,11 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
       // Per-card series for multi-GPU hosts (keyed by nvidia-smi index).
       if (Array.isArray(m.gpu.gpus) && m.gpu.gpus.length > 1) {
         for (const d of m.gpu.gpus) {
-          pushHistory(`${s.id}:gpu.${d.index}.usage`, d.usage, at);
-          pushHistory(`${s.id}:gpu.${d.index}.temp`, d.temperature, at);
+          if (d.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.${d.index}.usage`, d.usage, at);
+          if (d.metricAvailability?.temperature !== false) pushHistory(`${s.id}:gpu.${d.index}.temp`, d.temperature, at);
+          if (d.metricAvailability?.powerDraw !== false && d.metricAvailability?.powerLimit !== false && d.power && d.power.limit > 0) {
+            pushHistory(`${s.id}:gpu.${d.index}.powerPct`, Math.min(100, (d.power.draw / d.power.limit) * 100), at);
+          }
         }
       }
     }

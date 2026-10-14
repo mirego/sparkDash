@@ -17,6 +17,8 @@ config/llm-daily.json
 config/llm-token-totals.json
 config/llm-token-totals.json.*
 config/fleet-energy.json
+config/fleet-energy-monthly.json*
+config/fleet-energy-monthly.unreadable-*
 config/.fleet-energy.json.*.tmp
 config/gpu-memory.json
 config/gpu-memory.json.*
@@ -43,6 +45,7 @@ config/llm-launchers.json
 config/tool-eval-runs.json
 config/tool-eval-results/
 config/gpu-history.json
+config/gpu-history-long.json
 config/fleet-energy.scope-*.json
 config/*.tmp
 config/*.json.*.tmp

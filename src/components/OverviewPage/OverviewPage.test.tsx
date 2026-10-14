@@ -81,3 +81,35 @@ describe("Overview recomposition (t_db6255db)", () => {
     expect(container.querySelector('[aria-label="Model fleet"]')).toBeNull();
   });
 });
+
+describe("Overview panels can be hidden", () => {
+  const tileLabels = (c: HTMLElement) => [...c.querySelectorAll(".ov-kpi .eyebrow")].map((e) => e.textContent);
+
+  it("shows the four tiles, the cards and Recent activity by default", () => {
+    const { container } = render(<OverviewPage sparks={[host()]} />);
+    expect(tileLabels(container)).toEqual(["Fleet decode", "Fleet power", "Memory in use", "Online"]);
+    expect(container.querySelector('[aria-label="Recent activity"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Inference activity");
+  });
+
+  it("hides single tiles and sizes the row to the rest", () => {
+    const { container } = render(<OverviewPage sparks={[host()]} kpis={{ decode: false, memory: false }} />);
+    expect(tileLabels(container)).toEqual(["Fleet power", "Online"]);
+    expect(container.querySelector(".ov-kpis")?.getAttribute("data-count")).toBe("2");
+  });
+
+  it("drops the whole tile row when every tile is hidden", () => {
+    const { container } = render(
+      <OverviewPage sparks={[host()]} kpis={{ decode: false, power: false, memory: false, tokens: false }} />
+    );
+    expect(container.querySelector(".ov-kpis")).toBeNull();
+  });
+
+  it("hides Recent activity, and the side column when nothing is left in it", () => {
+    const { container } = render(
+      <OverviewPage sparks={[host()]} showActivityFeed={false} showFleetEnergy={false} showLlmTokenTotals={false} />
+    );
+    expect(container.querySelector('[aria-label="Recent activity"]')).toBeNull();
+    expect(container.querySelector(".ov-side")).toBeNull();
+  });
+});

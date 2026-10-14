@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import os from "os";
 import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
+import { resolveFrontendDir, FRONTEND_MISSING_MESSAGE } from "./frontendDir.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
 import { collectionWasSuccessful } from "./collectors/SystemCollector.js";
 import { sshExec } from "./collectors/ssh.js";
@@ -24,6 +25,8 @@ import { inspectHealth } from "./health.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
 import { broadcastForLanIp, effectiveMac, normalizeMac, sendWol } from "./wol.js";
 import { remoteShutdownCommand, spawnLocalShutdown } from "./shutdown.js";
+import { GpuClockManager } from "./gpuclock/GpuClockManager.js";
+import { registerGpuClockRoutes } from "./gpuclock/routes.js";
 import {
   decodeBenchManager,
   DECODE_BENCH_DEFAULTS,
@@ -72,6 +75,7 @@ import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
 import { buildPimonoConfig } from "./collectors/PimonoConfigExport.js";
+import { InferenceActivityStore } from "./collectors/InferenceActivity.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { onceClose, resolveLlmHttpTarget } from "./collectors/llmTunnel.js";
 import { formatLlmBaseUrl, parseLlmTargetInput } from "../src/shared/llmTarget.js";
@@ -83,10 +87,10 @@ import {
 } from "./llmtokens/LlmTokenRuntime.js";
 import { closeLlmStreamAgent } from "./collectors/LlmStreaming.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
-import { FLEET_ENERGY_JSON_PATH } from "./config.js";
+import { FLEET_ENERGY_JSON_PATH, FLEET_ENERGY_MONTHLY_JSON_PATH } from "./config.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
-import { GpuHistory } from "./metrics/GpuHistory.js";
+import { GpuHistory, deviceReadings } from "./metrics/GpuHistory.js";
 import { LauncherStore } from "./llmlaunch/LauncherStore.js";
 import { LauncherManager } from "./llmlaunch/LauncherManager.js";
 import { ToolEvalStore } from "./tooleval/ToolEvalStore.js";
@@ -100,6 +104,7 @@ import {
 import { testSparkConnectivity } from "./connectivity.js";
 import { TailscaleProbe } from "./collectors/TailscaleProbe.js";
 import { inspectStartupPreflight, logStartupPreflight } from "./startupPreflight.js";
+import { PROMETHEUS_CONTENT_TYPE, metricsEntries, renderPrometheusMetrics } from "./prometheus.js";
 
 dotenv.config();
 
@@ -394,10 +399,12 @@ function consumeBenchStartQuota(req, res) {
 
 // ─── Spark registry ──────────────────────────────────────
 const registry = new SparkRegistry();
+const inferenceActivity = new InferenceActivityStore();
 
 const fleetEnergyTracker = new FleetEnergyTracker({
   nodeIds: registry.sparkIds,
   filePath: FLEET_ENERGY_JSON_PATH,
+  monthlyFilePath: FLEET_ENERGY_MONTHLY_JSON_PATH,
 });
 
 // ─── Fleet event log ─────────────────────────────────────
@@ -408,8 +415,18 @@ const eventLog = new EventLog({
 });
 
 // ─── GPU history (so a fresh page can draw the last hours at once) ─────
+// Two stores: the dense one keeps every ~2 s sample for the short Overview/Spark charts
+// (8 h), the long one keeps a minute-resolution series for a week so the Temps page can
+// draw day and week ranges without storing a week of 2 s samples.
+const GPU_HISTORY_DENSE_WINDOW_MS = 8 * 3600_000;
+const GPU_HISTORY_MAX_WINDOW_MS = 7 * 24 * 3600_000;
 const gpuHistory = new GpuHistory({
   file: process.env.GPU_HISTORY_JSON_PATH || path.join(ROOT, "config", "gpu-history.json"),
+});
+const gpuHistoryLong = new GpuHistory({
+  file: process.env.GPU_HISTORY_LONG_JSON_PATH || path.join(ROOT, "config", "gpu-history-long.json"),
+  maxAgeMs: GPU_HISTORY_MAX_WINDOW_MS,
+  minGapMs: 60_000,
 });
 const GPU_HISTORY_SAMPLE_MS = 2000;
 function sampleGpuHistory() {
@@ -421,7 +438,13 @@ function sampleGpuHistory() {
       const draw = gpu.power?.draw;
       const limit = gpu.power?.limit;
       const powerPct = Number.isFinite(draw) && Number.isFinite(limit) && limit > 0 ? Math.min(100, (draw / limit) * 100) : null;
-      gpuHistory.record(snap.id, Date.now(), gpu.usage, gpu.temperature, powerPct);
+      const devices = deviceReadings(gpu.gpus);
+      const at = Date.now();
+      const usage = gpu.metricAvailability?.usage === false ? null : gpu.usage;
+      const temperature = gpu.metricAvailability?.temperature === false ? null : gpu.temperature;
+      const pct = gpu.metricAvailability?.powerDraw === false || gpu.metricAvailability?.powerLimit === false ? null : powerPct;
+      gpuHistory.record(snap.id, at, usage, temperature, pct, devices);
+      gpuHistoryLong.record(snap.id, at, usage, temperature, pct, devices);
     }
   } catch {
     /* sampling must never break the server */
@@ -430,6 +453,7 @@ function sampleGpuHistory() {
 const gpuHistoryTimer = setInterval(sampleGpuHistory, GPU_HISTORY_SAMPLE_MS);
 gpuHistoryTimer.unref?.();
 gpuHistory.start();
+gpuHistoryLong.start();
 
 /** Record an event; never throws (callers sit in poll loops and routes). */
 function recordEvent(event) {
@@ -528,6 +552,8 @@ function startMonitor(spark) {
     // Returns null when the head is unknown/offline/model-less so workers
     // never display a stale model. Display-only; never writes to config.
     resolveHeadModelId: (headId) => monitors.get(headId)?.headLlmModelId() ?? null,
+    // Settings → Poll interval drives the collectors, not just the broadcast.
+    pollIntervalMs: getSettings().pollIntervalMs,
   });
   monitors.set(spark.id, monitor);
   monitor.start();
@@ -606,6 +632,36 @@ app.delete("/api/events", (req, res) => {
   res.json({ removed: eventLog.clear({ olderThanMs }) });
 });
 
+/**
+ * In-app restart. Only offered inside the Docker container, where the node --watch
+ * supervisor is PID 1 and the compose file's `restart: always` brings the container
+ * back; anywhere else exiting would simply stop the server.
+ */
+const restartSupported = () => {
+  try {
+    if (!fs.existsSync("/.dockerenv")) return false;
+    // The container may share the host PID namespace, so look for the supervisor by command line.
+    return fs.readFileSync(`/proc/${process.ppid}/cmdline`, "utf8").split("\0").includes("--watch");
+  } catch {
+    return false;
+  }
+};
+
+app.get("/api/restart", (_req, res) => {
+  res.json({ available: restartSupported() });
+});
+
+app.post("/api/restart", (_req, res) => {
+  if (!restartSupported()) {
+    return res.status(409).json({ error: "Restart is only available when sparkDash runs in Docker with restart: always" });
+  }
+  console.log("[sparkDash] restart requested from the UI");
+  res.json({ restarting: true });
+  // Stopping the supervisor makes the child shut down gracefully (SIGTERM) and
+  // lets Docker's restart policy start a fresh container.
+  res.on("finish", () => setTimeout(() => process.kill(process.ppid, "SIGTERM"), 200).unref());
+});
+
 app.get("/api/health", (_req, res) => {
   res.json(inspectHealth(process.env.BIND_HOST || "127.0.0.1"));
 });
@@ -655,8 +711,10 @@ app.post("/api/sparks/test", async (req, res) => {
       id: body.id || "ephemeral-test",
       name: body.name || "test",
       lanIp: body.lanIp || "",
+      llmHost: body.llmHost,
       cx7Ip: body.cx7Ip || null,
-      llmHost: body.llmHost || null,
+      platform: body.platform === "windows" ? "windows" : body.platform === "darwin" ? "darwin" : "linux",
+      kind: body.platform === "windows" ? "host" : body.kind,
       isLocal: Boolean(body.isLocal),
       role: body.role,
       workerNode: Boolean(body.workerNode),
@@ -723,6 +781,7 @@ app.patch("/api/sparks/:id", (req, res) => {
     if (
       body.lanIp != null ||
       body.llmHost != null ||
+      body.isLocal != null ||
       body.ssh?.host != null ||
       body.ssh?.user != null ||
       body.ssh?.port != null
@@ -732,6 +791,7 @@ app.patch("/api/sparks/:id", (req, res) => {
       const merged = {
         isLocal: body.isLocal ?? existing.isLocal,
         lanIp: body.lanIp ?? existing.lanIp,
+        llmHost: body.llmHost ?? existing.llmHost,
         ssh: { ...existing.ssh, ...(body.ssh || {}) },
       };
       const validationError = validateSparkTarget(merged);
@@ -782,6 +842,7 @@ app.delete("/api/sparks/:id", (req, res) => {
     launcherManager.removeSpark(req.params.id);
     launcherStatusCache.delete(req.params.id);
     gpuHistory.remove(req.params.id);
+    gpuHistoryLong.remove(req.params.id);
     toolEvalManager.removeSpark(req.params.id);
     recordEvent({
       type: "spark.removed",
@@ -812,28 +873,41 @@ app.put("/api/sparks/order", (req, res) => {
 
 // ─── Global settings ──────────────────────────────────────
 app.get("/api/settings", (_req, res) => {
-  res.json(getSettings());
+  res.json({ ...getSettings(), inferenceActivityEnabled: inferenceActivity.enabled });
 });
 
 app.put("/api/settings", (req, res) => {
   try {
     const patch = req.body || {};
     const newSettings = updateSettings(patch);
-    // If poll interval changed, restart the broadcast timer
+    // Poll interval changed: re-arm the running monitors' collector timers
+    // (in place — no restart, no lost backoff state) and the broadcast timer.
     if (patch.pollIntervalMs != null) {
+      for (const monitor of monitors.values()) {
+        monitor.setPollInterval(newSettings.pollIntervalMs);
+      }
       restartBroadcast();
     }
-    res.json(newSettings);
+    res.json({ ...newSettings, inferenceActivityEnabled: inferenceActivity.enabled });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
+// Optional gateway summaries; source URLs and labels can only be set on the server.
+app.get("/api/inference/activity", async (_req, res) => {
+  await inferenceActivity.refreshIfDue();
+  res.set("Cache-Control", "no-store").json(inferenceActivity.snapshot());
+});
+
 // Recent GPU utilization / temperature / power % for one Spark (parallel arrays), newest last.
+// Windows up to 8 h come from the dense ~2 s series; longer windows (Temps day/week) come
+// from the minute-resolution long-retention series.
 app.get("/api/sparks/:id/gpu-history", (req, res) => {
   if (!registry.getSpark(req.params.id)) return res.status(404).json({ error: "Spark not found" });
-  const windowMs = Math.min(8 * 3600_000, Math.max(60_000, Number(req.query.windowMs) || 8 * 3600_000));
-  res.json(gpuHistory.get(req.params.id, Date.now() - windowMs));
+  const windowMs = Math.min(GPU_HISTORY_MAX_WINDOW_MS, Math.max(60_000, Number(req.query.windowMs) || 8 * 3600_000));
+  const store = windowMs > GPU_HISTORY_DENSE_WINDOW_MS ? gpuHistoryLong : gpuHistory;
+  res.json(store.get(req.params.id, Date.now() - windowMs));
 });
 
 app.get("/api/sparks/:id/metrics", (req, res) => {
@@ -895,6 +969,11 @@ function launcherContext(req, res) {
   const spark = registry.getSpark(req.params.id);
   if (!spark) {
     res.status(404).json({ error: "Spark not found" });
+    return null;
+  }
+  if (spark.platform === "windows") {
+    // Launchers run bash start/stop scripts; not supported on Windows PCs (yet).
+    res.status(400).json({ error: "Starting and stopping models from sparkDash is not supported on Windows PCs" });
     return null;
   }
   return spark;
@@ -1016,8 +1095,8 @@ app.post("/api/sparks/:id/refresh/:domain", async (req, res) => {
     const monitor = monitors.get(req.params.id);
     if (!monitor) return res.status(404).json({ error: "Spark not found" });
     const { domain } = req.params;
-    if (domain !== "storage") {
-      return res.status(400).json({ error: "Only 'storage' domain is supported" });
+    if (domain !== "storage" && domain !== "llm") {
+      return res.status(400).json({ error: "Only 'storage' and 'llm' domains are supported" });
     }
     await monitor.refreshDomain(domain);
     // Broadcast updated snapshot immediately (force, ignoring the diff cache)
@@ -2061,7 +2140,8 @@ function initiateSparkShutdown(spark) {
     return spawnLocalShutdown();
   }
 
-  return sshExec(spark, SHUTDOWN_REMOTE_CMD, { timeoutMs: 8000 })
+  const shutdownCmd = spark.platform === "windows" ? "shutdown.exe /s /t 5 /c sparkDash" : SHUTDOWN_REMOTE_CMD;
+  return sshExec(spark, shutdownCmd, { timeoutMs: 8000 })
     .then(() => {
       noteShutdown();
       return "Shutdown initiated";
@@ -2728,6 +2808,18 @@ app.post("/api/sparks/:id/shutdown", async (req, res) => {
   }
 });
 
+// GPU clock cap (nvidia-smi -lgc, optionally kept across reboots by a systemd service).
+// Needs root on the unit: the local unit runs as root in the host mount namespace, a
+// remote one uses `sudo -n` as its SSH user. Same auth and limiters as power actions.
+registerGpuClockRoutes(app, {
+  manager: new GpuClockManager(),
+  registry,
+  recordEvent,
+  allowRead: (req) => allowTest(principalKey(req)),
+  allowChange: (req) => allowDestructive(principalKey(req)) && allowGlobalDestructive(clientKey(req)),
+  rejectLimited,
+});
+
 app.post("/api/sparks/:id/wake", async (req, res) => {
   try {
     const spark = registry.getSpark(req.params.id);
@@ -2770,20 +2862,41 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
   }
 });
 
+// ─── Prometheus exposition (opt-in) ──────────────────────
+// Registered after the auth middleware (a token-protected install needs the
+// scraper's bearer token) and before the SPA fallback, which would otherwise
+// answer /metrics with index.html.
+app.get("/metrics", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!getSettings().prometheusExport) {
+    return res
+      .status(404)
+      .type("text")
+      .send("Prometheus export is off. Enable it in Settings → Prometheus metrics.\n");
+  }
+  const entries = metricsEntries(registry.sparkIds.map((id) => monitors.get(id)));
+  // res.end, not res.send: send() reorders the media type parameters; keep the
+  // header exactly as the exposition format spells it.
+  res.setHeader("Content-Type", PROMETHEUS_CONTENT_TYPE);
+  res.end(renderPrometheusMetrics(entries));
+});
+
 // ─── Static files (built frontend) ───────────────────────
-const distDir = path.join(ROOT, "dist");
-const indexHtml = path.join(distDir, "index.html");
-app.use(express.static(distDir));
+const staticByDir = new Map();
+app.use((req, res, next) => {
+  const dir = resolveFrontendDir(ROOT);
+  if (!dir) return next();
+  if (!staticByDir.has(dir)) staticByDir.set(dir, express.static(dir));
+  return staticByDir.get(dir)(req, res, next);
+});
 
 // ─── SPA fallback (Express v5 wildcard) ───────────────────
 app.get("*splat", (_req, res) => {
-  if (!fs.existsSync(indexHtml)) {
-    return res
-      .status(503)
-      .type("text")
-      .send("Frontend not built. Run `npm run build` or use `npm run dev`.");
+  const dir = resolveFrontendDir(ROOT);
+  if (!dir) {
+    return res.status(503).type("text").send(FRONTEND_MISSING_MESSAGE);
   }
-  res.sendFile(indexHtml);
+  res.sendFile(path.join(dir, "index.html"));
 });
 
 // ─── Process-level safety net ─────────────────────────────
@@ -3122,6 +3235,7 @@ async function shutdown(signal) {
   try {
     clearInterval(gpuHistoryTimer);
     gpuHistory.stop();
+    gpuHistoryLong.stop();
   } catch (err) {
     console.error("[sparkDash] failed to flush GPU history:", err.message);
   }

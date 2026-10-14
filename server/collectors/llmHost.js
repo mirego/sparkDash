@@ -19,7 +19,8 @@
  * @returns {string}
  */
 export function llmProbeHost(spark) {
-  if (spark?.llmHost) return String(spark.llmHost).trim();
+  const configured = spark?.llmHost != null ? String(spark.llmHost).trim() : "";
+  if (configured) return configured;
   if (spark?.isLocal) return "127.0.0.1";
   const ip = spark?.lanIp != null ? String(spark.lanIp).trim() : "";
   return ip;

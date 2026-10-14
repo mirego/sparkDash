@@ -1,4 +1,5 @@
 import { BenchIcon } from "./components/bench/BenchIcon";
+import { setConfiguredTimeZone } from "./shared/timeZone";
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { useAppRoute, useRoute } from "./hooks/useRoute";
@@ -6,6 +7,7 @@ import { useSmoothWheel } from "./hooks/useSmoothWheel";
 import { fetchSparks, reorderSparks, fetchSettings, fetchHealth } from "./api/client";
 import { AppSidebar } from "./components/shell/AppSidebar";
 import { MobileTabBar } from "./components/shell/MobileTabBar";
+import { InstallPrompt } from "./components/shell/InstallPrompt";
 import { CommandPalette, type PaletteCommand } from "./components/shell/CommandPalette";
 import { openShowcase, showcaseTarget } from "./components/shell/sparkSummary";
 import { AddSparkDialog } from "./components/AddSparkDialog";
@@ -30,6 +32,7 @@ import {
   ListIcon,
   PanelLeftIcon,
   TokensIcon,
+  ThermometerIcon,
 } from "./components/ui/icons";
 import { ConnectionBanner } from "./components/ui/ConnectionBanner";
 import { ErrorBanner } from "./components/ui/ErrorBanner";
@@ -38,6 +41,7 @@ import {
   SHOWCASE_ID,
   ENERGY_ID,
   OVERVIEW_ID,
+  TEMPS_ID,
   TOKENS_ID,
   benchId,
   benchTypeOf,
@@ -47,6 +51,7 @@ import {
 } from "./constants";
 import { TokensPage } from "./components/TokensPage/TokensPage";
 import { EnergyPage } from "./components/EnergyPage/EnergyPage";
+import { TempsPage } from "./components/TempsPage/TempsPage";
 import { ActivityPage } from "./components/ActivityPage/ActivityPage";
 import { BenchPage } from "./components/bench/BenchPage";
 import { BENCH_SPARK_KEY, BENCH_TYPES } from "./components/bench/benchCatalog";
@@ -247,6 +252,10 @@ function DashboardApp() {
   const onPage = isPageId(activeId);
   const benchType = benchTypeOf(activeId);
   const hideWorkers = settings?.hideWorkers ?? false;
+  // Charts read the time zone from a module value; set it before the pages render, and
+  // re-key <main> below so a change in Settings redraws them.
+  const chartTimeZone = settings?.timeZone ?? "";
+  setConfiguredTimeZone(chartTimeZone);
   const hiddenWorkerIds = useMemo(() => {
     if (!hideWorkers) return new Set<string>();
     return new Set(
@@ -436,6 +445,7 @@ function DashboardApp() {
     cmds.push(
       { id: "nav:tokens", group: "Go to", label: "Token totals", hint: "Page", icon: <TokensIcon className="h-4 w-4" />, keywords: "llm tokens generated prompt cached usage", run: () => navigate(TOKENS_ID) },
       { id: "nav:energy", group: "Go to", label: "Fleet energy", hint: "Page", icon: <BoltIcon className="h-4 w-4" />, keywords: "power kwh watts cost electricity", run: () => navigate(ENERGY_ID) },
+      { id: "nav:temps", group: "Go to", label: "Temps", hint: "Page", icon: <ThermometerIcon className="h-4 w-4" />, keywords: "gpu temperature thermal temps heat cooling", run: () => navigate(TEMPS_ID) },
       { id: "nav:showcase", group: "Go to", label: "Showcase", hint: "Page", icon: <TerminalIcon className="h-4 w-4" />, keywords: "prompts terminals stream demo", run: () => navigate(SHOWCASE_ID) },
       { id: "nav:activity", group: "Go to", label: "Activity", hint: "Page", icon: <ListIcon className="h-4 w-4" />, keywords: "events log history recent", run: () => navigate(ACTIVITY_ID) }
     );
@@ -534,11 +544,13 @@ function DashboardApp() {
               stale={telemetryStale}
             />
             <ErrorBanner message={actionError} onDismiss={() => setActionError(null)} />
-            <main className={telemetryStale || !connected ? "telemetry-stale" : undefined}>
+            <main key={chartTimeZone} className={telemetryStale || !connected ? "telemetry-stale" : undefined}>
               {activeId === TOKENS_ID ? (
                 <TokensPage sparks={displaySparks} onSelectSpark={navigate} />
               ) : activeId === ENERGY_ID ? (
                 <EnergyPage sparks={displaySparks} settings={settings} onSelectSpark={navigate} />
+              ) : activeId === TEMPS_ID ? (
+                <TempsPage sparks={displaySparks} onSelectSpark={navigate} />
               ) : activeId === ACTIVITY_ID ? (
                 <ActivityPage sparks={displaySparks} onSelectSpark={navigate} />
               ) : activeId === SHOWCASE_ID ? (
@@ -551,9 +563,17 @@ function DashboardApp() {
                   hideOffline={settings?.autoHideOffline ?? false}
                   hideWorkers={hideWorkers}
                   showFleetEnergy={settings?.showFleetEnergy ?? true}
+                  showInferenceActivity={settings?.inferenceActivityEnabled === true}
                   showFleetExceptions={settings?.showFleetExceptions ?? false}
                   showOverviewSearch={settings?.showOverviewSearch ?? false}
                   showLlmTokenTotals={settings?.showLlmTokenTotals ?? true}
+                  showActivityFeed={settings?.showActivityFeed ?? true}
+                  kpis={{
+                    decode: settings?.showKpiDecode ?? true,
+                    power: settings?.showKpiPower ?? true,
+                    memory: settings?.showKpiMemory ?? true,
+                    tokens: settings?.showKpiTokens ?? true,
+                  }}
                   showVramBreakdown={settings?.showVramBreakdown ?? true}
                   temperatureUnit={settings?.temperatureUnit ?? "celsius"}
                   onSelectSpark={navigate}
@@ -592,6 +612,7 @@ function DashboardApp() {
         onAdd={() => setShowAdd(true)}
         onOpenSettings={() => setShowSettings(true)}
       />
+      <InstallPrompt />
       <CommandPalette open={showPalette} onClose={() => setShowPalette(false)} commands={paletteCommands} />
       <HermesUpdateDialog />
       <AddSparkDialog
