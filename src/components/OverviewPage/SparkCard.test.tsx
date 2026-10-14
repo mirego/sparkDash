@@ -97,12 +97,12 @@ describe("SparkCard", () => {
     expect(container.textContent).toContain("Head is offline");
   });
 
-  describe("per-request in-flight pills", () => {
-    const req = (id: string, phase: string, completionEstTokens = 1200) => ({
+  describe("per-key in-flight pills", () => {
+    const req = (id: string, phase: string, completionEstTokens = 1200, promptEstTokens = 3000) => ({
       id,
       phase,
       model: "fixture-model",
-      promptEstTokens: 3000,
+      promptEstTokens,
       completionEstTokens,
       cachedTokens: null,
       ageSec: 14,
@@ -113,32 +113,53 @@ describe("SparkCard", () => {
       return s;
     }
 
-    it("renders one pill per open request, repeating the key for multiple requests", () => {
+    it("cumulates same-key requests into ONE pill with ×N, summed tokens and input shown", () => {
       const spark = sparkWithReqs([
         { label: "sbre", openRequests: [req("r1", "streaming"), req("r2", "streaming"), req("r3", "waiting")] },
         { label: "other-key", openRequests: [req("r4", "streaming", 900)] },
       ]);
       const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
       const pills = container.querySelectorAll('[data-testid="inflight-req-pills"] .tag');
-      expect(pills).toHaveLength(4);
+      // One pill PER KEY — same-key requests never repeat the label.
+      expect(pills).toHaveLength(2);
       const labels = Array.from(pills).map((p) => p.textContent);
-      // One pill PER REQUEST: the same key prefix appears once per open request.
-      expect(labels.filter((t) => t?.startsWith("sbre"))).toHaveLength(3);
-      expect(labels.filter((t) => t?.startsWith("other-key"))).toHaveLength(1);
-      expect(labels[0]).toMatch(/^sbre · streaming · out 1\.2k · 14s$/);
-      // Pre-byte request gets the warning tone, streaming gets success.
-      expect(pills[2].className).toContain("tag--warn");
-      expect(pills[0].className).toContain("tag--good");
+      expect(labels[0]).toMatch(/^sbre ×3 · in 9\.0k · out 3\.6k · 14s$/);
+      expect(labels[1]).toMatch(/^other-key · in 3\.0k · out 900 · 14s$/);
+      // Pre-byte request in the bundle → warning tone, streaming-only → success.
+      expect(pills[0].className).toContain("tag--warn");
+      expect(pills[1].className).toContain("tag--good");
     });
 
-    it("caps visible pills and falls back to +N more", () => {
+    it("shows summed input tokens on the pill and per-request detail in the tooltip", () => {
+      const spark = sparkWithReqs([
+        {
+          label: "jaub",
+          openRequests: [
+            { ...req("r1", "streaming", 500, 1500), cachedTokens: 1000 },
+            { ...req("r2", "streaming", 500, 2500), ageSec: 30 },
+          ],
+        },
+      ]);
+      const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
+      const pill = container.querySelector('[data-testid="inflight-req-pills"] .tag')!;
+      // 1500 + 2500 prompt tokens, summed with cached split out.
+      expect(pill.textContent).toMatch(/in 4\.0k \(1\.0k cached · 25%\) · out 1\.0k · 30s/);
+      // Tooltip carries one bullet line per underlying request.
+      const title = pill.getAttribute("title") ?? "";
+      expect(title).toContain("jaub ×2");
+      expect(title).toContain("• streaming · in 1.5k (1.0k cached) · out 500 · 14s");
+      expect(title).toContain("• streaming · in 2.5k · out 500 · 30s");
+    });
+
+    it("cumulates a same-key burst into a single ×N pill (no +N overflow when under max keys)", () => {
       const spark = sparkWithReqs([
         { label: "burst", openRequests: Array.from({ length: 8 }, (_, i) => req(`r${i}`, "streaming")) },
       ]);
       const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
       const pills = container.querySelectorAll('[data-testid="inflight-req-pills"] .tag');
-      expect(pills).toHaveLength(7); // 6 visible + "+2 more"
-      expect(pills[6].textContent).toBe("+2 more");
+      // All 8 requests share one key -> ONE cumulated pill, nothing hidden.
+      expect(pills).toHaveLength(1);
+      expect(pills[0].textContent).toMatch(/^burst ×8 · in 24k · out 9\.6k · 14s$/);
     });
 
     it("renders no pill row when there is no in-flight traffic", () => {

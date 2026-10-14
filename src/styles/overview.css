@@ -570,6 +570,15 @@
   display: none;
 }
 
+/* In-flight request pills: a long pill must shrink inside the card (ellipsis),
+   never push past the card edge. Tooltip carries the full detail. */
+.ov .tag.ov-pill {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Side cards */
 .ov .ov-card {
   display: flex;

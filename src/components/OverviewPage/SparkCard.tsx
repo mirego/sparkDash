@@ -391,9 +391,11 @@ function SparkCardImpl({
 }
 
 /**
- * Per-request in-flight pills shared by the Overview Spark card and the Spark
- * page LLM panel header. One pill PER OPEN REQUEST — a key with several
- * requests appears once per request (gilfoyle's requirement). Visual language
+ * Per-key in-flight pills shared by the Overview Spark card and the Spark
+ * page LLM panel header. One pill PER KEY — concurrent requests from the
+ * same key are cumulated into a single pill (×N) with summed token
+ * estimates, so several same-key requests no longer look like duplicate
+ * pills. Per-request detail lives in the pill tooltip. Visual language
  * mirrors the LlmPanel per-user pills: pre-byte = warning tone, streaming =
  * success. Capped with a +N fallback so sbre bursts can't blow out layout.
  */
@@ -417,40 +419,107 @@ export function InflightReqPills({
       (u.openRequests || []).map((r) => ({ ...r, label: u.label })),
     ) ?? [];
   if (openReqs.length === 0) return null;
-  const visibleReqs = openReqs.slice(0, max);
-  const hiddenReqs = openReqs.length - visibleReqs.length;
+
+  // Cumulate same-key requests into one pill per label: ×N + summed tokens.
+  const byKey = new Map<
+    string,
+    {
+      label: string;
+      count: number;
+      promptEstTokens: number | null;
+      completionEstTokens: number | null;
+      cachedTokens: number | null;
+      maxTokens: number | null;
+      oldestAgeSec: number | null;
+      anyWaiting: boolean;
+      phase: string;
+      reqs: Array<typeof openReqs[number]>;
+    }
+  >();
+  for (const r of openReqs) {
+    const agg = byKey.get(r.label) ?? {
+      label: r.label,
+      count: 0,
+      promptEstTokens: null,
+      completionEstTokens: null,
+      cachedTokens: null,
+      maxTokens: null,
+      oldestAgeSec: null,
+      anyWaiting: false,
+      phase: "streaming",
+      reqs: [],
+    };
+    agg.count += 1;
+    agg.promptEstTokens = (agg.promptEstTokens ?? 0) + (Number(r.promptEstTokens) || 0) || agg.promptEstTokens;
+    agg.completionEstTokens =
+      (agg.completionEstTokens ?? 0) + (Number(r.completionEstTokens) || 0) || agg.completionEstTokens;
+    if (r.cachedTokens != null) {
+      agg.cachedTokens = (agg.cachedTokens ?? 0) + Number(r.cachedTokens);
+    }
+    if (r.maxTokens != null) {
+      agg.maxTokens = (agg.maxTokens ?? 0) + Number(r.maxTokens);
+    }
+    if (r.ageSec != null) {
+      agg.oldestAgeSec = Math.max(agg.oldestAgeSec ?? 0, Number(r.ageSec));
+    }
+    if (r.phase === "waiting") agg.anyWaiting = true;
+    if (agg.count === 1) agg.phase = r.phase || "streaming";
+    else if (r.phase !== "waiting" && agg.phase === "waiting") agg.phase = r.phase;
+    agg.reqs.push(r);
+    byKey.set(r.label, agg);
+  }
+  const pills = Array.from(byKey.values());
+  const visiblePills = pills.slice(0, max);
+  const hiddenReqs = openReqs.length - visiblePills.reduce((s, p) => s + p.count, 0);
   return (
     <div className="ov-chips" data-testid={testId}>
-      {visibleReqs.map((r) => {
-        const out = fmtK(r.completionEstTokens) ?? "0";
-        const age = r.ageSec != null ? `${r.ageSec}s` : "?";
-        const phase = r.phase === "waiting" ? "pre-byte" : r.phase || "streaming";
-        const tone: TagTone = r.phase === "waiting" ? "warn" : "good";
-        const cachedL = fmtK(r.cachedTokens);
-        const cachePct =
-          r.cacheHitPct != null && Number.isFinite(Number(r.cacheHitPct))
-            ? `${Math.round(Number(r.cacheHitPct))}%`
-            : null;
+      {visiblePills.map((p) => {
+        const out = fmtK(p.completionEstTokens) ?? "0";
+        const age = p.oldestAgeSec != null ? `${Math.round(p.oldestAgeSec)}s` : "?";
+        // Tone mirrors request state: any pre-byte request in the bundle warns.
+        const tone: TagTone = p.anyWaiting ? "warn" : "good";
+        const cachedL = fmtK(p.cachedTokens);
+        const cachePct = p.cachedTokens != null && p.promptEstTokens != null && p.promptEstTokens > 0
+          ? `${Math.round((Number(p.cachedTokens) / Number(p.promptEstTokens)) * 100)}%`
+          : null;
         const inBits =
-          r.promptEstTokens == null
+          p.promptEstTokens == null
             ? null
             : cachedL != null
-              ? `in ${fmtK(r.promptEstTokens)} (${cachedL} cached${cachePct ? ` · ${cachePct}` : ""})`
-              : `in ${fmtK(r.promptEstTokens)}`;
+              ? `in ${fmtK(p.promptEstTokens)} (${cachedL} cached${cachePct ? ` · ${cachePct}` : ""})`
+              : `in ${fmtK(p.promptEstTokens)}`;
+        const models = [...new Set(p.reqs.map((r) => r.model ?? "unknown model"))];
+        const phase =
+          p.count === 1
+            ? p.phase === "waiting"
+              ? "pre-byte"
+              : p.phase || "streaming"
+            : p.anyWaiting
+              ? "pre-byte + streaming"
+              : "streaming";
         const title = [
-          `${r.label} · ${phase === "pre-byte" ? "pre-byte (no first token yet)" : "streaming"}`,
-          `${r.model ?? "unknown model"}`,
-          [inBits, `out ${out}${r.maxTokens != null ? ` / max ${fmtK(r.maxTokens)}` : ""}`]
+          `${p.label}${p.count > 1 ? ` ×${p.count}` : ""} · ${phase}`,
+          models.length === 1 ? models[0] : models.join(" / "),
+          [inBits, `out ${out}${p.maxTokens != null ? ` / max ${fmtK(p.maxTokens)}` : ""}`]
             .filter(Boolean)
             .join(" · "),
-          `${age} in flight`,
-          r.ttftSec != null ? `TTFT ${r.ttftSec}s` : null,
+          p.count > 1 ? `oldest ${age} in flight` : `${age} in flight`,
+          ...p.reqs.map((r) => {
+            const rIn =
+              r.promptEstTokens == null
+                ? null
+                : r.cachedTokens != null
+                  ? `in ${fmtK(r.promptEstTokens)} (${fmtK(r.cachedTokens)} cached)`
+                  : `in ${fmtK(r.promptEstTokens)}`;
+            return `• ${r.phase === "waiting" ? "pre-byte" : r.phase || "streaming"} · ${rIn ?? "in ?"} · out ${fmtK(r.completionEstTokens) ?? "0"} · ${r.ageSec != null ? `${Math.round(r.ageSec)}s` : "?"}${r.ttftSec != null ? ` · TTFT ${r.ttftSec}s` : ""}`;
+          }),
         ]
           .filter(Boolean)
-          .join(" · ");
+          .join("\n");
         return (
-          <Tag key={`${r.label}:${r.id}`} tone={tone} title={title} className="font-tabular">
-            {r.label} · {phase} · out {out} · {age}
+          <Tag key={p.label} tone={tone} title={title} className="font-tabular ov-pill">
+            {p.label}
+            {p.count > 1 ? ` ×${p.count}` : ""} · {inBits ? `${inBits} · ` : ""}out {out} · {age}
           </Tag>
         );
       })}
