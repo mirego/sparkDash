@@ -11,6 +11,16 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.0.3] — 2026-10-14
+
+### Added
+- **GPU clock cap from Edit unit (upstream 2.40.1 line, PR #17).** Spark units get a **GPU clock cap** section (Linux Spark units only): cap the graphics clock with `nvidia-smi -lgc 0,MAX`, optionally **keep it after reboot** with a systemd service (`spark-gpu-clock-limit.service`), or remove it again. API: `GET|PUT|DELETE /api/sparks/:id/gpu-clock`. Sync also brings the upstream **Temps page** (day/week GPU temperature graphs), TensorFold slot reporting, and the 2.40.1 fix line (110 upstream commits, custom features preserved, upstream workflows dropped).
+
+### Changed
+- **Per-key in-flight pills (PR #18, t_7c339f35).** In-flight pills on the Overview Spark card and the Spark page LLM panel now cumulate **one pill per API key** instead of per open request: same-key requests render as a single `×N` pill with summed token estimates, oldest age, and per-request detail in the tooltip. Tone rules preserved (any pre-byte request → warning, streaming-only → success); `+N` cap counts hidden requests across truncated keys.
+
+---
+
 ## [2.0.2] — 2026-10-11
 
 ### Changed
