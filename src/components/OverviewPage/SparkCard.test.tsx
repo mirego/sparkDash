@@ -162,6 +162,25 @@ describe("SparkCard", () => {
       expect(pills[0].textContent).toMatch(/^burst ×8 · in 24k · out 9\.6k · 14s$/);
     });
 
+    it("renders pill labels from the api-key prefix only, never a full key (d-002)", () => {
+      const spark = sparkWithReqs([
+        {
+          // Prefix form: `sbre` is the masked prefix; a full key would look
+          // like `sbre-<secret>` and must never reach a pill label.
+          label: "sbre",
+          openRequests: [req("r1", "streaming"), req("r2", "streaming")],
+        },
+      ]);
+      const { container } = render(<SparkCard spark={spark} temperatureUnit="celsius" />);
+      const pills = [...container.querySelectorAll('[data-testid="inflight-req-pills"] .tag')];
+      expect(pills).toHaveLength(1);
+      const label = pills[0].textContent ?? "";
+      // Label is the prefix form (×N cumulation + token/age suffix), not the
+      // `<prefix>-<secret>` full-key shape.
+      expect(label.startsWith("sbre ×")).toBe(true);
+      expect(label.startsWith("sbre-")).toBe(false);
+    });
+
     it("renders no pill row when there is no in-flight traffic", () => {
       const { container } = render(<SparkCard spark={makeSpark("a")} temperatureUnit="celsius" />);
       expect(container.querySelector('[data-testid="inflight-req-pills"]')).toBeNull();
