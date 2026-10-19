@@ -338,6 +338,29 @@ test("probe: newer TensorFold (live rates in /health, totals on /metrics) → re
   assert.equal(snap.mtpAcceptanceRate, 0.7);
 });
 
+test("probe: a decode rate reported in /health is not replaced by the /metrics counter diff", async () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8888);
+  const health = { status: "ok", max_batch_size: 4, live: { connections: 1, waiting: 0, decode_tokens_per_second: 33.5 } };
+  let total = 1000;
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/slots")) return notFound();
+    if (u.endsWith("/v1/models")) return jsonRes(CUDA_MODELS);
+    if (u.endsWith("/health")) return jsonRes(health);
+    if (u.endsWith("/metrics")) {
+      const txt = `tensorfold:generation_tokens_total ${total}\ntensorfold:generation_tokens_running 0\ntensorfold:prompt_tokens_total 10`;
+      return { ok: true, status: 200, text: async () => txt, json: async () => ({}) };
+    }
+    return notFound();
+  };
+  await probe.probe();
+  total = 5000;
+  probe.lastProbeTime = Date.now() - 2000;
+  const snap = await probe.probe();
+  assert.equal(snap.totalOutputTokens, 5000);
+  assert.equal(snap.generationTps, 33.5);
+});
+
 test("probe: TensorFold with cumulative counters in /health does not touch /metrics", async () => {
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8888);
   const seen = [];
@@ -416,4 +439,41 @@ test("_applyTensorFoldHealth: prefillActive follows streams.prefilling and the l
   probe._tensorfoldLastPrefill.at -= 60_000;
   probe._applyTensorFoldHealth(h(3000, 12, 1), 2);
   assert.equal(probe.prefillTps, 0);
+});
+
+test("_applyTensorFoldMetrics: /metrics-only builds get decode tok/s from total + running tokens", async () => {
+  // tensorfold-native (Zig engine): /health is only {"status": "ok"}, every counter is on /metrics.
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8888);
+  let sample = { total: 1000, running: 0 };
+  probe._fetch = async (url) => {
+    if (!String(url).endsWith("/metrics")) return notFound();
+    const txt = [
+      `tensorfold:generation_tokens_total ${sample.total}`,
+      `tensorfold:generation_tokens_running ${sample.running}`,
+      "tensorfold:prompt_tokens_total 5000",
+      `tensorfold:requests_running ${sample.running > 0 ? 1 : 0}`,
+    ].join("\n");
+    return { ok: true, status: 200, text: async () => txt };
+  };
+
+  // First sample seeds the baseline: a lifetime total is not a rate.
+  await probe._applyTensorFoldMetrics(2);
+  assert.equal(probe.generationTps, 0);
+  assert.equal(probe.totalOutputTokens, 1000);
+
+  // A request is decoding; the finished total has not moved yet.
+  sample = { total: 1000, running: 100 };
+  await probe._applyTensorFoldMetrics(2);
+  assert.equal(probe.generationTps, 50);
+  assert.equal(probe.slotsActive, 1);
+
+  // It finishes: its 150 tokens move into the total, no spike from the handover.
+  sample = { total: 1150, running: 0 };
+  await probe._applyTensorFoldMetrics(2);
+  assert.equal(probe.generationTps, 25);
+  assert.equal(probe.totalOutputTokens, 1150);
+
+  // Idle again.
+  await probe._applyTensorFoldMetrics(2);
+  assert.equal(probe.generationTps, 0);
 });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { SparkSnapshot } from "../../api/types";
+import type { AlertInstance, SparkSnapshot } from "../../api/types";
 import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, updateAllHermes, wakeAllSparks } from "../../api/client";
 import { ShutdownAll } from "../ShutdownAll";
@@ -30,6 +30,9 @@ interface OverviewPageProps {
   /** Opt-in server capability; absent sources add no card or polling. */
   showInferenceActivity?: boolean;
   showFleetExceptions?: boolean;
+  /** Alert notifications on: the exceptions strip lists `serverAlerts` instead of deriving its own. */
+  alertsEnabled?: boolean;
+  serverAlerts?: AlertInstance[] | null;
   showOverviewSearch?: boolean;
   /** Overview LLM token totals card (cumulative tokens per model). */
   showLlmTokenTotals?: boolean;
@@ -52,6 +55,8 @@ export function OverviewPage({
   showFleetEnergy = true,
   showInferenceActivity = false,
   showFleetExceptions = false,
+  alertsEnabled = false,
+  serverAlerts = null,
   showOverviewSearch = false,
   showLlmTokenTotals = true,
   showActivityFeed = true,
@@ -348,7 +353,14 @@ export function OverviewPage({
         </div>
       </div>
 
-      <FleetAlertStrip sparks={sparks} onSelect={onSelectSpark} showExceptions={showFleetExceptions} temperatureUnit={temperatureUnit} />
+      <FleetAlertStrip
+        sparks={sparks}
+        onSelect={onSelectSpark}
+        showExceptions={showFleetExceptions}
+        temperatureUnit={temperatureUnit}
+        alertsEnabled={alertsEnabled}
+        serverAlerts={serverAlerts}
+      />
 
       {showOverviewSearch ? (
         <div className="ov-search" role="search" aria-label="Filter fleet units">

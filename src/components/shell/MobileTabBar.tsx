@@ -4,9 +4,10 @@ import { createPortal } from "react-dom";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { useInertBackground } from "../../hooks/useInertBackground";
 import type { SparkSnapshot } from "../../api/types";
-import { ACTIVITY_ID, ENERGY_ID, OVERVIEW_ID, SHOWCASE_ID, TEMPS_ID, TOKENS_ID, benchId, benchTypeOf, isPageId } from "../../constants";
+import { ACTIVITY_ID, ENERGY_ID, OVERVIEW_ID, SHOWCASE_ID, TEMPS_ID, TOKENS_ID, benchId, benchTypeOf, isPageId, toolId, toolTypeOf } from "../../constants";
 import { BENCH_TYPES } from "../bench/benchCatalog";
-import { BoltIcon, ChartIcon, GearIcon, GridIcon, ListIcon, PlusIcon, ServerIcon, TerminalIcon, ThermometerIcon, TokensIcon } from "../ui/icons";
+import { TOOL_TYPES } from "../tools/toolsCatalog";
+import { BoltIcon, ChartIcon, GearIcon, GridIcon, ListIcon, MicroscopeIcon, PlusIcon, ServerIcon, TerminalIcon, ThermometerIcon, TokensIcon } from "../ui/icons";
 import { isThrottling, railSubLabel } from "./sparkSummary";
 import { ShutdownAll } from "../ShutdownAll";
 
@@ -91,7 +92,7 @@ export function MobileTabBar({ sparks, activeId, onSelect, onAdd, onOpenSettings
         <button
           type="button"
           className={tabIndex === 2 ? "is-active" : ""}
-          aria-current={activeId === TOKENS_ID || activeId === ENERGY_ID || activeId === TEMPS_ID || activeId === ACTIVITY_ID ? "page" : undefined}
+          aria-current={statsActive ? "page" : undefined}
           onClick={() => openSheet("stats")}
           aria-haspopup="dialog"
         >
@@ -122,6 +123,24 @@ export function MobileTabBar({ sparks, activeId, onSelect, onAdd, onOpenSettings
                     ] as const).map(([id, label, icon]) => pageButton(id, label, icon))
                   ) : (
                     <>
+                  <div className="rail-label rail-label--spaced">
+                    <span>Tools</span>
+                  </div>
+                  {TOOL_TYPES.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className={`rail-item rail-item--compact ${toolTypeOf(activeId) === t.id ? "is-active" : ""}`}
+                      aria-current={toolTypeOf(activeId) === t.id ? "page" : undefined}
+                      onClick={() => {
+                        setSheet(false);
+                        onSelect(toolId(t.id));
+                      }}
+                    >
+                      <MicroscopeIcon className="h-3.5 w-3.5" />
+                      <span className="rail-item__name">{t.label}</span>
+                    </button>
+                  ))}
                   <div className="rail-label rail-label--spaced">
                     <span>Benchmarks</span>
                   </div>

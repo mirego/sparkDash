@@ -35,6 +35,12 @@ const DEFAULT_PATHS = Object.freeze({
   systemdRunDir: "/run/systemd/system",
   nvsmi: NVSMI_CANDIDATES,
   systemctl: "systemctl",
+  // true = the script is run by a person in a terminal on the unit: plain `sudo` (asks for the
+  // password), readable output, non-zero exit on failure.
+  manual: false,
+  // true = a sudo password arrives in $SPARKDASH_SUDO_PW (set by the runner from stdin) and
+  // every privileged step pipes it to `sudo -S`; it is never put in an argument list.
+  password: false,
   // Test sandbox only: run unprivileged against fake binaries and a temp tree.
   sandbox: false,
 });
@@ -50,6 +56,21 @@ function resolvePaths(overrides = {}) {
     }
   }
   return p;
+}
+
+/**
+ * A sudo password typed in the dashboard. It is only ever sent on stdin. Returns the
+ * string, or null when none was given; throws 400 for anything that is not a plain line.
+ * @param {unknown} v
+ * @returns {string | null}
+ */
+export function parseSudoPassword(v) {
+  if (v === undefined || v === null || v === "") return null;
+  // eslint-disable-next-line no-control-regex
+  if (typeof v !== "string" || v.length > 256 || /[\r\n\u0000]/.test(v)) {
+    throw Object.assign(new Error("sudoPassword must be a single line of at most 256 characters"), { status: 400 });
+  }
+  return v;
 }
 
 /**
@@ -100,12 +121,37 @@ export function buildUnit({ minMHz, maxMHz, nvsmi = "/usr/bin/nvidia-smi", runDi
   ].join("\n");
 }
 
+/** The sudo gate: with a typed password a refusal means a wrong password, otherwise missing NOPASSWD. */
+function needSudoLine(paths) {
+  if (!paths.password) {
+    return 'need_sudo || fail no-sudo "passwordless sudo (NOPASSWD: ALL) is required for the user that runs the change"';
+  }
+  return [
+    "need_sudo || { case \"$SUDO_ERR\" in",
+    '  __missing__) fail no-sudo "sudo is not installed on this unit" ;;',
+    '  "") fail bad-password "the sudo password was not accepted" ;;',
+    '  *"incorrect password"*|*"Sorry, try again"*|*"password is required"*|*"Authentication failure"*) fail bad-password "the sudo password was not accepted" ;;',
+    '  *) fail no-sudo "sudo refused the request: $(clean "$SUDO_ERR")" ;;',
+    "esac; }",
+  ].join("\n");
+}
+
 function header(paths) {
   const nv = paths.nvsmi.map((c) => `"${c}"`).join(" ");
   return [
     "set -u",
+    // Read the password into a plain shell variable and drop it from the environment first
+    // thing, so nothing this script starts (not even `id`) inherits it.
+    ...(paths.password
+      ? [
+          "PW=${SPARKDASH_SUDO_PW-}",
+          "unset SPARKDASH_SUDO_PW",
+          "spw_sudo() { printf '%s\\n' \"$PW\" | LC_ALL=C sudo -S -p '' \"$@\"; }",
+        ]
+      : []),
     'SUDO=""',
-    paths.sandbox ? ":" : '[ "$(id -u)" = 0 ] || SUDO="sudo -n"',
+    paths.sandbox ? ":" : `[ "$(id -u)" = 0 ] || SUDO="${paths.password ? "spw_sudo" : paths.manual ? "sudo" : "sudo -n"}"`,
+
     `SYSTEMCTL=${paths.systemctl}`,
     `OWNER="${paths.sandbox ? "" : "-o root -g root"}"`,
     `UNIT=${paths.unitDir}/${UNIT_NAME}`,
@@ -114,11 +160,19 @@ function header(paths) {
     `BOOTID_FILE=${paths.bootIdFile}`,
     "NV=''",
     `for c in ${nv}; do if [ -x "$c" ]; then NV="$c"; break; fi; done`,
-    "fail() { printf 'RESULT=error\\nCODE=%s\\nMSG=%s\\n' \"$1\" \"$2\"; exit 0; }",
+    paths.manual
+      ? "fail() { printf 'Error: %s\\n' \"$2\" >&2; exit 1; }"
+      : "fail() { printf 'RESULT=error\\nCODE=%s\\nMSG=%s\\n' \"$1\" \"$2\"; exit 0; }",
     'digits() { tr -dc 0-9; }',
+    'clean() { printf "%s" "$1" | head -n 1 | tr -cd "A-Za-z0-9 .,:_()/-" | head -c 160; }',
     'hwmax() { "$NV" --query-gpu=clocks.max.gr --format=csv,noheader,nounits 2>/dev/null | head -n 1 | digits; }',
     'bootid() { tr -dc "0-9a-fA-F-" < "$BOOTID_FILE" 2>/dev/null | head -c 64; }',
-    'need_sudo() { [ -z "$SUDO" ] && return 0; command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }',
+    paths.password
+      ? // Why a refusal happened matters: only a wrong password counts toward the lock.
+        "need_sudo() { SUDO_ERR=''; [ -z \"$SUDO\" ] && return 0; command -v sudo >/dev/null 2>&1 || { SUDO_ERR=__missing__; return 1; }; SUDO_ERR=$(printf '%s\\n' \"$PW\" | LC_ALL=C sudo -k -S -p '' true 2>&1 >/dev/null) && return 0; return 1; }"
+      : paths.manual
+      ? 'need_sudo() { [ -z "$SUDO" ] && return 0; command -v sudo >/dev/null 2>&1 && sudo -v; }'
+      : 'need_sudo() { [ -z "$SUDO" ] && return 0; command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }',
     // Removes a previous service (a stale one would re-apply the old cap at boot).
     "drop_service() {",
     '  if [ -f "$UNIT" ]; then',
@@ -170,7 +224,7 @@ export function buildApplyProgram({ minMHz, maxMHz, persist }, overrides = {}) {
     "HW=$(hwmax)",
     '[ -n "$HW" ] || fail no-gpu "could not read the GPU maximum clock"',
     '[ "$MAX" -le "$HW" ] || fail range "the cap is above this GPU\'s maximum clock ($HW MHz)"',
-    'need_sudo || fail no-sudo "passwordless sudo (NOPASSWD: ALL) is required for the user that runs the change"',
+    needSudoLine(paths),
     `if [ "$PERSIST" = 1 ] && [ ! -d ${paths.systemdRunDir} ]; then fail no-systemd "systemd is not running on this unit"; fi`,
     // Order matters: nothing existing is touched until the new cap has been accepted by nvidia-smi.
     'lgc() { $SUDO "$NV" -lgc "$MIN,$MAX"; }',
@@ -212,7 +266,9 @@ export function buildApplyProgram({ minMHz, maxMHz, persist }, overrides = {}) {
     `  [ "$($SYSTEMCTL is-active ${UNIT_NAME} 2>/dev/null)" = active ] || { rollback; fail service-failed "the service is not active; the cap applies until the next reboot"; }`,
     '  write_marker || fail marker-failed "could not record the cap"',
     "fi",
-    "printf 'RESULT=ok\\nCAP=%s\\nPERSIST=%s\\n' \"$MAX\" \"$PERSIST\"",
+    paths.manual
+      ? "if [ \"$PERSIST\" = 1 ]; then printf 'Done: GPU clock capped at %s MHz and kept after reboot (spark-gpu-clock-limit.service).\\n' \"$MAX\"; else printf 'Done: GPU clock capped at %s MHz until the next reboot.\\n' \"$MAX\"; fi"
+      : "printf 'RESULT=ok\\nCAP=%s\\nPERSIST=%s\\n' \"$MAX\" \"$PERSIST\"",
     "exit 0",
     "",
   ].join("\n");
@@ -224,11 +280,11 @@ export function buildResetProgram(overrides = {}) {
   return [
     ...header(paths),
     '[ -n "$NV" ] || fail no-nvidia "nvidia-smi was not found on this unit"',
-    'need_sudo || fail no-sudo "passwordless sudo (NOPASSWD: ALL) is required for the user that runs the change"',
+    needSudoLine(paths),
     'drop_service || fail service-failed "could not remove the existing service"',
     '$SUDO "$NV" -rgc >/dev/null 2>&1 || fail rgc-failed "nvidia-smi could not reset the clocks"',
     '$SUDO rm -f "$MARKER" || fail marker-failed "could not clear the recorded cap"',
-    "printf 'RESULT=ok\\n'",
+    paths.manual ? "printf 'Done: GPU clock cap removed.\\n'" : "printf 'RESULT=ok\\n'",
     "exit 0",
     "",
   ].join("\n");
@@ -254,4 +310,37 @@ export function parseProgramOutput(out) {
     return { RESULT: "error", CODE: "bad-output", MSG: "the unit returned an unexpected answer" };
   }
   return res;
+}
+
+/**
+ * A paste-into-a-terminal command that runs the apply/reset program on the unit by hand.
+ * Same program the dashboard runs, but with plain `sudo` (prompts for the password) and
+ * readable output. It is written to a private temp file first so `sudo` can read the
+ * terminal, and the text is plain sh the person can read before running it.
+ * @param {"apply" | "reset"} action
+ * @param {{ minMHz?: number, maxMHz?: number, persist?: boolean }} [req]
+ */
+export function buildManualCommand(action, req = {}, overrides = {}) {
+  const manual = { ...overrides, manual: true };
+  let program;
+  if (action === "apply") {
+    const r = parseCapRequest(req);
+    program = buildApplyProgram(r, manual);
+  } else if (action === "reset") {
+    program = buildResetProgram(manual);
+  } else {
+    throw Object.assign(new Error("action must be apply or reset"), { status: 400 });
+  }
+  const what = action === "apply"
+    ? `cap the GPU clock at ${req.maxMHz} MHz${req.persist === true ? " and keep it after reboot" : ""}`
+    : "remove the GPU clock cap and its boot service";
+  return [
+    "# sparkDash: run this on the Spark itself. It will ask for your sudo password.",
+    `# It will ${what}. Read it first; nothing is sent anywhere.`,
+    'f=$(mktemp) && cat > "$f" <<\'SPARKDASH_SCRIPT_EOF\'',
+    program.replace(/\n$/, ""),
+    "SPARKDASH_SCRIPT_EOF",
+    'sh "$f"; rc=$?; rm -f "$f"; [ "$rc" = 0 ]',
+    "",
+  ].join("\n");
 }

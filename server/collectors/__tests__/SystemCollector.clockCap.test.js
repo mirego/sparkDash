@@ -89,3 +89,9 @@ test("_readLocalClockCap: finds the marker under the host root mount (Docker)", 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("parseClockCap: a bare boot_id that starts with digits is not a cap", () => {
+  assert.equal(parseClockCap("139dcc9e-1111-2222-3333-444455556666"), null);
+  assert.equal(parseClockCap("12345678-1111-2222-3333-444455556666\n"), null);
+  assert.equal(parseClockCap(`1800 139dcc9e-1111-2222-3333-444455556666\n139dcc9e-1111-2222-3333-444455556666`), 1800);
+});
