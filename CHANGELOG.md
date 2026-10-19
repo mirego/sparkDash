@@ -7,6 +7,13 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.1.0] — 2026-10-19
+
+### Changed
+- **Upstream sync v2.50.0 (PR #20, t_82453e23).** Ported upstream 2.50.0 into `release/custom`, all custom features preserved and upstream workflow files dropped. Highlights: Intel Arc (xe) GPU support with opt-in debugfs sudo read; alert notifications (tab badge + desktop) over Health findings and Overview exceptions with escaped Slack text; a per-unit History panel (48 h / 30 d tiers) on the 2.0 unit page; rolling 24 h/6 h/1 h token ranges with per-machine rows and a corrected "Tokens in last 24 hours" label; TensorFold `/metrics`-only decode tok/s fix; tool-eval run comparison card; secrets-file robustness (never overwrite an unreadable secrets file, keep undecryptable alert URLs); GPU clock-cap marker and collector fixes; back-to-overview links and dialog-overlay drag fix.
+
+---
+
 ## [2.0.4] — 2026-10-17
 
 ### Fixed
