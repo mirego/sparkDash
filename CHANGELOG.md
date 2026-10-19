@@ -7,9 +7,10 @@ Format: version sections are listed newest first.
 
 ---
 
-## [Unreleased]
+## [2.0.4] — 2026-10-17
 
----
+### Fixed
+- **apikey-display e2e retarget (PR #19, t_7fe89bde).** Test 2 awaited the removed Model Fleet panel on Overview; it now data-drives the expected key label from `/api/models/fleet` and asserts a prefix-masked pill on the Overview Spark card's `inflight-req-pills`. Unblocks the nightly e2e run.
 
 ## [2.0.3] — 2026-10-14
 
