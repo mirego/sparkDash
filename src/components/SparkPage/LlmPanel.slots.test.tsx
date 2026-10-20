@@ -16,3 +16,15 @@ describe("TensorFold slot tile", () => {
     expect(slotGroup?.children[1]?.textContent).toBe(`${active ?? "?"} / 8`);
   });
 });
+
+describe("Radiance engine tiles", () => {
+  it("shows the vLLM-format KV cache tile", () => {
+    const llm = { ...makeSpark().metrics.llm[0], backend: "radiance" as const, kvCacheUsage: 0.25, kvCacheTokens: 1_087_768, ttftP95Seconds: 0.4 };
+    const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} llmHost={null} lanIp="10.0.0.1" />);
+    // Fork 2.0 shell: engine metrics render as label+value groups (MetricInfoTip),
+    // not upstream's sp-tile markup — assert the same tiles by their labels.
+    const labels = [...container.querySelectorAll(".sp-tile__label > span")].map((el) => el.textContent);
+    expect(labels).toContain("KV Cache");
+    expect(labels).toContain("TTFT p95");
+  });
+});
