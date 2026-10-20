@@ -71,9 +71,10 @@ async function wsSnapshot(page: Page): Promise<{
 
 /**
  * Keys with at least one OPEN request right now, across every Spark in the
- * snapshot (llm[].activeUsers[].openRequests[].label — the exact rows
- * InflightReqPills renders). A key with no open request must never be expected
- * as a pill label.
+ * snapshot (llm[].activeUsers[].openRequests — the exact rows InflightReqPills
+ * renders; note the pill label comes from the activeUser's `label`, the
+ * auth-proxy key prefix — openRequests entries carry no label of their own).
+ * A key with no open request must never be expected as a pill label.
  */
 async function liveInflightKeys(page: Page): Promise<string[]> {
   const snap = await wsSnapshot(page);
@@ -81,10 +82,9 @@ async function liveInflightKeys(page: Page): Promise<string[]> {
   for (const spark of snap.sparks ?? []) {
     for (const entry of spark.metrics?.llm ?? []) {
       for (const user of entry.activeUsers ?? []) {
-        const open = (user.openRequests ?? []).filter((r) => r && r.label);
-        if (open.length === 0) continue;
-        const label = open[0].label as string;
-        if (!keys.includes(label)) keys.push(label);
+        const open = (user.openRequests ?? []).filter((r) => r && typeof r === "object");
+        if (open.length === 0 || !user.label) continue;
+        if (!keys.includes(user.label)) keys.push(user.label);
       }
     }
   }
