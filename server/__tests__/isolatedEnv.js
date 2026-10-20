@@ -41,6 +41,8 @@ export const CONFIG_PATH_VARS = [
   "MODEL_REGISTRY_STATE_PATH",
   "CPA_STATUS_PATH",
   "ALERTS_JSON_PATH",
+  "MODEL_PRICES_JSON_PATH",
+  "MODEL_PRICES_FETCH",
 ];
 
 /** Variables that point at a directory the server writes into. */
