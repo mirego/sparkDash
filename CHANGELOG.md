@@ -7,6 +7,32 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.2.0] — 2026-10-20
+
+### Added
+- **Cost compare page (upstream #241).** Fleet usage priced as any hosted model, so local serving can be compared against hosted per-token pricing.
+- **Strata engine monitoring.** Strata backends are recognised by the LLM probe; decode and prefill rates come from engine gauges, prefill is shown outside batch slots, and the sidebar shows engine activity with alias context preserved. A remembered Strata is replaced when another server answers `/health`.
+- **Radiance engine monitoring.** Radiance backends are recognised and their live decode/prefill rates read from engine gauges; engine tiles are shown for Radiance.
+- **Engine parallel slot count on the unit card.** Units whose engine reports requests now show `N running · M queued · S slots` (with a tooltip explaining the decode parallelism) instead of hiding capacity behind "N running".
+- **`MAX_ACTIVE_BENCH_JOBS`** sets the fleet-wide benchmark cap.
+- **Tool Eval scenario list** can expand to a taller view.
+
+### Fixed
+- Exit when the HTTP server cannot bind, instead of idling without serving.
+- Seed token counters on the first poll after a probe outage instead of reporting lifetime totals as a rate.
+- Clamp llama.cpp token deltas per slot so one restarting slot does not zero the rate.
+- Read the TensorFold queue from `/metrics` for rich-`/health` builds (queue-only), and keep a live `waiting` count over the `/metrics` queue gauge.
+- Label concurrent decode streams with stable request IDs in the bench.
+- vLLM prefill tok/s excludes prefix-cache hits.
+- Quality-bench saved runs are listed and compared across all ports.
+- Temps page plot is clipped like the GPU history chart, and GPU history buckets stay stable while scrolling.
+- Skip serialising the snapshot when no dashboard is connected.
+
+### Changed
+- **Upstream sync #4 (PR #21, t_525628cd).** True two-parent merge of upstream `be35be9` (27 commits, v2.32.0-138) into `release/custom`; all custom features preserved, upstream workflow files dropped.
+
+---
+
 ## [2.1.0] — 2026-10-19
 
 ### Changed
