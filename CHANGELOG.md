@@ -7,6 +7,21 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.0] — 2026-10-23
+
+### Added
+- **Overview cards show the CPU temperature and CPU power (upstream #243).** On a Spark the CPU runs hotter than the GPU under the same load, but the cards only showed the GPU temperature. Two bars (CPU temp, CPU power) follow the GPU bars, with the same 75/80 °C colours and the sensor kind in the tooltip, and they are hidden when a unit reports no CPU sensor or power reading.
+
+### Fixed
+- **Cache hit rate is no longer a fake 0 % on engines that never publish a cached-token counter (upstream #245).** Token totals credit `cachedTokens` from the engine's cumulative counters, so a backend that reports the prefix-cache split only per response credited nothing forever and the Token page's **Cache hit rate** tile read `0 %` / "The prefix cache saved nothing" while the engine was in fact serving most of the prompt from its cache. The ledger now stores whether the split was measured at all (`cacheReported`, on each model row, UTC day and hour bucket, in `GET /api/llm-token-totals` and `/history`); rows written by earlier versions fall back to the endpoint's live counter and to the cached tokens they already hold, and the tile, the tables and the insight render `—` with "This engine does not report prefix-cache hits" instead of a zero that looks like a cache bug. A measured zero (prefix caching off) still reads `0 %`.
+- **`docker compose up --build` no longer builds an arm64 image on other hosts (upstream #247).** The `build.platforms: [linux/arm64]` pin is gone, so Docker detects the host platform: a Spark still builds and runs the arm64 image and an x86 host builds a native amd64 one. Both architectures stay supported — `docker-compose.multiarch.yml` builds `linux/arm64` + `linux/amd64` into one manifest list, and a service-level `platform: ${DOCKER_DEFAULT_PLATFORM:-}` pins build and container platform together for single-architecture cross-builds.
+
+### Changed
+- **Upstream sync #5 (PR #24, t_c7e26a19).** True two-parent merge of upstream `448944c5` (4 commits) into `release/custom`; all custom features preserved, upstream workflow files dropped. One reconciliation on top: `CpuMetrics.temperature` is nullable on `release/custom`, so the upstream CPU-temperature bar uses a `cpuMetrics?.temperature != null` guard instead of `Number.isFinite`.
+- **api-key-display e2e derives its expected key from live in-flight state (PR #23, t_242cd25c).** The Overview Spark-card pills test no longer hardcodes the fleet key: it reads the in-flight request's `apiKeyPrefix` from the live fleet API, so it stays green when the served model (and therefore the key in flight) changes.
+
+---
+
 ## [2.2.0] — 2026-10-20
 
 ### Added
