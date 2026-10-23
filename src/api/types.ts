@@ -1829,6 +1829,12 @@ export interface TokenHistoryRow {
   completionTokens: number;
   /** Prompt tokens served from the prefix cache (always <= promptTokens). */
   cachedTokens: number;
+  /**
+   * Whether the backend measured the cache split for this bucket. `false` means the
+   * engine publishes no prefix-cache counter, so `cachedTokens` is not a miss count.
+   * Absent on data recorded before the flag existed (treated as reported).
+   */
+  cacheReported?: boolean;
 }
 
 export interface TokenHistory {
