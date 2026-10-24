@@ -404,7 +404,7 @@ export function OverviewPage({
             );
           })}
         </div>
-        <FleetKpis sparks={visibleSparks} snapshotKey={sparks} show={kpis} />
+        <FleetKpis sparks={sparks} snapshotKey={sparks} show={kpis} />
         {showFleetEnergy || showLlmTokenTotals || showActivityFeed || showInferenceActivity ? (
         <div className="ov-side">
           {showInferenceActivity ? <InferenceTrafficCard /> : null}
