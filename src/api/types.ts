@@ -222,7 +222,12 @@ export interface GpuThrottle {
   detail: string;
 }
 
-/** GET /api/sparks/:id/gpu-clock: the GPU clock cap (`nvidia-smi -lgc`) and its boot service. */
+/** What keeps a cap across reboots on a unit: the systemd unit where passwordless
+ *  sudo reaches a root shell, the user's `@reboot` cron line where it does not, or
+ *  nothing at all. */
+export type GpuClockPersistKind = "unit" | "cron" | "none";
+
+/** GET /api/sparks/:id/gpu-clock: the GPU clock cap (`nvidia-smi -lgc`) and its boot hook. */
 export type GpuClockStatus =
   | { supported: false; reason?: string }
   | {
@@ -235,6 +240,8 @@ export type GpuClockStatus =
       passwordAllowed?: boolean;
       /** "root" runs directly, "yes" = passwordless sudo works, "no" = it does not. */
       sudo: "root" | "yes" | "no";
+      /** What "keep after reboot" would install on this unit. */
+      persistKind: GpuClockPersistKind;
       service: {
         installed: boolean;
         /** "min,max" the service applies at boot. */
@@ -242,7 +249,21 @@ export type GpuClockStatus =
         enabled: string | null;
         active: string | null;
       };
+      /** The fallback where the boot service cannot be installed. */
+      cron: {
+        installed: boolean;
+        /** "min,max" the @reboot job applies at boot. */
+        clocks: string | null;
+        /** The job ran at this boot and could not re-apply the cap. */
+        failed: boolean;
+      };
     };
+
+/** POST /api/sparks/gpu-clock-all: per-unit outcome of a fleet-wide cap or reset. */
+export type FleetGpuClockResult =
+  | { id: string; ok: true; capMHz: number | null; persistKind: GpuClockPersistKind }
+  | { id: string; ok: true; supported: false; reason: string }
+  | { id: string; ok: false; error: string };
 
 /** One health finding for a Spark (server rules in server/health/HealthEvaluator.js). */
 export interface HealthFinding {
@@ -455,7 +476,11 @@ export interface LlmMetrics {
   /** The LLM port this snapshot came from — lets the UI match panels to probes by port, not array position. */
   port?: number;
   available: boolean;
-  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "strata" | "flare" | null;
+  /** False when the endpoint answered but this poll's stats could not be read: its rates are unknown, not zero. */
+  measurementValid?: boolean;
+  /** Why the last poll's stats could not be read; null while they can. */
+  measurementError?: string | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "strata" | "flare" | "locals" | "splash" | null;
   /** How the monitor reaches the engine: its own address, or an SSH forward when only SSH gets there. */
   via?: "direct" | "ssh-tunnel";
   modelId: string | null;
@@ -855,6 +880,8 @@ export interface SparkSnapshot {
     level: "ok" | "warn" | "danger";
     badges: HealthBadge[];
   };
+  /** Harness sessions by LLM port. Absent until the occupancy poller has a projection. */
+  conversations?: Record<string, ConversationRow[]>;
 }
 
 // ─── WebSocket envelope ───────────────────────────────────
@@ -1217,6 +1244,77 @@ export interface Settings {
   metricsHistory?: boolean;
   /** Alert notifications (Settings → Alerts). Off by default; while off nothing is evaluated or sent. */
   alertsEnabled?: boolean;
+  /** Publish the activity feed and per-unit readings to an MQTT broker. Off by default. */
+  mqttEnabled: boolean;
+  /** Broker URL: mqtt://, mqtts://, ws:// or wss://. */
+  mqttUrl: string;
+  /** Broker username, if any; the password comes from SPARKDASH_MQTT_PASSWORD. */
+  mqttUsername: string;
+  /** Topic root for everything published (events, status, metrics). */
+  mqttTopicPrefix: string;
+  /**
+   * Hide harness sessions older than this. Finite: 1 minute through 14 days.
+   * Missing or out of range becomes 12 hours.
+   */
+  occupancyMaxAgeMs: number;
+}
+
+export type OccupancyBadge = "unknown" | "generating" | "stalled";
+
+export interface ConversationRow {
+  id: string;
+  source: string;
+  handle: string;
+  badge: OccupancyBadge;
+  port: number;
+  routingProvenance?: string;
+  stale?: boolean;
+  lastUsedAt?: number;
+  agent?: string;
+  contextUsed?: number | null;
+  contextWindow?: number | null;
+  contextApprox?: boolean;
+}
+
+export interface OccupancyRoute {
+  harness: string;
+  sparkId: string;
+  port: number;
+  cwdPrefix?: string;
+}
+
+export interface OccupancyHelper {
+  id: string;
+  label: string;
+  url: string;
+  enabled: boolean;
+  harnesses: string[];
+  routes: OccupancyRoute[];
+  hasToken: boolean;
+}
+
+export interface OccupancyHelperInput {
+  id?: string;
+  label?: string;
+  url: string;
+  enabled?: boolean;
+  harnesses: string[];
+  routes: OccupancyRoute[];
+  token?: string;
+}
+
+export interface OccupancyAdapterSummary {
+  coverage: "supported" | "unsupported" | "unavailable" | "partial" | string;
+  stale: boolean;
+  rows: number;
+  error: string | null;
+}
+
+export interface OccupancyCheck {
+  ok: boolean;
+  observedAt: number;
+  adapters: Record<string, OccupancyAdapterSummary>;
+  rowCount: number;
 }
 
 // ─── Unit history (GET /api/sparks/:id/history) ──────────
