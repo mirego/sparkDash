@@ -7,6 +7,24 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.1] — 2026-10-25
+
+### Changed
+- **Upstream sync #6 (PR #26, t_6bd91b95).** True two-parent merge of upstream `2c736a7261` (38 commits, 160 files) into `release/custom`; all custom features preserved, upstream workflow files dropped (the increment contained zero workflow commits). Conflict decisions: `package.json` keeps `version` (train-owned bump) plus our `undici ^8.11.2` security bump and `@playwright/test` e2e tooling, and takes upstream's `test:server` glob list (upstream deletes `server/vulnhunt/__tests__/`); `server/__tests__/isolatedEnv.js` keeps every fork-only path var and `CPA_REQUEST_LOG_DIR`, drops the four vulnhunt/rea vars upstream no longer reads. The auto-merge dragged upstream's `2.70.1` into `package-lock.json`; both lock versions were reset by hand.
+- **Per-stream decode and effective prefill tok/s (upstream).** Spark cards and the LLM panel now show the per-stream decode rate alongside the fleet decode rate.
+- **TensorFold `/metrics` latency, cache and KV metrics (upstream).** TensorFold backends report their engine gauges in the LLM panel.
+- **Bench sampling controls (upstream).** Decode benches record temperature and a thinking on/off switch; cross-run comparison warns about mixed sampling settings.
+- **Overview fleet KPI counts hidden cluster workers (upstream).** The Overview tiles now count workers hidden behind a cluster instead of dropping them.
+- **History panel moved into the hardware column (upstream).** On the Spark page the history panels render in the left hardware column, gated on `metricsHistory`.
+- **Busy-GPU process naming (upstream).** Spark cards and launcher hints name the process holding the GPU, composed with the fork's existing busy-holder hints.
+- **darwin (macOS) collectors (upstream).** APFS capacity, BSD network counters and the macmon SoC name; these are inert on this Linux fleet.
+- **NVIDIA Flare detection, tooleval cross-Spark run comparison, cost catalog fixes, contributor docs (upstream).**
+
+### Removed
+- **Security scans (VulnHunter) and REA / reverse-engineering tools are gone from this build.** Upstream deliberately reverts VulnHunter, REA and their tools pages, styles and settings — 84 files deleted, `/api/vulnhunt` and `/api/rea` route registration removed, tools page/nav and palette commands removed. This is a user-visible feature removal, reported rather than silently reversed: nothing upstream removed was re-added.
+
+---
+
 ## [2.3.0] — 2026-10-23
 
 ### Added
