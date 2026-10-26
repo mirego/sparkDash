@@ -68,7 +68,7 @@
     "react-i18next": "17.0.15",
     "tailwindcss": "^4.3.2",
     "typescript": "^7.0.2",
-    "vite": "^8.1.4",
+    "vite": "^8.3.5",
     "vitest": "^5.0.0"
   },
   "overrides": {
