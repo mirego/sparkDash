@@ -7,6 +7,24 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.2] — 2026-10-26
+
+### Added
+- **MQTT publishing (upstream sync #7, PR #29, t_87e0bf7d).** A Settings toggle publishes fleet state to an MQTT broker: broker URL, username, topic prefix (`sparkdash` by default) and password (`SPARKDASH_MQTT_PASSWORD`). Per-unit metrics, events and availability are published, with publish hardening and reconnect handling. Off by default; `mqttEnabled: false` until a broker is configured. **This adds a new runtime dependency (`mqtt ^5.16.1`), so it ships as a full image rebuild** — the publisher is a hard top-level import and the server fails to boot if the module is missing.
+- **Fleet-wide GPU clock cap from Settings (upstream).** One row caps the graphics clock (`nvidia-smi -lgc`) on every Spark at once — Full capacity or 1800–2400 MHz — with an optional boot hook so the cap survives reboot. Boot-hook reconciliation with a cron fallback and serialized boot jobs; units that offer neither a root shell nor a cron service are reported as "applies until next reboot", and offline or GPU-less units are skipped and reported. On this fleet the row correctly reports both units as having no boot hook.
+- **Occupancy harness sessions (upstream).** One helper per host surfaces harness conversation sessions in the LLM panel's ConversationList.
+- **Locals + Splash engine recognition (upstream).** Both backends are recognised with live decode and prefill rates, and the fork's engine-metric strips now render for them.
+- **Settings language foundation (upstream).** An English-catalog i18n foundation with a language selector in Settings.
+
+### Fixed
+- **Measurement gaps are gaps, not zeros (upstream).** An unreadable poll now records a gap in every LLM series (tps, prefill, and the fork's running/waiting history) instead of dipping to zero.
+- **llmlaunch macOS/BSD fixes (upstream).** These are inert on this Linux fleet.
+
+### Changed
+- **Upstream sync #7 (PR #29, t_87e0bf7d).** True two-parent merge of upstream `b0458477` (44 commits) into `release/custom` at `322884c`; all custom features preserved, no upstream `.github/` content in range. Seven conflict files composed rather than taken wholesale: `package.json` keeps the fork version and `undici ^8.11.2` while adding upstream's `mqtt`; `package-lock.json` regenerated from the fork base; `server/collectors/LlmProbe.js` carries both the fork's TTFT rolling window and upstream's measurement-validity fields; `server/index.js` keeps the fork's async `forceBroadcast` and gains `publishMqttFleet()`; `src/api/types.ts` keeps both optional fields; `LlmPanel.tsx` unions both imports; `metricsStore.ts` wraps the fork's history series in upstream's gap guard. Upstream's Locals/Splash tests were adapted to the fork markup (same data assertions, fork labels).
+
+---
+
 ## [2.3.1] — 2026-10-25
 
 ### Changed
