@@ -7,6 +7,16 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.3] — 2026-11-02
+
+### Added
+- **Decode bench deep-context start (upstream sync #8, PR #30, card t_ff59f5eb).** The decode bench can now start at a deep context (16k+ presets): streams are prefilled to the chosen context first, then decode from there. Start context shows in the run status, per-level results (`ctx 16k`), the share text/card, and bench history (`16k start ctx`). New `contextFill.js` collector + `DecodeBench.context` tests.
+
+### Changed
+- **Dependency bumps (dependabot).** body-parser 2.3.0→2.4.0 (PR #27), undici 8.11.2→8.12.3 (PR #28), @vitest/mocker + vitest (PR #25).
+
+---
+
 ## [2.3.2] — 2026-10-26
 
 ### Added
