@@ -5,15 +5,117 @@
  * Uses execFile + argv arrays (no shell interpolation of user/host/cmd).
  * Password auth uses sshpass -e (password via env), not -p on the command line.
  */
+import { powershellCommand } from "./windowsMetrics.js";
 import { execFile } from "child_process";
+import crypto from "crypto";
 import fs from "fs";
-import { COMFY_PORT, COMFY_PROBE_TIMEOUT_MS, SSH_CONNECT_TIMEOUT } from "../config.js";
-import { isAllowedTargetHost, isValidSshUser } from "../validate.js";
+import {
+  COMFY_PORT,
+  COMFY_PROBE_TIMEOUT_MS,
+  SSH_CONNECT_TIMEOUT,
+  SSH_MULTIPLEX,
+} from "../config.js";
+import { isAllowedTargetHost, isValidSshUser, normalizeSshPort } from "../validate.js";
 import { llmProbeHost } from "./llmHost.js";
 
 // Detect sshpass without shelling out to `which` on every cold call —
 // checking PATH entries directly is faster and avoids spawning a shell.
 let _sshpassAvailable = null;
+const _multiplexStates = new Map();
+// Keep the private directory short even on macOS, where TMPDIR can already
+// consume most of a Unix socket's 104-byte path limit.
+const _controlDir = fs.mkdtempSync("/tmp/sparkdash-ssh-");
+const _controlSalt = crypto.randomBytes(32);
+fs.chmodSync(_controlDir, 0o700);
+
+function controlPersistSeconds() {
+  const configured = Number.parseInt(
+    process.env.SSH_CONTROL_PERSIST_SECONDS ?? process.env.SSH_CONTROL_PERSIST ?? "60",
+    10
+  );
+  return Number.isFinite(configured) ? Math.min(3600, Math.max(0, configured)) : 60;
+}
+
+function ensureControlDir() {
+  fs.mkdirSync(_controlDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(_controlDir, 0o700);
+}
+
+/**
+ * Build an isolated OpenSSH control socket config. Credentials are included
+ * only in the digest so two password records cannot share an authenticated
+ * transport; the secret itself is never exposed in argv or the socket path.
+ */
+export function sshMultiplexConfig(spark, targetHost, user, auth, password, port = 22) {
+  const persistSeconds = controlPersistSeconds();
+  if (persistSeconds === 0) return null;
+
+  ensureControlDir();
+  const identityFile = process.env.SSH_IDENTITY_FILE || "default";
+  const sshPort = normalizeSshPort(port) ?? 22;
+  const isolationKey = [spark.id, user, targetHost, String(sshPort), auth || "key", identityFile, password || ""].join(
+    "\0"
+  );
+  const digest = crypto
+    .createHash("sha256")
+    .update(_controlSalt)
+    .update(isolationKey)
+    .digest("hex")
+    .slice(0, 24);
+  return {
+    key: digest,
+    persistSeconds,
+    args: [
+      "-o",
+      "ControlMaster=auto",
+      "-o",
+      `ControlPersist=${persistSeconds}`,
+      "-o",
+      `ControlPath=${_controlDir}/${digest}`,
+    ],
+  };
+}
+
+/** Establish or re-check the master before concurrent pollers run. */
+export async function ensureMultiplexReady(config, establish) {
+  if (!config) return;
+
+  const now = Date.now();
+  let state = _multiplexStates.get(config.key);
+  if (state && now >= state.expiresAt) {
+    _multiplexStates.delete(config.key);
+    state = null;
+  }
+
+  if (!state) {
+    state = {
+      ready: Promise.resolve().then(establish),
+      expiresAt: now + config.persistSeconds * 1000,
+    };
+    _multiplexStates.set(config.key, state);
+  }
+
+  try {
+    await state.ready;
+  } catch (err) {
+    if (_multiplexStates.get(config.key) === state) _multiplexStates.delete(config.key);
+    throw err;
+  }
+}
+
+/** Forget cached readiness after a multiplexed command fails. */
+export function invalidateMultiplex(config) {
+  if (config) _multiplexStates.delete(config.key);
+}
+
+process.once("exit", () => {
+  try {
+    fs.rmSync(_controlDir, { recursive: true, force: true });
+  } catch {
+    // ControlPersist bounds any master left behind by an abrupt shutdown.
+  }
+});
+
 function sshpassAvailable() {
   if (_sshpassAvailable !== null) return _sshpassAvailable;
   try {
@@ -55,21 +157,29 @@ function sshpassAvailable() {
 }
 
 /**
- * Execute a command on a remote Spark via SSH.
+ * Build file/args/env for an ssh (or sshpass) invocation. No shell interpolation.
  *
- * @param {Object} spark - Spark config object
- * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
- * @param {{ timeoutMs?: number }} [options]
- * @returns {Promise<string>} - Trimmed stdout
+ * `extraSshArgs` sit after the shared ConnectTimeout / StrictHostKeyChecking
+ * options and before `-- user@host`. `remoteArgv` is the remote command (omit
+ * for `-N` tunnels).
+ *
+ * Pass `multiplex: false` for invocations that need a connection of their own
+ * — a `-N` port forward has to own its channel so that killing the process
+ * tears the forward down with it.
+ *
+ * @param {object} spark
+ * @param {{ extraSshArgs?: string[], remoteArgv?: string[], multiplex?: boolean }} [opts]
+ * @returns {{ file: string, args: string[], env: NodeJS.ProcessEnv, targetHost: string, sshPort: number }}
  */
-export async function sshExec(spark, cmd, options = {}) {
-  const timeoutMs =
-    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
-  const { host, user, auth, password } = spark.ssh || {};
-  const targetHost = host || spark.lanIp;
+export function sshCommandSpec(spark, opts = {}) {
+  const extraSshArgs = Array.isArray(opts.extraSshArgs) ? opts.extraSshArgs : [];
+  const remoteArgv = Array.isArray(opts.remoteArgv) ? opts.remoteArgv : [];
+  const { host, user, auth, password } = spark?.ssh || {};
+  const targetHost = host || spark?.lanIp;
+  const sshPort = normalizeSshPort(spark?.ssh?.port) ?? 22;
 
   if (!targetHost || !user) {
-    throw new Error(`SSH config missing for ${spark.id}: host=${targetHost}, user=${user}`);
+    throw new Error(`SSH config missing for ${spark?.id}: host=${targetHost}, user=${user}`);
   }
 
   if (!isAllowedTargetHost(targetHost)) {
@@ -79,10 +189,6 @@ export async function sshExec(spark, cmd, options = {}) {
     throw new Error(`SSH user not allowed: ${user}`);
   }
 
-  if (typeof cmd !== "string" || !cmd) {
-    throw new Error("SSH command must be a non-empty string");
-  }
-
   // Base SSH options (no shell metacharacters in argv)
   // accept-new: trust first-seen host key (LAN ops); pin known_hosts for stricter envs
   const baseOpts = [
@@ -90,11 +196,21 @@ export async function sshExec(spark, cmd, options = {}) {
     `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o",
     "StrictHostKeyChecking=accept-new",
+    "-p",
+    String(sshPort),
   ];
 
   const remote = `${user}@${targetHost}`;
-  // Remote command as a single argument — ssh does not invoke a local shell for it
-  // when using execFile without a shell. `--` stops option parsing before destination.
+  const multiplex =
+    opts.multiplex === false || !SSH_MULTIPLEX
+      ? null
+      : sshMultiplexConfig(spark, targetHost, user, auth, password, sshPort);
+  // The readiness gate and command must use the same socket and persistence.
+  // Explicitly disable both creating and joining a master when reuse is off,
+  // including when a user's ssh_config enables multiplexing independently.
+  const controlOpts =
+    multiplex?.args ?? ["-o", "ControlMaster=no", "-o", "ControlPath=none"];
+  // `--` stops option parsing before destination.
   let file;
   let args;
   // Minimal child env — only what ssh/sshpass actually need. Spreading the full
@@ -123,23 +239,106 @@ export async function sshExec(spark, cmd, options = {}) {
     // Password via env (sshpass -e) — never on argv or in process list as -p
     env.SSHPASS = password;
     file = "sshpass";
-    args = ["-e", "ssh", ...baseOpts, "--", remote, cmd];
+    args = [
+      "-e",
+      "ssh",
+      ...baseOpts,
+      ...controlOpts,
+      ...extraSshArgs,
+      "--",
+      remote,
+      ...remoteArgv,
+    ];
   } else {
     // Key-based SSH (default) — BatchMode prevents hanging on missing keys
     file = "ssh";
-    args = [...baseOpts, "-o", "BatchMode=yes", "--", remote, cmd];
+    args = [...baseOpts, ...controlOpts, "-o", "BatchMode=yes"];
+    const identityFile = process.env.SSH_IDENTITY_FILE;
+    if (identityFile) {
+      args.push("-i", identityFile);
+    }
+    args.push(...extraSshArgs, "--", remote, ...remoteArgv);
   }
 
-  return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        const msg = stderr?.trim() || err.message;
-        reject(new Error(`SSH to ${targetHost} failed: ${msg}`));
-      } else {
-        resolve(String(stdout).trim());
+  return { file, args, env, targetHost, multiplex, sshPort };
+}
+
+/**
+ * A Windows OpenSSH server runs commands through cmd.exe, which has no `true`,
+ * `cat` or `/proc`. Say so instead of leaving a cmd.exe error as the whole story.
+ * On a Windows unit, a refused key gets the administrator-account gotcha: sshd ignores
+ * ~/.ssh/authorized_keys for administrators.
+ */
+export function explainSshFailure(message, { windows = false } = {}) {
+  if (/is not recognized as an internal or external command/i.test(message)) {
+    return `${message} (this looks like a Windows host: set the Unit type to "Windows PC with an NVIDIA GPU" in the unit's settings.)`;
+  }
+  if (windows && /permission denied \(.*publickey/i.test(message)) {
+    return `${message} (if this Windows user is an administrator, sshd ignores ~/.ssh/authorized_keys and reads C:\\ProgramData\\ssh\\administrators_authorized_keys, which only Administrators and SYSTEM may write.)`;
+  }
+  return message;
+}
+
+/**
+ * Execute a command on a remote Spark via SSH.
+ *
+ * @param {Object} spark - Spark config object
+ * @param {string} cmd - Command to execute (passed as a single remote argv via bash -c)
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<string>} - Trimmed stdout
+ */
+/** The single remote argv for a command: PowerShell-encoded on Windows units, as written elsewhere. */
+export function remoteArgvFor(spark, cmd) {
+  return [spark?.platform === "windows" ? powershellCommand(cmd) : cmd];
+}
+
+export async function sshExec(spark, cmd, options = {}) {
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 10000;
+
+  if (typeof cmd !== "string" || !cmd) {
+    throw new Error("SSH command must be a non-empty string");
+  }
+
+  // Windows OpenSSH hands the command to cmd.exe or PowerShell, never bash.
+  const isWindows = spark?.platform === "windows";
+  const { file, args, env, targetHost, multiplex, sshPort } = sshCommandSpec(spark, {
+    remoteArgv: remoteArgvFor(spark, cmd),
+  });
+
+  const execute = (execArgs) =>
+    new Promise((resolve, reject) => {
+      const child = execFile(file, execArgs, { timeout: timeoutMs, env, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) {
+          const msg = stderr?.trim() || err.message;
+          reject(new Error(`SSH to ${targetHost}:${sshPort} failed: ${explainSshFailure(msg, { windows: isWindows })}`));
+        } else {
+          resolve(String(stdout).trim());
+        }
+      });
+      // Windows PowerShell can wait for stdin to close; nothing is ever sent on it.
+      if (isWindows) child.stdin?.end();
+      // `options.input` travels on stdin only (never argv, never the environment), e.g. a
+      // sudo password for one action. Ignored for the multiplex readiness probe.
+      else if (typeof options.input === "string" && execArgs === args) {
+        child.stdin?.on("error", () => {});
+        child.stdin?.end(options.input);
       }
     });
-  });
+
+  if (multiplex) {
+    const probeArgs = [...args];
+    probeArgs[probeArgs.length - 1] = isWindows ? powershellCommand("exit 0") : "true";
+    await ensureMultiplexReady(multiplex, () => execute(probeArgs));
+  }
+  try {
+    return await execute(args);
+  } catch (err) {
+    // The master can die after readiness but before this exec. Never trust
+    // cached state after a transport failure; the next caller must re-probe.
+    invalidateMultiplex(multiplex);
+    throw err;
+  }
 }
 
 /**

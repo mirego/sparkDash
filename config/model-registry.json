@@ -1,0 +1,253 @@
+{
+  "version": 1,
+  "nodes": {
+    "A": {
+      "host": "127.0.0.1",
+      "name": "anton",
+      "pin": ""
+    },
+    "B": {
+      "host": "192.168.100.11",
+      "name": "son-of-anton",
+      "pin": ""
+    },
+    "C": {
+      "host": "192.168.101.11",
+      "name": "son-of-anton-2",
+      "pin": ""
+    }
+  },
+  "models": [
+    {
+      "id": "deepseek-v4-flash-0731",
+      "aliases": [
+        "deepseek-v4-flash-dspark",
+        "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "DeepSeek-V4-Flash-0731",
+        "claude-deepseek-v4-flash-0731"
+      ],
+      "capability": [
+        "general",
+        "fast"
+      ],
+      "engine": "vllm",
+      "recipe": "DeepSeek-v4-Flash-DSpark-2x-DGX-Spark",
+      "weights": "hf://deepseek-ai/DeepSeek-V4-Flash-0731",
+      "quantization": "",
+      "hbm_gb": 90.0,
+      "tensor_parallel": 2,
+      "min_healthy": 1,
+      "node_ports": [
+        {
+          "node": "A",
+          "host": "127.0.0.1",
+          "port": 8888,
+          "pin": "anton",
+          "host_port": "127.0.0.1:8888"
+        },
+        {
+          "node": "B",
+          "host": "192.168.100.11",
+          "port": 8888,
+          "pin": "son-of-anton",
+          "host_port": "192.168.100.11:8888"
+        }
+      ]
+    },
+    {
+      "id": "glm-5.3",
+      "aliases": [
+        "LibertAIDAI/GLM-5.3-Flash-NVFP4",
+        "glm-5.3-flash",
+        "glm-5.3-flash-nvfp4",
+        "glm53",
+        "claude-glm-5.3"
+      ],
+      "capability": [
+        "general",
+        "long-context"
+      ],
+      "engine": "vllm",
+      "recipe": "GLM-5.3-Flash-NVFP4-Dual-DGX-Spark",
+      "weights": "hf://LibertAIDAI/GLM-5.3-Flash-NVFP4",
+      "quantization": "nvfp4",
+      "hbm_gb": 90.0,
+      "tensor_parallel": 2,
+      "min_healthy": 1,
+      "node_ports": [
+        {
+          "node": "A",
+          "host": "127.0.0.1",
+          "port": 8888,
+          "pin": "anton",
+          "host_port": "127.0.0.1:8888"
+        },
+        {
+          "node": "B",
+          "host": "192.168.100.11",
+          "port": 8888,
+          "pin": "son-of-anton",
+          "host_port": "192.168.100.11:8888"
+        }
+      ]
+    },
+    {
+      "id": "glm-5.3-exl3",
+      "aliases": [
+        "GLM-5.3-Flash-EXL3",
+        "glm-5.3-flash-exl3",
+        "glm53-exl3",
+        "claude-glm-5.3-exl3"
+      ],
+      "capability": [
+        "general",
+        "long-context"
+      ],
+      "engine": "vllm",
+      "recipe": "GLM-5.3-Flash-EXL3-2x-DGX-Sparks",
+      "weights": "hf://Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw",
+      "quantization": "exl3",
+      "hbm_gb": 90.0,
+      "tensor_parallel": 2,
+      "min_healthy": 1,
+      "node_ports": [
+        {
+          "node": "A",
+          "host": "127.0.0.1",
+          "port": 8888,
+          "pin": "anton",
+          "host_port": "127.0.0.1:8888"
+        },
+        {
+          "node": "B",
+          "host": "192.168.100.11",
+          "port": 8888,
+          "pin": "son-of-anton",
+          "host_port": "192.168.100.11:8888"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-27b",
+      "aliases": [
+        "RadixArk/Qwen3.8-27B-NVFP4",
+        "Qwen3.8-27B-NVFP4",
+        "qwen3.8-27b-sglang",
+        "claude-qwen3.8-27b-sglang"
+      ],
+      "capability": [
+        "general",
+        "long-context"
+      ],
+      "engine": "sglang",
+      "recipe": "Qwen3.8-27B-SGLang-DGX-Spark",
+      "weights": "hf://RadixArk/Qwen3.8-27B-NVFP4",
+      "quantization": "nvfp4",
+      "hbm_gb": 100.0,
+      "tensor_parallel": 1,
+      "min_healthy": 1,
+      "node_ports": [
+        {
+          "node": "A",
+          "host": "127.0.0.1",
+          "port": 8888,
+          "pin": "anton",
+          "host_port": "127.0.0.1:8888"
+        },
+        {
+          "node": "B",
+          "host": "192.168.100.11",
+          "port": 8888,
+          "pin": "son-of-anton",
+          "host_port": "192.168.100.11:8888"
+        }
+      ]
+    },
+    {
+      "id": "ornith-1.5",
+      "aliases": [
+        "ornith-1.5-35b-a3b-nvfp4",
+        "Ornith-1.5-35B-A3B-NVFP4",
+        "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+        "claude-ornith-1.5",
+        "claude-ornith-1.5-35b-a3b-nvfp4"
+      ],
+      "capability": [
+        "general",
+        "long-context"
+      ],
+      "engine": "vllm",
+      "recipe": "Ornith-1.5-35B-A3B-DGX-Spark",
+      "weights": "hf://ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+      "quantization": "nvfp4",
+      "hbm_gb": 100.0,
+      "tensor_parallel": 1,
+      "min_healthy": 1,
+      "node_ports": [
+        {
+          "node": "A",
+          "host": "127.0.0.1",
+          "port": 8888,
+          "pin": "anton",
+          "host_port": "127.0.0.1:8888"
+        },
+        {
+          "node": "B",
+          "host": "192.168.100.11",
+          "port": 8888,
+          "pin": "son-of-anton",
+          "host_port": "192.168.100.11:8888"
+        }
+      ]
+    }
+  ],
+  "routing": {
+    "aliases": {
+      "default": [
+        "deepseek-v4-flash-0731",
+        "qwen3.8-27b"
+      ],
+      "long-context": [
+        "qwen3.8-27b"
+      ]
+    }
+  },
+  "alias_to_id": {
+    "deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "deepseek-v4-flash-dspark": "deepseek-v4-flash-0731",
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
+    "DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
+    "claude-deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "glm-5.3": "glm-5.3",
+    "LibertAIDAI/GLM-5.3-Flash-NVFP4": "glm-5.3",
+    "glm-5.3-flash": "glm-5.3",
+    "glm-5.3-flash-nvfp4": "glm-5.3",
+    "glm53": "glm-5.3",
+    "claude-glm-5.3": "glm-5.3",
+    "glm-5.3-exl3": "glm-5.3-exl3",
+    "GLM-5.3-Flash-EXL3": "glm-5.3-exl3",
+    "glm-5.3-flash-exl3": "glm-5.3-exl3",
+    "glm53-exl3": "glm-5.3-exl3",
+    "claude-glm-5.3-exl3": "glm-5.3-exl3",
+    "qwen3.8-27b": "qwen3.8-27b",
+    "RadixArk/Qwen3.8-27B-NVFP4": "qwen3.8-27b",
+    "Qwen3.8-27B-NVFP4": "qwen3.8-27b",
+    "qwen3.8-27b-sglang": "qwen3.8-27b",
+    "claude-qwen3.8-27b-sglang": "qwen3.8-27b",
+    "ornith-1.5": "ornith-1.5",
+    "ornith-1.5-35b-a3b-nvfp4": "ornith-1.5",
+    "Ornith-1.5-35B-A3B-NVFP4": "ornith-1.5",
+    "ornith-ai/Ornith-1.5-35B-A3B-NVFP4": "ornith-1.5",
+    "claude-ornith-1.5": "ornith-1.5",
+    "claude-ornith-1.5-35b-a3b-nvfp4": "ornith-1.5"
+  },
+  "capability_to_models": {
+    "default": [
+      "deepseek-v4-flash-0731",
+      "qwen3.8-27b"
+    ],
+    "long-context": [
+      "qwen3.8-27b"
+    ]
+  }
+}

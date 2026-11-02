@@ -12,22 +12,89 @@ const GPU_MEMORY_JSON_PATH =
 /** Encrypted SSH password store (never served by API; lives on config volume). */
 const SPARKS_SECRETS_PATH =
   process.env.SPARKS_SECRETS_PATH || path.join(ROOT, "config", "sparks-secrets.json");
+/** Persistent lifetime token counters across sparkDash restarts (per spark:port). */
+const TOKEN_LIFETIMES_PATH =
+  process.env.TOKEN_LIFETIMES_PATH || path.join(ROOT, "config", "token-lifetimes.json");
 /** AES key file (auto-generated if SPARKDASH_SECRETS_KEY unset). */
 const SECRETS_KEY_PATH =
   process.env.SECRETS_KEY_PATH || path.join(ROOT, "config", ".secrets-key");
+/** Daily LLM tok/s rollups (gitignored). */
+const LLM_DAILY_JSON_PATH =
+  process.env.LLM_DAILY_JSON_PATH || path.join(ROOT, "config", "llm-daily.json");
+
+/** Generated fleet model registry (produced by the control-plane fleet-sync.py).
+ *  May be absent at startup — ModelRegistry tolerates a missing file and polls
+ *  for it to appear. See config/model-registry.json. */
+const MODEL_REGISTRY_PATH =
+  process.env.MODEL_REGISTRY_PATH || path.join(ROOT, "config", "model-registry.json");
+/** Persisted runtime state for ModelRegistry (registry + union with live probes). */
+const MODEL_REGISTRY_STATE_PATH = process.env.MODEL_REGISTRY_STATE_PATH ||
+  path.join(ROOT, "config", "model-registry-state.json");
+/** Cumulative LLM token totals per model (gitignored). */
+const LLM_TOKEN_JSON_PATH =
+  process.env.LLM_TOKEN_JSON_PATH || path.join(ROOT, "config", "llm-token-totals.json");
+/** Rolling fleet energy estimates (gitignored; written atomically at mode 0600). */
+const FLEET_ENERGY_JSON_PATH =
+  process.env.FLEET_ENERGY_JSON_PATH || path.join(ROOT, "config", "fleet-energy.json");
+/** Permanent monthly energy roll-up (gitignored; survives resets and fleet changes). */
+const FLEET_ENERGY_MONTHLY_JSON_PATH =
+  process.env.FLEET_ENERGY_MONTHLY_JSON_PATH || path.join(ROOT, "config", "fleet-energy-monthly.json");
+// Opt-in 48 h / 30 d unit history (Settings → metricsHistory); never written while it is off.
+const METRICS_HISTORY_JSON_PATH =
+  process.env.METRICS_HISTORY_JSON_PATH || path.join(ROOT, "config", "metrics-history.json");
+/** Alert rule switches, channel settings (no URLs — those are in the secrets store) and the firing set; mode 0600. */
+const ALERTS_JSON_PATH =
+  process.env.ALERTS_JSON_PATH || path.join(ROOT, "config", "alerts.json");
+/** Harness helper attaches (URLs and routes; bearer tokens stay in the secrets store). */
+const OCCUPANCY_HELPERS_JSON_PATH =
+  process.env.OCCUPANCY_HELPERS_JSON_PATH || path.join(ROOT, "config", "occupancy-helpers.json");
+/** Last good hosted-model price catalog (Cost compare page offline fallback). */
+const MODEL_PRICES_JSON_PATH =
+  process.env.MODEL_PRICES_JSON_PATH || path.join(ROOT, "config", "model-prices.json");
+/**
+ * Opt-in refresh of that catalog from raw.githubusercontent.com (Cost compare).
+ * While off, no outbound fetch is made: the page serves the last catalog on disk
+ * (MODEL_PRICES_JSON_PATH) or reports pricing as unavailable.
+ */
+const MODEL_PRICES_FETCH = ["1", "true"].includes(
+  String(process.env.MODEL_PRICES_FETCH || "").toLowerCase()
+);
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
+/**
+ * Fleet-wide cap on running decode + prefill + quality benchmarks (each unit still
+ * runs one at a time). Default 2; MAX_ACTIVE_BENCH_JOBS raises or lowers it, 1-32.
+ * @param {string | undefined} raw
+ */
+function parseMaxActiveBenchJobs(raw) {
+  const n = Number.parseInt(String(raw ?? ""), 10);
+  return Number.isInteger(n) ? Math.min(32, Math.max(1, n)) : 2;
+}
+const MAX_ACTIVE_BENCH_JOBS = parseMaxActiveBenchJobs(process.env.MAX_ACTIVE_BENCH_JOBS);
 const COMFY_PROBE_TIMEOUT_MS = parseInt(process.env.COMFY_PROBE_TIMEOUT_MS || "3000", 10);
+const TAILSCALE_PROBE_TIMEOUT_MS = parseInt(process.env.TAILSCALE_PROBE_TIMEOUT_MS || "8000", 10);
 const SSH_CONNECT_TIMEOUT = 5; // seconds
+// Reuse one authenticated SSH connection per Spark instead of dialing a new one
+// for every collector tick. Set SSH_MULTIPLEX=0 to go back to one connection
+// per command (e.g. an sshd with `MaxSessions 1`).
+const SSH_MULTIPLEX = process.env.SSH_MULTIPLEX !== "0";
 
 // ─── Poll intervals (milliseconds) ───────────────────────
+// The fast domains (GPU, CPU/RAM, network, LLM, ComfyUI, bandwidth) follow
+// Settings → Poll interval (see resolveFastPollIntervals below); the constants
+// here are their values when no setting is passed. Setting one of their env
+// vars pins that domain regardless of the setting.
 const POLL_INTERVAL_GPU = parseInt(process.env.POLL_INTERVAL_GPU || "2000", 10);
 const POLL_INTERVAL_CPU = parseInt(process.env.POLL_INTERVAL_CPU || "2000", 10);
 const POLL_INTERVAL_NETWORK = parseInt(process.env.POLL_INTERVAL_NETWORK || "2000", 10);
 const POLL_INTERVAL_STORAGE = parseInt(process.env.POLL_INTERVAL_STORAGE || "5000", 10);
 const POLL_INTERVAL_LLM = parseInt(process.env.POLL_INTERVAL_LLM || "2000", 10);
 const POLL_INTERVAL_COMFY = parseInt(process.env.POLL_INTERVAL_COMFY || "2000", 10);
+// Tailnet membership changes slowly; each poll is an SSH round-trip.
+const POLL_INTERVAL_TAILSCALE = parseInt(process.env.POLL_INTERVAL_TAILSCALE || "30000", 10);
+// Kernel journal scan for NV_ERR_NO_MEMORY — not on the 2s GPU loop.
+const POLL_INTERVAL_NVERR = parseInt(process.env.POLL_INTERVAL_NVERR || "60000", 10);
 // dmon -c 1 -d 1 blocks ~1s; default 2s avoids stacking with in-flight guards
 const POLL_INTERVAL_BANDWIDTH = parseInt(process.env.POLL_INTERVAL_BANDWIDTH || "2000", 10);
 // Dedicated liveness (sshTest / local ping) cadence — not a metric domain.
@@ -40,6 +107,79 @@ const HERMES_UPDATE_TIMEOUT_MS = parseInt(
   process.env.HERMES_UPDATE_TIMEOUT_MS || "600000",
   10
 );
+
+/**
+ * `nvidia-smi dmon -c 1 -d 1` blocks ~1 s, so the bandwidth domain never
+ * follows the poll interval below 2 s — a 1 s cadence would stack each sample
+ * onto the previous one's in-flight guard and silently halve the rate.
+ */
+const BANDWIDTH_MIN_INTERVAL_MS = 2000;
+
+/** Fallback when no (or an invalid) poll interval setting is supplied. */
+const DEFAULT_FAST_POLL_INTERVAL_MS = 2000;
+
+/**
+ * Collector domain → env var that pins it. RAM has always shared the CPU var.
+ * "memory" is the unified-memory/bandwidth domain (dmon).
+ */
+const FAST_POLL_ENV_VARS = Object.freeze({
+  gpu: "POLL_INTERVAL_GPU",
+  cpu: "POLL_INTERVAL_CPU",
+  ram: "POLL_INTERVAL_CPU",
+  network: "POLL_INTERVAL_NETWORK",
+  memory: "POLL_INTERVAL_BANDWIDTH",
+  llm: "POLL_INTERVAL_LLM",
+  comfy: "POLL_INTERVAL_COMFY",
+});
+
+/** Positive integer ms from an env value, or null when unset/blank/invalid. */
+function envIntervalMs(raw) {
+  if (raw == null || String(raw).trim() === "") return null;
+  const n = parseInt(String(raw), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Env overrides as they were when the server started — read at import time,
+ * like every other constant in this file, so the precedence cannot shift
+ * under a running server.
+ */
+const FAST_POLL_ENV_OVERRIDES = Object.freeze(
+  Object.fromEntries(
+    Object.entries(FAST_POLL_ENV_VARS).map(([domain, name]) => [
+      domain,
+      envIntervalMs(process.env[name]),
+    ])
+  )
+);
+
+/**
+ * Per-domain intervals for the fast collectors.
+ *
+ * Precedence, per domain: an explicitly set env var (POLL_INTERVAL_GPU, …)
+ * wins; otherwise the Settings poll interval applies. The bandwidth domain is
+ * floored at BANDWIDTH_MIN_INTERVAL_MS when it follows the setting.
+ *
+ * @param {number} [pollIntervalMs] Settings → Poll interval
+ * @param {Record<string, number | null>} [overrides] domain → pinned ms (env)
+ * @returns {{ gpu: number, cpu: number, ram: number, network: number, memory: number, llm: number, comfy: number }}
+ */
+function resolveFastPollIntervals(pollIntervalMs, overrides = FAST_POLL_ENV_OVERRIDES) {
+  const base =
+    typeof pollIntervalMs === "number" && Number.isFinite(pollIntervalMs) && pollIntervalMs > 0
+      ? Math.round(pollIntervalMs)
+      : DEFAULT_FAST_POLL_INTERVAL_MS;
+  const out = {};
+  for (const domain of Object.keys(FAST_POLL_ENV_VARS)) {
+    const pinned = overrides?.[domain];
+    if (typeof pinned === "number" && Number.isFinite(pinned) && pinned > 0) {
+      out[domain] = pinned;
+    } else {
+      out[domain] = domain === "memory" ? Math.max(BANDWIDTH_MIN_INTERVAL_MS, base) : base;
+    }
+  }
+  return /** @type {any} */ (out);
+}
 
 // ─── Port ────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "5555", 10);
@@ -88,18 +228,40 @@ export {
   GPU_MEMORY_JSON_PATH,
   SPARKS_SECRETS_PATH,
   SECRETS_KEY_PATH,
+  TOKEN_LIFETIMES_PATH,
+  MODEL_REGISTRY_PATH,
+  MODEL_REGISTRY_STATE_PATH,
+  LLM_DAILY_JSON_PATH,
+  LLM_TOKEN_JSON_PATH,
+  FLEET_ENERGY_JSON_PATH,
+  FLEET_ENERGY_MONTHLY_JSON_PATH,
+  METRICS_HISTORY_JSON_PATH,
+  ALERTS_JSON_PATH,
+  OCCUPANCY_HELPERS_JSON_PATH,
+  MODEL_PRICES_JSON_PATH,
+  MODEL_PRICES_FETCH,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
+  TAILSCALE_PROBE_TIMEOUT_MS,
   SSH_CONNECT_TIMEOUT,
+  SSH_MULTIPLEX,
   POLL_INTERVAL_GPU,
   POLL_INTERVAL_CPU,
   POLL_INTERVAL_NETWORK,
   POLL_INTERVAL_STORAGE,
   POLL_INTERVAL_LLM,
   POLL_INTERVAL_COMFY,
+  MAX_ACTIVE_BENCH_JOBS,
+  parseMaxActiveBenchJobs,
+  POLL_INTERVAL_TAILSCALE,
+  POLL_INTERVAL_NVERR,
   POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
   POLL_INTERVAL_HERMES,
+  BANDWIDTH_MIN_INTERVAL_MS,
+  FAST_POLL_ENV_VARS,
+  FAST_POLL_ENV_OVERRIDES,
+  resolveFastPollIntervals,
   HERMES_UPDATE_TIMEOUT_MS,
   PORT,
   LLM_PORT,

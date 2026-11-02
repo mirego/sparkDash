@@ -1,0 +1,391 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { SparkMonitor, HEALTH_CLEAR_HOLD_MS } from "../SparkMonitor.js";
+import {
+  COLLECTION_SUCCESS,
+  SystemCollector,
+  collectionWasSuccessful,
+} from "../../collectors/SystemCollector.js";
+
+function spark() {
+  return {
+    id: "spark-test",
+    name: "Spark Test",
+    lanIp: "127.0.0.1",
+    isLocal: true,
+    llmMonitoring: false,
+    comfyMonitoring: false,
+  };
+}
+
+function validGpu(temperature = 42) {
+  return {
+    temperature,
+    usage: 10,
+    power: { draw: 18.5, limit: 120, systemDraw: 39 },
+    vram: { used: 100, total: 128_000, percentage: 0, available: 120_000 },
+    processes: [],
+    throttle: {},
+  };
+}
+
+function tagged(result, successful = true) {
+  Object.defineProperty(result, COLLECTION_SUCCESS, {
+    value: successful,
+    enumerable: false,
+  });
+  return result;
+}
+
+test("collector provenance rejects partial GPU and malformed CPU samples", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const remote = new SystemCollector({ id: "remote", isLocal: false });
+  remote._getRemoteGpu = async () => ({
+    ...validGpu(),
+    power: { draw: Number.NaN, limit: 120, systemDraw: 39 },
+  });
+  assert.equal(collectionWasSuccessful(await remote.collectGpu()), false);
+
+  const local = new SystemCollector({ id: "local", isLocal: true });
+  local._getCPUUsage = async () => ({ total: 0, used: 0 });
+  assert.equal(collectionWasSuccessful(await local.collectCpu()), false);
+});
+
+test("monitor publishes per-domain collection provenance", async () => {
+  const monitor = new SparkMonitor(spark());
+  monitor._running = true;
+  monitor.collector.collectGpu = async () => tagged(validGpu());
+
+  await monitor._pollDomain("gpu");
+  assert.equal(monitor._metricCollectionSuccessful.gpu, true);
+
+  monitor.collector.collectGpu = async () => validGpu(43);
+  await monitor._pollDomain("gpu");
+  assert.equal(monitor._metricCollectionSuccessful.gpu, false);
+
+  monitor.updateConfig({ ...spark(), lanIp: "127.0.0.2" });
+  assert.deepEqual(monitor._metricCollectionSuccessful, { gpu: false, cpu: false });
+});
+
+test("a rejected prior-run poll cannot clear current collection provenance", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const monitor = new SparkMonitor(spark());
+  monitor._running = true;
+  let rejectPrior;
+  monitor.collector.collectGpu = () =>
+    new Promise((_resolve, reject) => {
+      rejectPrior = reject;
+    });
+
+  const priorPoll = monitor._pollDomain("gpu");
+  await Promise.resolve();
+  monitor.updateConfig({ ...spark(), lanIp: "127.0.0.2" });
+  monitor.collector.collectGpu = async () => tagged(validGpu(43));
+  await monitor._pollDomain("gpu");
+  assert.equal(monitor._metricCollectionSuccessful.gpu, true);
+
+  rejectPrior(new Error("prior target failed late"));
+  await priorPoll;
+  assert.equal(monitor._metricCollectionSuccessful.gpu, true);
+});
+
+test("a poll from an earlier monitor run cannot commit or clear a restarted poll", async (t) => {
+  t.mock.method(console, "log", () => {});
+  t.mock.method(globalThis, "setInterval", () => Symbol("interval"));
+  t.mock.method(globalThis, "clearInterval", () => {});
+  const monitor = new SparkMonitor(spark());
+  monitor._poll = async () => {};
+  const pendingResolvers = [];
+  monitor.collector.collectGpu = () =>
+    new Promise((resolve) => pendingResolvers.push(resolve));
+
+  monitor.start();
+  const priorRunPoll = monitor._pollDomain("gpu");
+  await Promise.resolve();
+  monitor.stop();
+  monitor.start();
+  const currentRunPoll = monitor._pollDomain("gpu");
+  await Promise.resolve();
+
+  pendingResolvers[0](validGpu(41));
+  await priorRunPoll;
+  assert.equal(monitor.snapshot().metrics.gpu.temperature, 0);
+  assert.equal(monitor._lastUpdate.gpu, undefined);
+  assert.ok(monitor._inflight.gpu, "the earlier poll must not clear the current guard");
+
+  pendingResolvers[1](validGpu(42));
+  await currentRunPoll;
+  assert.equal(monitor.snapshot().metrics.gpu.temperature, 42);
+  assert.ok(Number.isFinite(monitor._lastUpdate.gpu));
+  monitor.stop();
+});
+
+test("a poll from before updateConfig cannot commit against the new target", async () => {
+  const monitor = new SparkMonitor(spark());
+  monitor._running = true;
+  const pendingResolvers = [];
+  monitor.collector.collectGpu = () =>
+    new Promise((resolve) => pendingResolvers.push(resolve));
+
+  const priorTargetPoll = monitor._pollDomain("gpu");
+  await Promise.resolve();
+  monitor.updateConfig({ ...spark(), lanIp: "127.0.0.2" });
+  const currentTargetPoll = monitor._pollDomain("gpu");
+  await Promise.resolve();
+
+  pendingResolvers[0](validGpu(41));
+  await priorTargetPoll;
+  assert.equal(monitor.snapshot().metrics.gpu.temperature, 0);
+  assert.ok(monitor._inflight.gpu, "the prior target poll must not clear the current guard");
+
+  pendingResolvers[1](validGpu(42));
+  await currentTargetPoll;
+  assert.equal(monitor.snapshot().metrics.gpu.temperature, 42);
+});
+
+test("a rejected older CPU poll cannot rewind the accepted generation baseline", async () => {
+  const monitor = new SparkMonitor(spark());
+  monitor._running = true;
+  monitor.collector.lastCpuStat = { total: 100, used: 20 };
+  let resolveOlder;
+  let resolveCurrent;
+  let callCount = 0;
+  monitor.collector._getCPUUsage = () => {
+    callCount += 1;
+    if (callCount === 1) return new Promise((resolve) => (resolveOlder = resolve));
+    if (callCount === 2) return new Promise((resolve) => (resolveCurrent = resolve));
+    return Promise.resolve({ total: 250, used: 120 });
+  };
+  monitor.collector._getCPUTemperature = async () => 0;
+  monitor.collector._getCPUPower = async () => ({ draw: 5.2, tdp: 65 });
+
+  const olderPoll = monitor._pollDomain("cpu");
+  await Promise.resolve();
+  monitor.updateConfig({ ...spark(), lanIp: "127.0.0.2" });
+  const currentPoll = monitor._pollDomain("cpu");
+  await Promise.resolve();
+
+  resolveCurrent({ total: 200, used: 100 });
+  await currentPoll;
+  assert.equal(monitor.snapshot().metrics.cpu.usage, 80);
+
+  resolveOlder({ total: 150, used: 70 });
+  await olderPoll;
+  await monitor._pollDomain("cpu");
+  assert.equal(monitor.snapshot().metrics.cpu.usage, 40);
+});
+
+test("a liveness check from an earlier run cannot commit or clear a restarted check", async (t) => {
+  t.mock.method(console, "log", () => {});
+  t.mock.method(globalThis, "setInterval", () => Symbol("interval"));
+  t.mock.method(globalThis, "clearInterval", () => {});
+  const monitor = new SparkMonitor(spark());
+  monitor._poll = async () => {};
+  monitor._readUptime = async () => 123;
+  const pendingResolvers = [];
+  monitor.collector.pingHost = () =>
+    new Promise((resolve) => pendingResolvers.push(resolve));
+
+  monitor.start();
+  const priorRunCheck = monitor._checkOnline();
+  await Promise.resolve();
+  monitor.stop();
+  monitor.start();
+  const currentRunCheck = monitor._checkOnline();
+  await Promise.resolve();
+
+  pendingResolvers[0]();
+  await priorRunCheck;
+  assert.equal(monitor.online, false);
+  assert.ok(monitor._inflight.online, "the earlier check must not clear the current guard");
+
+  pendingResolvers[1]();
+  await currentRunCheck;
+  assert.equal(monitor.online, true);
+  assert.equal(monitor._uptimeSeconds, 123);
+  assert.equal(monitor._inflight.online, false);
+  monitor.stop();
+});
+
+test("a storage refresh from an earlier run cannot commit or clear a restarted refresh", async (t) => {
+  t.mock.method(console, "log", () => {});
+  t.mock.method(globalThis, "setInterval", () => Symbol("interval"));
+  t.mock.method(globalThis, "clearInterval", () => {});
+  const monitor = new SparkMonitor(spark());
+  monitor._poll = async () => {};
+  const pendingResolvers = [];
+  monitor.collector.collectStorage = () =>
+    new Promise((resolve) => pendingResolvers.push(resolve));
+
+  monitor.start();
+  const priorRunRefresh = monitor.refreshDomain("storage");
+  await Promise.resolve();
+  monitor.stop();
+  monitor.start();
+  const currentRunRefresh = monitor.refreshDomain("storage");
+  await Promise.resolve();
+
+  pendingResolvers[0]([{ mount: "/old" }]);
+  await priorRunRefresh;
+  assert.deepEqual(monitor.snapshot().metrics.storage, []);
+  assert.ok(monitor._inflight.storage, "the earlier refresh must not clear the current guard");
+
+  pendingResolvers[1]([{ mount: "/current" }]);
+  await currentRunRefresh;
+  assert.deepEqual(monitor.snapshot().metrics.storage, [{ mount: "/current" }]);
+  assert.equal(monitor._inflight.storage, false);
+  monitor.stop();
+});
+
+test("manual llm refresh invokes the probe and publishes its result", async () => {
+  const monitor = new SparkMonitor({ ...spark(), llmMonitoring: true });
+  monitor._running = true;
+  let calls = 0;
+  const result = { available: false };
+  monitor.llmProbes = new Map([[8888, { port: 8888, probe: async () => { calls++; return result; } }]]);
+  await monitor.refreshDomain("llm");
+  assert.equal(calls, 1);
+  assert.equal(monitor._metrics.llm.length, 1);
+  assert.equal(monitor._metrics.llm[0].available, false);
+});
+
+test("lastSuccess only advances when a poll returns real data (a stuck collector stops moving)", async () => {
+  const monitor = new SparkMonitor(spark());
+  monitor._running = true;
+  monitor.collector.collectGpu = async () => tagged(validGpu());
+  monitor.collector.collectRam = async () => ({ used: 10, total: 100, percentage: 10 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  const first = monitor.lastSuccess();
+  assert.ok(first.gpu > 0 && first.ram > 0);
+
+  // The collectors now answer with their zeroed defaults, as they do when the command fails.
+  await new Promise((r) => setTimeout(r, 5));
+  monitor.collector.collectGpu = async () => validGpu(); // untagged = not a successful collection
+  monitor.collector.collectRam = async () => ({ used: 0, total: 0, percentage: 0 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  assert.deepEqual(monitor.lastSuccess(), first);
+  assert.ok(monitor._lastUpdate.gpu >= first.gpu); // the poll itself still ran
+
+  // lastSuccess is a copy, and never part of the snapshot (it would defeat the broadcast cache).
+  monitor.lastSuccess().gpu = 0;
+  assert.equal(monitor.lastSuccess().gpu, first.gpu);
+  assert.equal("collectedAt" in monitor.snapshot(), false);
+});
+
+test("public freshness accessors: last real collection, latest poll ok, current cadence", async () => {
+  const monitor = new SparkMonitor(spark(), { pollIntervalMs: 10_000 });
+  assert.equal(monitor.lastCollectedAt("gpu"), null);
+  assert.equal(monitor.collectionOk("gpu"), false);
+  assert.equal(monitor.collectionOk("ram"), false);
+  assert.equal(monitor.pollIntervalMs("gpu"), 10_000);
+  assert.equal(monitor.pollIntervalMs("storage"), null, "not a fast domain");
+  monitor.setPollInterval(4000); // before _running, so no timers are armed
+  assert.equal(monitor.pollIntervalMs("cpu"), 4000, "follows Settings → Poll interval");
+  monitor._running = true;
+
+  monitor.collector.collectGpu = async () => tagged(validGpu());
+  monitor.collector.collectRam = async () => ({ used: 10, total: 100, percentage: 10 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  const at = monitor.lastCollectedAt("ram");
+  assert.ok(at > 0 && monitor.lastCollectedAt("gpu") > 0);
+  assert.equal(monitor.collectionOk("gpu"), true);
+  assert.equal(monitor.collectionOk("ram"), true);
+
+  // A failed poll: the previous value stays in the snapshot, but it is no longer "ok".
+  await new Promise((r) => setTimeout(r, 5));
+  monitor.collector.collectGpu = async () => validGpu();
+  monitor.collector.collectRam = async () => ({ used: 0, total: 0, percentage: 0 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  assert.equal(monitor.collectionOk("gpu"), false);
+  assert.equal(monitor.collectionOk("ram"), false);
+  assert.equal(monitor.lastCollectedAt("ram"), at, "only real data moves it");
+});
+
+test("success rules per domain, and the snapshot carries no success timestamps", () => {
+  const monitor = new SparkMonitor(spark());
+  const ok = (domain, result) => monitor._domainSucceeded(domain, result);
+  assert.equal(ok("storage", [{ device: "x" }]), true);
+  assert.equal(ok("storage", []), false);
+  assert.equal(ok("network", { interfaces: [{ name: "eth0" }] }), true);
+  assert.equal(ok("network", { interfaces: [] }), false);
+  assert.equal(ok("memory", { total: 128 }), true);
+  assert.equal(ok("memory", { total: 0 }), false);
+  assert.equal(ok("llm", []), true); // an engine that is down is still a successful probe
+  assert.equal(ok("llm", undefined), false);
+  assert.equal(ok("hermes", {}), false);
+  const text = JSON.stringify(monitor.snapshot());
+  assert.equal(/lastSuccess|collectedAt|last_success/.test(text), false);
+});
+
+test("a domain that is no longer polled is not reported, and RoCE is stamped with its own sample time", async () => {
+  const monitor = new SparkMonitor({ ...spark(), llmMonitoring: true });
+  monitor._running = true;
+  monitor.collector.collectStorage = async () => [{ device: "nvme0", label: "/", used: 1, total: 2, available: 1, percentage: 50 }];
+  monitor.collector.collectNetwork = async () => ({ primaryInterface: "eth0", linkSpeedMbps: 1000, interfaces: [{ name: "eth0", rxSpeed: 0, txSpeed: 0, ip: "10.0.0.1", operstate: "up", disabled: false }], wolMac: null });
+  monitor.collector.collectRoce = async () => ({ available: true, sampledAt: 1234, devices: [] });
+  await monitor._pollDomain("storage");
+  await monitor._pollDomain("network");
+  assert.equal(monitor.lastSuccess().roce, 1234); // not Date.now()
+  assert.ok(monitor.lastSuccess().storage > 0);
+  monitor.spark.storagePollDisabled = true;
+  assert.equal("storage" in monitor.lastSuccess(), false);
+  monitor.spark.storagePollDisabled = false;
+  await monitor.refreshDomain("storage");
+  assert.ok(monitor.lastSuccess().storage > 0); // a manual refresh counts
+  monitor.spark.isLocal = false;
+  monitor._invalidateSshMetrics();
+  assert.equal("storage" in monitor.lastSuccess(), false);
+  assert.equal("network" in monitor.lastSuccess(), false);
+});
+
+test("a GPU hovering at the warning threshold raises one event, not one per crossing", () => {
+  const monitor = new SparkMonitor(spark());
+  const events = [];
+  monitor._onEvent = (e) => events.push(e);
+  let now = 1_000_000;
+  monitor._healthNow = () => now;
+  const reading = (temperature) => {
+    monitor._metrics.gpu = { ...validGpu(temperature) };
+    monitor._updateHealth("gpu");
+  };
+
+  reading(70); // baseline: nothing yet, and no event for the first evaluation
+  assert.equal(events.length, 0);
+  // 20 minutes of a reading that flips between 84 and 85 every 20 s
+  for (let i = 0; i < 60; i++) {
+    now += 20_000;
+    reading(i % 2 === 0 ? 85 : 84);
+  }
+  const hot = events.filter((e) => e.type === "health.thermal");
+  const cleared = events.filter((e) => e.type === "health.cleared");
+  assert.equal(hot.length, 1);
+  assert.equal(cleared.length, 0);
+  assert.equal(monitor._health.some((f) => f.id === "thermal"), true);
+});
+
+test("a finding clears once its rule has stayed quiet for the hold time, and a new event follows a real second episode", () => {
+  const monitor = new SparkMonitor(spark());
+  const events = [];
+  monitor._onEvent = (e) => events.push(e);
+  let now = 1_000_000;
+  monitor._healthNow = () => now;
+  const reading = (temperature) => {
+    monitor._metrics.gpu = { ...validGpu(temperature) };
+    monitor._updateHealth("gpu");
+  };
+  reading(70);
+  now += 1000; reading(86); // episode 1 begins
+  now += 1000; reading(60);
+  now += HEALTH_CLEAR_HOLD_MS - 2000; reading(60);
+  assert.equal(monitor._health.some((f) => f.id === "thermal"), true); // still held
+  now += 3000; reading(60);
+  assert.equal(monitor._health.some((f) => f.id === "thermal"), false); // hold over
+  assert.equal(events.filter((e) => e.type === "health.cleared").length, 1);
+  now += 1000; reading(88); // episode 2
+  assert.equal(events.filter((e) => e.type === "health.thermal").length, 2);
+});

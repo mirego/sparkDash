@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { SparkSnapshot } from "../api/types";
+import { TimedRingBuffer, type TimedSample } from "./ringBuffer";
 
 /**
  * Central metrics history store (idea #8b).
@@ -21,17 +22,103 @@ import type { SparkSnapshot } from "../api/types";
  * All listeners are woken on notify; unchanged keys keep the same ref → no render.
  */
 
-const HISTORY_MAX = 1800; // 1 h at 2 s poll — the WS interval, not wall-clock guarantees
+// History depth, configurable at build time. VITE_HISTORY_HOURS = wall-clock
+// hours to retain (default 8 h at the 2 s WS poll ≈ 112 KB per series — the
+// browser tab is the only thing that pays for it).
+const SAMPLES_PER_HOUR = 1800; // 2 s poll
+const HISTORY_HOURS = Number(import.meta.env.VITE_HISTORY_HOURS ?? 8) || 8;
+export const HISTORY_MAX = Math.round(SAMPLES_PER_HOUR * HISTORY_HOURS);
 /** Samples shown in inline sparklines (≈1 min at 2 s poll). Full series stays in HISTORY_MAX. */
 export const SPARKLINE_TAIL = 30;
 
-const history = new Map<string, number[]>(); // key: `${sparkId}:${metric}`
+/** localStorage key for cross-reload history persistence (custom addition). */
+const STORAGE_KEY = "sparkdash:metrics-history";
+const STORAGE_DEBOUNCE_MS = 5000;
+
+const history = new Map<string, TimedRingBuffer>(); // key: `${sparkId}:${metric}`
+const historySamples = new Map<string, readonly TimedSample[]>();
+const historyValues = new Map<string, readonly number[]>();
 /** Cached last-N views — refreshed whenever the full series is replaced. */
 const historyTails = new Map<string, readonly number[]>();
 const sparkMap = new Map<string, SparkSnapshot>();
 const listeners = new Set<() => void>();
 
+// Fleet alert transitions pushed over the WS `alerts` channel (AlertMonitor).
+// Bounded ring (newest first) so the UI can render a live health-notification
+// feed without polling /api/alerts.
+export interface AlertEvent {
+  sparkId: string;
+  prevLevel: string;
+  level: string;
+  ts: number;
+  alerts: Array<{ id: string; level: string; label: string; detail: string }>;
+}
+const ALERT_EVENTS_MAX = 40;
+const alertEvents: AlertEvent[] = [];
+
 const EMPTY: readonly number[] = Object.freeze([] as number[]);
+
+// ─── localStorage persistence (cross-reload history) ──────
+let _storageTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Debounced write of the full history value map to localStorage. */
+function _saveToStorage() {
+  if (_storageTimer) return;
+  _storageTimer = setTimeout(() => {
+    _storageTimer = null;
+    try {
+      const obj: Record<string, number[]> = {};
+      for (const [key, vals] of historyValues) {
+        obj[key] = vals as number[];
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      // localStorage full or unavailable — silently skip
+    }
+  }, STORAGE_DEBOUNCE_MS);
+}
+
+/** Load persisted history value series from localStorage on module init. */
+function _loadFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (typeof obj !== "object" || obj === null) return;
+    for (const key of Object.keys(obj)) {
+      const arr = obj[key];
+      if (Array.isArray(arr) && arr.length > 0) {
+        // Cap to HISTORY_MAX in case the saved data is stale/oversized
+        const vals = (arr.length > HISTORY_MAX ? arr.slice(-HISTORY_MAX) : arr) as number[];
+        historyValues.set(key, vals);
+        historyTails.set(
+          key,
+          vals.length <= SPARKLINE_TAIL ? vals : vals.slice(-SPARKLINE_TAIL)
+        );
+      }
+    }
+  } catch {
+    // Corrupt or unavailable — start fresh
+  }
+}
+_loadFromStorage();
+
+/**
+ * Mean of a metric series over samples where the reading is > 0, or null when
+ * there are no busy samples. Skipping zeros keeps idle/off phases from dragging
+ * the average toward zero (a prefill that runs at 500 tok/s is "500", not 0.5).
+ */
+export function avgPositive(values: readonly number[]): number | null {
+  let sum = 0;
+  let count = 0;
+  for (const v of values) {
+    if (v > 0) {
+      sum += v;
+      count += 1;
+    }
+  }
+  return count > 0 ? sum / count : null;
+}
 
 function notify() {
   for (const l of listeners) l();
@@ -53,21 +140,49 @@ function setHistoryTail(key: string, full: number[]) {
   historyTails.set(key, full.length <= SPARKLINE_TAIL ? full : full.slice(-SPARKLINE_TAIL));
 }
 
-function pushHistory(key: string, value: number) {
-  const prev = history.get(key);
-  // Build a fresh ref so useSyncExternalStore observes the change for this key.
-  let next: number[];
-  if (!prev || prev.length === 0) {
-    next = [value];
-  } else if (prev.length >= HISTORY_MAX) {
-    next = prev.slice(prev.length - HISTORY_MAX + 1);
-    next.push(value);
-  } else {
-    next = prev.slice();
-    next.push(value);
+function pushHistory(key: string, value: number, at: number) {
+  let ring = history.get(key);
+  if (!ring) {
+    ring = new TimedRingBuffer(HISTORY_MAX);
+    history.set(key, ring);
   }
-  history.set(key, next);
-  setHistoryTail(key, next);
+  const last = ring.last();
+  if (last && at < last.at) return;
+  if (last && at === last.at) ring.replaceLast({ at, value });
+  else ring.push({ at, value });
+  ring.pruneBefore(at - HISTORY_HOURS * 3_600_000);
+  const samples = ring.toArray();
+  historySamples.set(key, samples);
+  historyValues.set(key, samples.map((sample) => sample.value));
+  setHistoryTail(key, ring.tail(SPARKLINE_TAIL).map((sample) => sample.value));
+  _saveToStorage();
+}
+
+/**
+ * Merge older samples (fetched from the server) in front of what this tab has collected, so a freshly
+ * opened page does not start empty. Only samples older than the first local one are added; live
+ * ingestion carries on from there.
+ */
+export function backfillHistory(sparkId: string, metric: string, older: readonly TimedSample[]): void {
+  if (older.length === 0) return;
+  const key = `${sparkId}:${metric}`;
+  const existing = history.get(key)?.toArray() ?? [];
+  const firstLocal = existing.length ? existing[0].at : Infinity;
+  const prefix = older.filter((s) => s.at < firstLocal).sort((a, b) => a.at - b.at);
+  if (prefix.length === 0) return;
+  const ring = new TimedRingBuffer(HISTORY_MAX);
+  let lastAt = -Infinity;
+  for (const s of [...prefix, ...existing]) {
+    if (s.at <= lastAt) continue;
+    ring.push(s);
+    lastAt = s.at;
+  }
+  history.set(key, ring);
+  const samples = ring.toArray();
+  historySamples.set(key, samples);
+  historyValues.set(key, samples.map((sample) => sample.value));
+  setHistoryTail(key, ring.tail(SPARKLINE_TAIL).map((sample) => sample.value));
+  notify();
 }
 
 function removeHistoryForSpark(sparkId: string) {
@@ -75,13 +190,15 @@ function removeHistoryForSpark(sparkId: string) {
   for (const key of history.keys()) {
     if (key.startsWith(prefix)) {
       history.delete(key);
+      historySamples.delete(key);
+      historyValues.delete(key);
       historyTails.delete(key);
     }
   }
 }
 
 /** Ingest a full WS snapshot: update latest-per-spark + append history series. */
-export function ingestSnapshots(sparks: SparkSnapshot[]): void {
+export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void {
   const alive = new Set<string>();
 
   for (const s of sparks) {
@@ -90,11 +207,42 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
     if (!s.online) continue; // don't record zero-samples for offline hosts
     const m = s.metrics;
     if (m.gpu) {
-      pushHistory(`${s.id}:gpu.usage`, m.gpu.usage);
-      pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature);
+      if (m.gpu.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
+      if (m.gpu.metricAvailability?.temperature !== false) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      if (m.gpu.temperatures?.memory != null && Number.isFinite(m.gpu.temperatures.memory)) {
+        pushHistory(`${s.id}:gpu.memTemp`, m.gpu.temperatures.memory, at);
+      }
+      if (typeof m.gpu.power?.draw === "number") {
+        pushHistory(`${s.id}:gpu.power`, m.gpu.power.draw, at);
+      }
+      const draw = m.gpu.power?.draw;
+      const limit = m.gpu.power?.limit;
+      if (m.gpu.metricAvailability?.powerDraw !== false && m.gpu.metricAvailability?.powerLimit !== false && draw != null && limit != null && limit > 0) {
+        pushHistory(`${s.id}:gpu.powerPct`, Math.min(100, (draw / limit) * 100), at);
+      }
+      if (typeof m.gpu.vram?.percentage === "number") {
+        pushHistory(`${s.id}:gpu.vram`, m.gpu.vram.percentage, at);
+      }
+      // Per-card series for multi-GPU hosts (keyed by nvidia-smi index).
+      if (Array.isArray(m.gpu.gpus) && m.gpu.gpus.length > 1) {
+        for (const d of m.gpu.gpus) {
+          if (d.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.${d.index}.usage`, d.usage, at);
+          if (d.metricAvailability?.temperature !== false) pushHistory(`${s.id}:gpu.${d.index}.temp`, d.temperature, at);
+          if (d.metricAvailability?.powerDraw !== false && d.metricAvailability?.powerLimit !== false && d.power && d.power.limit > 0) {
+            pushHistory(`${s.id}:gpu.${d.index}.powerPct`, Math.min(100, (d.power.draw / d.power.limit) * 100), at);
+          }
+        }
+      }
     }
     if (m.cpu) {
-      pushHistory(`${s.id}:cpu.usage`, m.cpu.usage);
+      pushHistory(`${s.id}:cpu.usage`, m.cpu.usage, at);
+      // Skip 0°C / missing sensor so no fake floor is drawn on the sparkline.
+      if (m.cpu.temperature != null && m.cpu.temperature > 0) {
+        pushHistory(`${s.id}:cpu.temp`, m.cpu.temperature, at);
+      }
+    }
+    if (m.ram) {
+      pushHistory(`${s.id}:ram.percentage`, m.ram.percentage, at);
     }
     if (Array.isArray(m.llm)) {
       // Zip with snapshot.llmPorts so multi-port LLM series key distinctly.
@@ -103,11 +251,44 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         const llm = m.llm[i];
         const port = ports[i];
         const portKey = port != null ? `:${port}` : `:${i}`;
-        pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
+        // An unreadable poll is a gap in the trend, not a dip to zero.
+        if (llm.measurementValid !== false) {
+          pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps, at);
+          pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps, at);
+          if (llm.requestsRunning != null) pushHistory(`${s.id}:llm${portKey}.running`, Math.round(llm.requestsRunning), at);
+          if (llm.requestsWaiting != null) pushHistory(`${s.id}:llm${portKey}.waiting`, Math.round(llm.requestsWaiting), at);
+        }
+        // TTFT is sparse: vLLM reports live TTFT only while serving. It is NOT
+        // index-aligned with the tick-dense series above — that is fine because
+        // the ttft series feeds only the busy-sample average badge, never the
+        // overlaid chart (see LlmTrendChart).
+        if (llm.ttftSeconds != null) {
+          pushHistory(`${s.id}:llm${portKey}.ttft`, llm.ttftSeconds, at);
+        }
+        if (llm.preemptionsTotal != null) pushHistory(`${s.id}:llm${portKey}.preemptions`, llm.preemptionsTotal, at);
+        if (llm.kvCacheUsage != null) pushHistory(`${s.id}:llm${portKey}.kv`, llm.kvCacheUsage, at);
+        if (llm.itlP95Seconds != null) pushHistory(`${s.id}:llm${portKey}.itl`, llm.itlP95Seconds, at);
+        if (llm.genTpsPerRunning != null) pushHistory(`${s.id}:llm${portKey}.tpsPerRun`, llm.genTpsPerRunning, at);
+        if (llm.cachedPrefillTps != null) {
+          pushHistory(`${s.id}:llm${portKey}.prefillCached`, llm.cachedPrefillTps, at);
+        }
+        if (llm.uncachedPrefillTps != null) {
+          pushHistory(`${s.id}:llm${portKey}.prefillUncached`, llm.uncachedPrefillTps, at);
+        }
+        // Encode phase as ordinal for sparklines: DOWN0 IDLE1 QUEUED2 PREFILL3 DECODE4 SLOW5
+        if (llm.enginePhase) {
+          const phaseMap: Record<string, number> = {
+            DOWN: 0, IDLE: 1, QUEUED: 2, PREFILL: 3, DECODE: 4, SLOW_DECODE: 5,
+          };
+          const ord = phaseMap[llm.enginePhase];
+          if (ord != null) pushHistory(`${s.id}:llm${portKey}.phase`, ord, at);
+        }
+        if (llm.decodeBound) pushHistory(`${s.id}:llm${portKey}.decodeBound`, 1, at);
+        else if (llm.available) pushHistory(`${s.id}:llm${portKey}.decodeBound`, 0, at);
       }
     }
     if (m.comfy?.available) {
-      pushHistory(`${s.id}:comfy.queue`, (m.comfy.queueRunning ?? 0) + (m.comfy.queuePending ?? 0));
+      pushHistory(`${s.id}:comfy.queue`, (m.comfy.queueRunning ?? 0) + (m.comfy.queuePending ?? 0), at);
     }
   }
 
@@ -131,7 +312,19 @@ export function getSpark(id: string): SparkSnapshot | undefined {
 
 /** @internal getSnapshot for useMetricsHistory — stable ref per key. */
 function getHistory(key: string): readonly number[] {
-  return history.get(key) ?? EMPTY;
+  return historyValues.get(key) ?? EMPTY;
+}
+
+const EMPTY_TIMED: readonly TimedSample[] = Object.freeze([] as TimedSample[]);
+
+export type MetricSample = TimedSample;
+
+export function getMetricHistorySamples(sparkId: string, metric: string): readonly TimedSample[] {
+  return historySamples.get(`${sparkId}:${metric}`) ?? EMPTY_TIMED;
+}
+
+function getTimedHistory(key: string): readonly TimedSample[] {
+  return historySamples.get(key) ?? EMPTY_TIMED;
 }
 
 function getHistoryTail(key: string): readonly number[] {
@@ -148,6 +341,15 @@ export function useMetricsHistory(sparkId: string, metric: string): readonly num
     subscribeMetrics,
     () => getHistory(key),
     () => EMPTY
+  );
+}
+
+export function useTimedMetricsHistory(sparkId: string, metric: string): readonly TimedSample[] {
+  const key = `${sparkId}:${metric}`;
+  return useSyncExternalStore(
+    subscribeMetrics,
+    () => getTimedHistory(key),
+    () => EMPTY_TIMED
   );
 }
 
@@ -176,9 +378,53 @@ export function useSpark(id: string): SparkSnapshot | undefined {
   );
 }
 
+/**
+ * Ingest a WS `alerts` message's changed transitions into the alert feed.
+ * Notifies subscribers so `useAlertEvents` re-renders.
+ */
+export function ingestAlerts(changed: Array<{
+  sparkId: string; prevLevel: string; level: string; ts?: number;
+  alerts: Array<{ id: string; level: string; label: string; detail: string }>;
+}>, nowMs = Date.now()): void {
+  if (!Array.isArray(changed) || changed.length === 0) return;
+  let mutated = false;
+  for (const c of changed) {
+    alertEvents.unshift({
+      sparkId: c.sparkId,
+      prevLevel: c.prevLevel,
+      level: c.level,
+      ts: typeof c.ts === "number" ? c.ts : nowMs,
+      alerts: c.alerts ?? [],
+    });
+    mutated = true;
+  }
+  if (alertEvents.length > ALERT_EVENTS_MAX) alertEvents.length = ALERT_EVENTS_MAX;
+  if (mutated) notify();
+}
+
+function getAlertEvents(): readonly AlertEvent[] {
+  return alertEvents;
+}
+
+/**
+ * Subscribe to the fleet alert-transition feed (newest first). Re-renders only
+ * when a new WS `alerts` transition is ingested.
+ */
+export function useAlertEvents(): readonly AlertEvent[] {
+  return useSyncExternalStore(
+    subscribeMetrics,
+    getAlertEvents,
+    () => EMPTY as unknown as readonly AlertEvent[]
+  );
+}
+
 /** Clear all cached state — used on hard reload paths / tests. */
 export function _resetStore(): void {
   history.clear();
+  historySamples.clear();
+  historyValues.clear();
   historyTails.clear();
   sparkMap.clear();
+  alertEvents.length = 0;
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
 }

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "generated_ts": "2026-08-02T12:50:20-0400",
+  "capabilities": {
+    "default": [
+      "deepseek-v4-flash-0731",
+      "laguna-s-2.1"
+    ],
+    "long-context": [
+      "laguna-s-2.1"
+    ]
+  },
+  "alias_to_id": {
+    "deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "deepseek-v4-flash-dspark": "deepseek-v4-flash-0731",
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
+    "DeepSeek-V4-Flash-0731": "deepseek-v4-flash-0731",
+    "claude-deepseek-v4-flash-0731": "deepseek-v4-flash-0731",
+    "laguna-s-2.1": "laguna-s-2.1",
+    "poolside/Laguna-S-2.1-NVFP4": "laguna-s-2.1"
+  }
+}

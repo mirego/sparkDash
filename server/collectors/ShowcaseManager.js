@@ -12,12 +12,17 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { atomicWrite } from "../util/atomicWrite.js";
 import { decodeBenchManager } from "./DecodeBench.js";
+import { prefillBenchManager } from "./PrefillBench.js";
+import { qualityBenchManager } from "./QualityBench.js";
 import {
   applyThinkingFlags,
+  coerceThinkingFlag,
   pollServerGenerationRates,
   round2,
   runStreamingRequest,
+  stripFillForceFields,
 } from "./LlmStreaming.js";
+import { withFillToMaxInstruction } from "../../src/shared/llmPrompts.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,7 +45,7 @@ const MIN_PROMPT_LEN = 1;
 const MAX_PROMPT_LEN = 4000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 const HEARTBEAT_CHECK_MS = 1_000;
-/** Full max_tokens fills at low tok/s need a longer per-stream budget than decode bench. */
+/** Full max_tokens fills at low tok/s need a long per-stream budget. */
 const PER_REQUEST_TIMEOUT_MS = 360_000;
 const LABEL_CHARS = 40;
 
@@ -55,38 +60,8 @@ function contentCap(maxTokens) {
 
 const PROMPT_TYPES = new Set(["structural", "text", "mixed"]);
 
-/** Suffix appended server-side; keep under MAX_PROMPT_LEN headroom in UI catalogs. */
-const FILL_TO_MAX_SUFFIX =
-  " Continue generating until you hit the maximum output length; do not stop early—keep expanding with more content.";
-
-/**
- * Encourage full-length completions when the prompt doesn't already ask for it.
- * Only skip when the prompt already states the hard length/EOS rule — phrases like
- * "keep expanding" alone are not enough (models still stop at natural EOS).
- * @param {string} prompt
- */
-export function withFillToMaxInstruction(prompt) {
-  const p = String(prompt || "").trim();
-  if (!p) return p;
-  if (
-    /maximum output length|do not stop early|until you hit the (maximum|output)/i.test(
-      p
-    )
-  ) {
-    return p;
-  }
-  return `${p}${FILL_TO_MAX_SUFFIX}`;
-}
-
-/** vLLM-oriented fields that some OpenAI-compat servers reject with HTTP 400. */
-export function stripFillForceFields(body) {
-  if (!body || typeof body !== "object") return body;
-  const next = { ...body };
-  delete next.min_tokens;
-  delete next.ignore_eos;
-  delete next.stop;
-  return next;
-}
+export { withFillToMaxInstruction } from "../../src/shared/llmPrompts.js";
+export { stripFillForceFields } from "./LlmStreaming.js";
 
 function labelFromPrompt(prompt) {
   const s = String(prompt || "").replace(/\s+/g, " ").trim();
@@ -142,7 +117,7 @@ function publicSessionRecord(session, opts = {}) {
     modelId: session.modelId ?? null,
     maxTokens: session.maxTokens ?? null,
     temperature: session.temperature ?? DEFAULT_TEMPERATURE,
-    thinking: session.thinking !== false,
+    thinking: coerceThinkingFlag(session.thinking),
     promptType: session.promptType ?? null,
     startedAt: session.startedAt ?? null,
     completedAt: session.completedAt ?? null,
@@ -169,7 +144,7 @@ function historySummary(record) {
     modelId: record.modelId ?? null,
     maxTokens: record.maxTokens ?? null,
     temperature: record.temperature ?? DEFAULT_TEMPERATURE,
-    thinking: record.thinking !== false,
+    thinking: coerceThinkingFlag(record.thinking),
     promptType: record.promptType ?? null,
     startedAt: record.startedAt ?? null,
     completedAt: record.completedAt ?? null,
@@ -325,6 +300,7 @@ export class ShowcaseManager {
    *   promptType?: string | null,
    *   prompts: string[],
    *   apiKey?: string | null,
+   *   llmHost?: string | null,
    * }} opts
    */
   start(opts) {
@@ -339,6 +315,7 @@ export class ShowcaseManager {
       promptType: rawPromptType,
       prompts: rawPrompts,
       apiKey = null,
+      llmHost = null,
     } = opts;
 
     if (this.activeBySpark.has(sparkId)) {
@@ -348,6 +325,16 @@ export class ShowcaseManager {
     }
     if (decodeBenchManager.getActive(sparkId)) {
       const err = new Error("A decode benchmark is already running for this Spark");
+      err.status = 409;
+      throw err;
+    }
+    if (prefillBenchManager.getActive(sparkId)) {
+      const err = new Error("A prefill benchmark is already running for this Spark");
+      err.status = 409;
+      throw err;
+    }
+    if (qualityBenchManager.getActive(sparkId)) {
+      const err = new Error("A quality benchmark is already running for this Spark");
       err.status = 409;
       throw err;
     }
@@ -391,7 +378,7 @@ export class ShowcaseManager {
       throw err;
     }
 
-    const thinking = rawThinking !== false;
+    const thinking = coerceThinkingFlag(rawThinking);
     const promptType =
       typeof rawPromptType === "string" && PROMPT_TYPES.has(rawPromptType)
         ? rawPromptType
@@ -451,6 +438,7 @@ export class ShowcaseManager {
       _lastTouchAt: now,
       _contentCap: cap,
       _lanIp: lanIp,
+      _llmHost: llmHost || null,
       _apiKey: apiKey != null && String(apiKey).trim() ? String(apiKey).trim() : null,
       _sentContentLengths: /** @type {number[]} */ (prompts.map(() => 0)),
       _sentReasoningLengths: /** @type {number[]} */ (prompts.map(() => 0)),
@@ -550,7 +538,7 @@ export class ShowcaseManager {
       modelId: session.modelId,
       maxTokens: session.maxTokens,
       temperature: session.temperature,
-      thinking: session.thinking !== false,
+      thinking: coerceThinkingFlag(session.thinking),
       startedAt: session.startedAt,
       completedAt: session.completedAt,
       serverGenerationTps: session.serverGenerationTps,
@@ -671,7 +659,7 @@ export class ShowcaseManager {
   }
 
   async _runSession(session) {
-    const baseUrl = `http://${session._lanIp}:${session.port}`;
+    const baseUrl = `http://${session._llmHost || session._lanIp}:${session.port}`;
     const url = `${baseUrl}/v1/chat/completions`;
 
     const ratePollAbort = new AbortController();
@@ -720,7 +708,7 @@ export class ShowcaseManager {
         stream: true,
         stream_options: { include_usage: true },
       };
-      applyThinkingFlags(body, session.modelId, session.thinking !== false);
+      applyThinkingFlags(body, session.modelId, session.thinking);
 
       stream.status = "streaming";
       stream._t0 = performance.now();
@@ -731,6 +719,7 @@ export class ShowcaseManager {
       return runStreamingRequest(url, body, ctrl.signal, {
         collectContent: true,
         retryOnThinking400: true,
+        thinking: session.thinking,
         apiKey: session._apiKey,
         onDelta: (info) => {
           if (session.status !== "running") return;
@@ -757,6 +746,7 @@ export class ShowcaseManager {
               {
                 collectContent: true,
                 retryOnThinking400: true,
+                thinking: session.thinking,
                 apiKey: session._apiKey,
                 onDelta: (info) => {
                   if (session.status !== "running") return;

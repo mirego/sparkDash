@@ -3,6 +3,15 @@
  *
  * Measures real post-first-token decode tok/s against an OpenAI-compatible
  * chat completions endpoint. Concurrency levels run one after another.
+ *
+ * Output types (structured / prose / code / json) are prompt labels only —
+ * never response_format, grammars, or guided JSON.
+ *
+ * Structured protocol (matches glm-5.3-flash-sm120 tests/bench_decode.py):
+ * count 1→200, temperature 0.7 and thinking on by default (both selectable
+ * per run), top_p 1, warmup 32 tokens,
+ * decode tok/s = (completion_tokens − 1) / (last − first token).
+ * The same sampling protocol applies to every type.
  */
 
 import { randomUUID } from "crypto";
@@ -17,7 +26,24 @@ import {
   round2,
   runStreamingRequest,
   sleep,
+  stripFillForceFields,
 } from "./LlmStreaming.js";
+import {
+  pickDecodeBenchPrompts,
+  decodeBenchPromptForType,
+  normalizeDecodeBenchType,
+  DECODE_BENCH_DEFAULT_TYPE,
+  DECODE_BENCH_TYPES,
+  DECODE_CODE_WARMUP_PROMPT,
+} from "../../src/shared/llmPrompts.js";
+import { formatLlmBaseUrl } from "../../src/shared/llmTarget.js";
+import {
+  PREFILL_MAX_CONTEXT_SIZE,
+  PREFILL_MIN_CONTEXT_SIZE,
+  formatContextSize,
+  parseContextSize,
+} from "../../src/shared/prefillBench.js";
+import { assessContextCache, buildContextPrompt, timeoutMsForSize } from "./contextFill.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,52 +54,19 @@ const HISTORY_PATH =
 const ACTIVE_PATH =
   process.env.BENCH_ACTIVE_PATH || path.join(ROOT, "config", "bench-active.json");
 
-/**
- * Structured generation prompts (JSON / HTML). Models usually sustain higher
- * decode tok/s on these than open-ended chat essays. Keep prompts short and
- * distinct so concurrent streams don't share an identical prefix.
- */
-const BENCH_PROMPTS = [
-  "Write only valid JSON (no markdown). Generate a large array \"items\" of objects with fields id, name, category, price, inStock, tags (string array). Keep writing many items until you hit the length limit.",
-  "Write only valid JSON (no markdown). Generate a nested object for a fake e-commerce order: orderId, customer, shipping, lineItems[], payments[], timeline[]. Expand lineItems and timeline with many entries.",
-  "Write only valid JSON (no markdown). Generate { \"users\": [ ... ] } where each user has id, email, profile{firstName,lastName,bio}, roles[], lastLogin. Add as many users as possible.",
-  "Write only valid JSON (no markdown). Generate a metrics dump: { \"hosts\": [ { hostname, cpus[], disks[], gpus[], services[] } ] }. Invent many hosts with nested arrays fully populated.",
-  "Write only valid JSON (no markdown). Generate a GraphQL-like schema as JSON: types[], fields[], enums[]. Include many types each with many fields.",
-  "Write only valid JSON (no markdown). Generate { \"events\": [ ... ] } log lines with ts, level, service, message, attrs{}. Produce a long continuous event stream.",
-  "Write only valid JSON (no markdown). Generate a product catalog: categories[], products[] with sku, title, description, specs{}, variants[]. Make it large.",
-  "Write only valid JSON (no markdown). Generate OpenAPI-style paths as JSON: paths{}, components.schemas{}. Invent many endpoints and schemas.",
-  "Write only valid HTML5 (no markdown fences). Build a long multi-section documentation page with header, nav, main articles, tables, and footers. Keep adding sections.",
-  "Write only valid HTML5 (no markdown fences). Generate a large data table report (<table> with many rows) of invent server metrics: host, cpu, mem, disk, net, status. Dozens of rows.",
-  "Write only valid HTML5 (no markdown fences). Create a multi-page-looking dashboard layout with cards, lists, and nested <div>s. Keep expanding content blocks.",
-  "Write only valid HTML5 (no markdown fences). Write a long FAQ page with many <h2>/<p>/<ul> Q&A pairs about networking and GPUs. Keep adding pairs.",
-  "Write only valid HTML5 (no markdown fences). Generate a blog index with many <article> entries (title, date, tags, excerpt). Continue with lots of articles.",
-  "Write only valid HTML5 (no markdown fences). Produce a form-heavy admin UI: multiple <form>s with inputs, selects, textareas, and labels. Expand with more field groups.",
-  "Write only valid JSON (no markdown). Generate { \"benchmarks\": [ { name, concurrency, ttftMs, tokPerSec, notes } ] } with many synthetic result rows.",
-  "Write only valid JSON (no markdown). Generate a filesystem tree as nested JSON: { name, type, children[] }. Make a deep and wide tree under /data.",
-  "Write only valid JSON (no markdown). Generate { \" sparql_like_rows\": [ ... ] } with columns subject, predicate, object, graph — hundreds of triples style rows.",
-  "Write only valid HTML5 (no markdown fences). Write a long changelog page with version headings and bullet lists of changes. Keep adding versions.",
-  "Write only valid JSON (no markdown). Generate a chat transcript: { \"messages\": [ { role, content, ts } ] } alternating user/assistant, many turns, substantial content.",
-  "Write only valid HTML5 (no markdown fences). Generate a recipe site section with many recipes: ingredients lists and step lists. Keep adding recipes.",
-  "Write only valid JSON (no markdown). Generate geo data: { \"features\": [ { type:\"Feature\", properties{}, geometry{type,coordinates} } ] } with many features.",
-  "Write only valid HTML5 (no markdown fences). Create a long comparison matrix page using nested tables for software features. Fill many rows and columns.",
-  "Write only valid JSON (no markdown). Generate CI job results: { \"jobs\": [ { id, name, status, steps[], durationSec, logs[] } ] }. Expand jobs and steps.",
-  "Write only valid HTML5 (no markdown fences). Write an API reference page: many endpoint sections with <code> blocks and parameter tables. Keep going.",
-  "Write only valid JSON (no markdown). Generate a config blob: services{}, networks{}, volumes{}, env{} with many service definitions and ports.",
-  "Write only valid HTML5 (no markdown fences). Produce a news wire page: many <section> items with headline, byline, and paragraphs. Continue writing items.",
-  "Write only valid JSON (no markdown). Generate token usage records: { \"requests\": [ { id, model, promptTokens, completionTokens, latencyMs, route } ] } — many requests.",
-  "Write only valid HTML5 (no markdown fences). Build a long glossary: <dl> with many <dt>/<dd> terms about ML systems. Keep adding terms.",
-  "Write only valid JSON (no markdown). Generate a dependency lock style file: { \"packages\": { \"name\": { version, deps{}, integrity } } } with many packages.",
-  "Write only valid HTML5 (no markdown fences). Write a product landing page with repeated feature blocks, pricing tables, and testimonials. Expand heavily.",
-  "Write only valid JSON (no markdown). Generate sensor readings: { \"series\": [ { sensorId, points:[{t,v}] } ] } with long point arrays.",
-  "Write only valid HTML5 (no markdown fences). Create a multi-chapter tutorial with <h1>–<h3>, code samples in <pre>, and notes. Keep writing chapters.",
-];
+/** Lab protocol: temperature 0.7, thinking on (both selectable per run); top_p 1. Structured default. */
+const DEFAULT_TEMPERATURE = 0.7;
+const MIN_TEMPERATURE = 0;
+const MAX_TEMPERATURE = 2;
+const DEFAULT_THINKING = true;
 
 const ALLOWED_CONCURRENCIES = new Set([1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32]);
-const DEFAULT_MAX_TOKENS = 500;
+const DEFAULT_MAX_TOKENS = 400;
 const MIN_MAX_TOKENS = 64;
 const MAX_MAX_TOKENS = 2048;
-const PER_REQUEST_TIMEOUT_MS = 180_000;
-const WAVE_TIMEOUT_MS = 300_000;
+const WARMUP_MAX_TOKENS = 32;
+const PER_REQUEST_TIMEOUT_MS = 360_000;
+const WAVE_TIMEOUT_MS = 360_000;
 const HISTORY_LIMIT = 10;
 /** Hardware sample cadence while a concurrency wave runs (debug timeline). */
 const HARDWARE_SAMPLE_MS = 1_000;
@@ -118,31 +111,138 @@ async function pollHardwareSamples(sampleHardware, signal, intervalMs = HARDWARE
   return samples;
 }
 
-/**
- * Pick `count` distinct prompts (shuffled). Falls back to unique suffixes if
- * we ever need more than the pool size.
- */
-function pickDistinctPrompts(count) {
-  const pool = [...BENCH_PROMPTS];
-  // Fisher–Yates shuffle so concurrent sets vary across waves/runs
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    if (i < pool.length) {
-      out.push(pool[i]);
-    } else {
-      // Should not hit for allowed concurrencies ≤ pool size
-      out.push(`${pool[i % pool.length]}\n\n[stream variant ${i + 1}]`);
-    }
-  }
-  return out;
+/** Lab prompt for the selected type on every stream (C1 is the exact prompt). */
+function pickBenchPrompts(count, type) {
+  return pickDecodeBenchPrompts(count, type);
+}
+
+function decodeRequestBody(
+  modelId,
+  prompt,
+  maxTokens,
+  { temperature = DEFAULT_TEMPERATURE, thinking = DEFAULT_THINKING } = {}
+) {
+  const body = {
+    model: modelId || undefined,
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: maxTokens,
+    temperature,
+    top_p: 1,
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  applyThinkingFlags(body, modelId, thinking);
+  return body;
 }
 
 /**
- * Run one concurrency wave: N simultaneous streams, each with a different prompt.
+ * Short count stream so DFlash2 / Triton JIT is not billed on the first wave.
+ * Best-effort: a warmup failure does not fail the job.
+ */
+async function warmupDecode({
+  baseUrl,
+  modelId,
+  abortSignal,
+  apiKey,
+  debug = false,
+  promptType = DECODE_BENCH_DEFAULT_TYPE,
+  temperature = DEFAULT_TEMPERATURE,
+  thinking = DEFAULT_THINKING,
+}) {
+  const url = `${baseUrl}/v1/chat/completions`;
+  const kind = normalizeDecodeBenchType(promptType);
+  const warmupPrompt =
+    kind === "code" ? DECODE_CODE_WARMUP_PROMPT : decodeBenchPromptForType(kind);
+  const body = decodeRequestBody(modelId, warmupPrompt, WARMUP_MAX_TOKENS, { temperature, thinking });
+  const ctrl = new AbortController();
+  const onParentAbort = () => ctrl.abort();
+  if (abortSignal) {
+    if (abortSignal.aborted) ctrl.abort();
+    else abortSignal.addEventListener("abort", onParentAbort, { once: true });
+  }
+  const timeout = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
+  try {
+    await runStreamingRequest(url, body, ctrl.signal, {
+      debug,
+      retryOnThinking400: true,
+      thinking,
+      apiKey,
+    });
+  } catch {
+    /* ignore */
+  } finally {
+    clearTimeout(timeout);
+    if (abortSignal) abortSignal.removeEventListener("abort", onParentAbort);
+  }
+}
+
+/**
+ * Prefill each stream's context into the server's KV, one stream at a time (so a big context
+ * is never evicted by its neighbours' prefills and a failure names the stream). Each request is
+ * the exact prompt of the measured pass with a one-token reply, so the measured pass can reuse
+ * the prefix cache.
+ * @returns {Promise<{ results: object[], error: string | null }>}
+ */
+async function prefillContexts({
+  baseUrl,
+  modelId,
+  prompts,
+  contextTokens,
+  abortSignal,
+  apiKey,
+  temperature,
+  thinking,
+  onProgress = null,
+}) {
+  const url = `${baseUrl}/v1/chat/completions`;
+  const timeoutMs = timeoutMsForSize(contextTokens);
+  const results = [];
+  for (let i = 0; i < prompts.length; i += 1) {
+    if (abortSignal?.aborted) return { results, error: "Cancelled" };
+    onProgress?.(i, prompts.length);
+    const ctrl = new AbortController();
+    const onParentAbort = () => ctrl.abort();
+    abortSignal?.addEventListener("abort", onParentAbort, { once: true });
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, timeoutMs);
+    try {
+      const body = decodeRequestBody(modelId, prompts[i], 1, { temperature, thinking });
+      const r = await runStreamingRequest(url, body, ctrl.signal, {
+        retryOnThinking400: true,
+        thinking,
+        apiKey,
+      });
+      results.push(r);
+      const hasTiming = r.ttftMs > 0 || r.serverPromptMs > 0;
+      if (timedOut || r.error || !hasTiming) {
+        const why = timedOut
+          ? `timed out after ${Math.round(timeoutMs / 1000)}s`
+          : r.error || "no first token";
+        return {
+          results,
+          error: `Context prefill failed for stream ${i + 1} of ${prompts.length} at ${formatContextSize(contextTokens)}: ${why}`,
+        };
+      }
+    } catch (err) {
+      return {
+        results,
+        error: `Context prefill failed for stream ${i + 1} of ${prompts.length}: ${err?.message || err}`,
+      };
+    } finally {
+      clearTimeout(timeout);
+      abortSignal?.removeEventListener("abort", onParentAbort);
+    }
+  }
+  onProgress?.(prompts.length, prompts.length);
+  return { results, error: null };
+}
+
+/**
+ * Run one concurrency wave: N simultaneous streams.
+ * Prompts use the selected decode type (structured default).
  */
 function emptyWaveResult(concurrency, waveMs, results, modelId, error, prompts = [], debug = false) {
   return {
@@ -157,6 +257,10 @@ function emptyWaveResult(concurrency, waveMs, results, modelId, error, prompts =
     medianTtftMs: 0,
     /** Client-side: total decode tokens / concurrent decode window */
     aggregateDecodeTps: 0,
+    meanPrefillTps: 0,
+    medianPrefillTps: 0,
+    aggregatePrefillTps: 0,
+    totalPrefillTokens: 0,
     /**
      * Server-side generation tok/s (same basis as live Generation tok/s panel).
      * Null when the backend does not expose counters.
@@ -190,6 +294,9 @@ function streamPublicResult(r, index, prompt, reqMeta, debug = false) {
     decodeTps: r?.decodeTps ?? 0,
     decodeTokens: r?.decodeTokens ?? 0,
     completionTokens: r?.completionTokens ?? 0,
+    prefillTps: r?.prefillTps ?? 0,
+    prefillTokens: r?.prefillTokens ?? 0,
+    cachedTokens: r?.cachedPromptTokens ?? 0,
     totalMs: r?.totalMs ?? 0,
     error: r?.error ?? null,
   };
@@ -219,7 +326,59 @@ function streamPublicResult(r, index, prompt, reqMeta, debug = false) {
   return out;
 }
 
-async function runConcurrencyWave({
+
+/**
+ * Live generation rate of a wave, measured from the streams themselves: tokens received
+ * across all streams over the last ~2 s, sampled every second. The engine's own live
+ * reading is 0 on backends whose counters only move when a request finishes (TensorFold
+ * and EXL3 `/health` totals), and does not exist for a Remote target. Calls `onLive(tps)`
+ * once a second while tokens flow, and `onLive(null)` when the wave ends.
+ */
+export function createLiveRate(streams, onLive, { now = () => performance.now(), intervalMs = 1000, windowMs = 2000 } = {}) {
+  const counts = new Array(streams).fill(0);
+  const samples = []; // [time, total]
+  let timer = null;
+  const total = () => counts.reduce((a, b) => a + b, 0);
+  const tick = () => {
+    const t = now();
+    samples.push([t, total()]);
+    // Start the window where tokens start: the prefill before the first token is not decode time.
+    while (samples.length > 2 && samples[1][1] === 0) samples.shift();
+    while (samples.length > 2 && t - samples[0][0] > windowMs) samples.shift();
+    const [t0, n0] = samples[0];
+    const [t1, n1] = samples[samples.length - 1];
+    // Nothing streamed yet (still prefilling): no reading, rather than a misleading 0.
+    if (t1 <= t0 || n1 === 0) return;
+    try {
+      onLive?.(Math.round(((n1 - n0) / ((t1 - t0) / 1000)) * 10) / 10);
+    } catch {
+      /* the display must never break a run */
+    }
+  };
+  if (typeof onLive === "function") {
+    samples.push([now(), 0]);
+    timer = setInterval(tick, intervalMs);
+    timer.unref?.();
+  }
+  return {
+    note(index, tokenCount) {
+      const n = Number(tokenCount);
+      if (Number.isFinite(n) && n >= 0) counts[index] = n;
+    },
+    tick,
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+      try {
+        onLive?.(null);
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
+export async function runConcurrencyWave({
   baseUrl,
   modelId,
   concurrency,
@@ -228,10 +387,49 @@ async function runConcurrencyWave({
   sampleHardware = null,
   debug = false,
   apiKey = null,
+  promptType = DECODE_BENCH_DEFAULT_TYPE,
+  temperature = DEFAULT_TEMPERATURE,
+  thinking = DEFAULT_THINKING,
+  onLive = null,
+  contextTokens = 0,
+  contextSalt = randomUUID(),
+  onPrefill = null,
 }) {
   const url = `${baseUrl}/v1/chat/completions`;
-  const prompts = pickDistinctPrompts(concurrency);
+  // `prompts` are the task prompts (what debug traces show); `sendPrompts` are what goes on the wire.
+  const prompts = pickBenchPrompts(concurrency, promptType);
+  const deep = contextTokens > 0;
+  const sendPrompts = deep
+    ? prompts.map((task, i) => buildContextPrompt(contextTokens, `${contextSalt}-${i}`, task))
+    : prompts;
   const reqMeta = { url, modelId, maxTokens };
+
+  let fillResults = [];
+  let contextPrefillMs = 0;
+  if (deep) {
+    const fillStart = performance.now();
+    const fill = await prefillContexts({
+      baseUrl,
+      modelId,
+      prompts: sendPrompts,
+      contextTokens,
+      abortSignal,
+      apiKey,
+      temperature,
+      thinking,
+      onProgress: onPrefill,
+    });
+    contextPrefillMs = round2(performance.now() - fillStart);
+    fillResults = fill.results;
+    if (fill.error) {
+      const empty = emptyWaveResult(concurrency, 0, [], modelId, fill.error, prompts, debug);
+      empty.contextTokens = contextTokens;
+      empty.contextPrefillMs = contextPrefillMs;
+      return empty;
+    }
+  }
+
+  const live = createLiveRate(concurrency, onLive);
 
   const wallStart = performance.now();
 
@@ -261,27 +459,42 @@ async function runConcurrencyWave({
     }
 
     const body = {
-      model: modelId || undefined,
-      messages: [{ role: "user", content: prompts[streamIndex] }],
-      max_tokens: maxTokens,
-      temperature: 0,
-      stream: true,
-      stream_options: { include_usage: true },
-      // Prefer full-length generations when the backend supports it
+      ...decodeRequestBody(modelId, sendPrompts[streamIndex], maxTokens, { temperature, thinking }),
+      min_tokens: maxTokens,
       ignore_eos: true,
       stop: [],
     };
-    applyThinkingFlags(body, modelId, true);
 
-    const timeout = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
-    return runStreamingRequest(url, body, ctrl.signal, {
+    const streamOpts = {
       debug,
       retryOnThinking400: true,
+      thinking,
       apiKey,
-    }).finally(() => {
-      clearTimeout(timeout);
-      if (abortSignal) abortSignal.removeEventListener("abort", onParentAbort);
-    });
+      onDelta: (d) => live.note(streamIndex, d?.tokenCount),
+    };
+
+    return (async () => {
+      const timeout = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
+      try {
+        let result = await runStreamingRequest(url, body, ctrl.signal, streamOpts);
+        if (
+          result.error &&
+          /^HTTP 400\b/.test(result.error) &&
+          (body.min_tokens != null || body.ignore_eos != null)
+        ) {
+          result = await runStreamingRequest(
+            url,
+            stripFillForceFields(body),
+            ctrl.signal,
+            streamOpts
+          );
+        }
+        return result;
+      } finally {
+        clearTimeout(timeout);
+        if (abortSignal) abortSignal.removeEventListener("abort", onParentAbort);
+      }
+    })();
   });
 
   // Hard cap on the whole wave
@@ -295,6 +508,7 @@ async function runConcurrencyWave({
   try {
     results = await Promise.all(promises);
   } finally {
+    live.stop();
     clearTimeout(waveTimer);
     // Stop metrics / hardware polling as soon as streams finish
     hwPollAbort.abort();
@@ -311,11 +525,15 @@ async function runConcurrencyWave({
       waveMs,
       results,
       modelId,
-      `Wave timed out after ${WAVE_TIMEOUT_MS}ms`,
+      `Wave timed out after ${WAVE_TIMEOUT_MS}ms${deep ? " (is prefix caching enabled? The prefilled context may have been recomputed)" : ""}`,
       prompts,
       debug
     );
     if (debug) empty.hardwareSamples = hardwareSamples;
+    if (deep) {
+      empty.contextTokens = contextTokens;
+      empty.contextPrefillMs = contextPrefillMs;
+    }
     return empty;
   }
 
@@ -323,8 +541,10 @@ async function runConcurrencyWave({
   const failed = results.filter((r) => r.error || r.decodeTokens <= 0);
   const decodeTpsList = ok.map((r) => r.decodeTps);
   const ttftList = ok.map((r) => r.ttftMs);
+  const prefillTpsList = ok.map((r) => r.prefillTps).filter((n) => n > 0);
   const totalDecodeTokens = ok.reduce((s, r) => s + r.decodeTokens, 0);
   const totalCompletionTokens = ok.reduce((s, r) => s + r.completionTokens, 0);
+  const totalPrefillTokens = ok.reduce((s, r) => s + (r.prefillTokens || 0), 0);
 
   // Client aggregate over concurrent first→last content window (network-affected)
   let aggregateDecodeTps = 0;
@@ -334,6 +554,18 @@ async function runConcurrencyWave({
     const decodeWindowMs = Math.max(...lasts) - Math.min(...firsts);
     if (decodeWindowMs > 0) {
       aggregateDecodeTps = (totalDecodeTokens / decodeWindowMs) * 1000;
+    }
+  }
+
+  // Concurrent prefill window: earliest request start → latest first token
+  let aggregatePrefillTps = 0;
+  const t0s = ok
+    .map((r) => (r.t0 != null ? r.t0 : r.tFirst != null ? r.tFirst - (r.ttftMs || 0) : null))
+    .filter((t) => t != null);
+  if (ok.length > 0 && t0s.length && firsts.length && totalPrefillTokens > 0) {
+    const prefillWindowMs = Math.max(...firsts) - Math.min(...t0s);
+    if (prefillWindowMs > 0) {
+      aggregatePrefillTps = (totalPrefillTokens / prefillWindowMs) * 1000;
     }
   }
 
@@ -351,6 +583,10 @@ async function runConcurrencyWave({
     meanTtftMs: round2(mean(ttftList)),
     medianTtftMs: round2(median(ttftList)),
     aggregateDecodeTps: round2(aggregateDecodeTps),
+    meanPrefillTps: round2(mean(prefillTpsList)),
+    medianPrefillTps: round2(median(prefillTpsList)),
+    aggregatePrefillTps: round2(aggregatePrefillTps),
+    totalPrefillTokens,
 
     totalDecodeTokens,
     totalCompletionTokens,
@@ -366,6 +602,35 @@ async function runConcurrencyWave({
     model,
   };
   if (debug) wave.hardwareSamples = hardwareSamples;
+  if (deep) {
+    // A deep-context number only counts when the measured pass decoded from the prefilled KV.
+    const verdicts = results.map((r, i) =>
+      r.error
+        ? "unknown"
+        : assessContextCache({
+            promptTokens: r.prefillTokens,
+            cachedTokens: r.cachedPromptTokens,
+            ttftMs: r.ttftMs,
+            fillTtftMs: fillResults[i]?.ttftMs,
+          })
+    );
+    const count = (v) => verdicts.filter((x) => x === v).length;
+    wave.contextTokens = contextTokens;
+    wave.contextPrefillMs = contextPrefillMs;
+    wave.contextCache = {
+      cached: count("cached"),
+      partial: count("partial"),
+      uncached: count("uncached"),
+      unknown: count("unknown"),
+    };
+    wave.streams.forEach((st, i) => {
+      st.contextCache = verdicts[i];
+    });
+    const bad = count("partial") + count("uncached");
+    if (bad > 0) {
+      wave.warning = `${bad} of ${concurrency} streams re-prefilled part of the ${formatContextSize(contextTokens)} context (prefix cache miss), so their tok/s is not a clean deep-context decode. Enable prefix caching or raise its capacity.`;
+    }
+  }
   return wave;
 }
 
@@ -387,8 +652,28 @@ export class DecodeBenchManager {
     this.historyBySpark = new Map();
     this.historyPath = historyPath;
     this.activePath = activePath;
+    /** @type {((kind: string, job: object) => void) | null} */
+    this._onEvent = null;
     this._loadHistory();
     this._recoverInterruptedActive();
+  }
+
+  /** Optional sink invoked once when a job reaches completed/failed/cancelled. */
+  setEventSink(fn) {
+    this._onEvent = typeof fn === "function" ? fn : null;
+  }
+
+  _emitFinished(job) {
+    if (!this._onEvent) return;
+    try {
+      this._onEvent("decode", job);
+    } catch {
+      /* event recording must never break the bench */
+    }
+  }
+
+  activeCount() {
+    return this.activeBySpark.size;
   }
 
   getJob(benchId) {
@@ -589,6 +874,12 @@ export class DecodeBenchManager {
       } catch {
         /* ignore */
       }
+      try {
+        job._closeTarget?.();
+      } catch {
+        /* ignore */
+      }
+      job._closeTarget = null;
       job.status = "failed";
       job.error = reason;
       job.progress.message = "Interrupted";
@@ -621,22 +912,39 @@ export class DecodeBenchManager {
    *   modelId: string | null,
    *   concurrencies: number[],
    *   maxTokens?: number,
+   *   promptType?: string,
+   *   temperature?: number,
+   *   thinking?: boolean,
    *   debug?: boolean,
    *   sampleHardware?: (() => Promise<object | null> | object | null) | null,
    *   apiKey?: string | null,
+   *   resolveTarget?: (ctx: { onStatus?: Function, signal?: AbortSignal }) => Promise<{
+   *     host: string, port: number, tls?: boolean, via?: string, close: () => void
+   *   }>,
+   *   host?: string | null,
+   *   tls?: boolean,
    * }} opts
    */
   start(opts) {
     const {
       sparkId,
       lanIp,
+      llmHost,
       port,
       modelId,
       concurrencies: rawConc,
       maxTokens: rawMax,
+      promptType: rawType,
+      temperature: rawTemp,
+      thinking: rawThinking,
+      contextTokens: rawContext,
       debug = false,
       sampleHardware = null,
       apiKey = null,
+      resolveTarget = null,
+      host: rawHost = null,
+      tls: rawTls = false,
+      owner = null,
     } = opts;
 
     if (this.activeBySpark.has(sparkId)) {
@@ -668,6 +976,25 @@ export class DecodeBenchManager {
       throw err;
     }
 
+    let temperature = rawTemp == null || rawTemp === "" ? DEFAULT_TEMPERATURE : Number(rawTemp);
+    if (!Number.isFinite(temperature) || temperature < MIN_TEMPERATURE || temperature > MAX_TEMPERATURE) {
+      const err = new Error(`temperature must be between ${MIN_TEMPERATURE} and ${MAX_TEMPERATURE}`);
+      err.status = 400;
+      throw err;
+    }
+    temperature = Math.round(temperature * 100) / 100;
+    let contextTokens = 0;
+    if (rawContext != null && rawContext !== "" && Number(rawContext) !== 0) {
+      contextTokens = parseContextSize(rawContext);
+      if (contextTokens == null) {
+        const err = new Error(`contextTokens must be an integer between ${PREFILL_MIN_CONTEXT_SIZE} and ${PREFILL_MAX_CONTEXT_SIZE}, or 0 to start empty`);
+        err.status = 400;
+        throw err;
+      }
+    }
+    const promptType = normalizeDecodeBenchType(rawType);
+    const thinking =
+      rawThinking == null ? DEFAULT_THINKING : rawThinking === true || rawThinking === "true";
     const debugOn = Boolean(debug);
     const benchId = randomUUID();
     const abort = new AbortController();
@@ -679,10 +1006,18 @@ export class DecodeBenchManager {
       completedAt: null,
       config: {
         port: p,
+        llmHost: llmHost || null,
         modelId: modelId || null,
         concurrencies,
         maxTokens,
+        promptType,
+        temperature,
+        thinking,
+        ...(contextTokens > 0 ? { contextTokens } : {}),
         ...(debugOn ? { debug: true } : {}),
+        ...(rawHost
+          ? { host: String(rawHost).trim(), tls: Boolean(rawTls) }
+          : {}),
       },
       progress: {
         currentConcurrency: null,
@@ -697,6 +1032,9 @@ export class DecodeBenchManager {
       _apiKey: apiKey != null && String(apiKey).trim() ? String(apiKey).trim() : null,
       _sampleHardware:
         debugOn && typeof sampleHardware === "function" ? sampleHardware : null,
+      _resolveTarget: typeof resolveTarget === "function" ? resolveTarget : null,
+      _closeTarget: null,
+      owner: owner ? { id: owner.id, via: owner.via } : null,
     };
 
     this.jobs.set(benchId, job);
@@ -722,9 +1060,46 @@ export class DecodeBenchManager {
   }
 
   async _runJob(job, lanIp) {
-    const baseUrl = `http://${lanIp}:${job.config.port}`;
     const debug = Boolean(job._debug);
+    let host = lanIp;
+    let port = job.config.port;
+    let tls = Boolean(job.config.tls);
     try {
+      if (typeof job._resolveTarget === "function") {
+        job.progress.message = "Connecting to LLM…";
+        this._checkpointActive();
+        const target = await job._resolveTarget({
+          onStatus: (msg) => {
+            if (typeof msg === "string" && msg) job.progress.message = msg;
+            this._checkpointActive();
+          },
+          signal: job._abort.signal,
+        });
+        host = target?.host || host;
+        port = Number.isInteger(target?.port) ? target.port : port;
+        if (target?.tls != null) tls = Boolean(target.tls);
+        job._closeTarget = typeof target?.close === "function" ? target.close : null;
+        if (target?.via === "ssh-tunnel") {
+          job.progress.message = "Warming up via SSH tunnel…";
+        }
+      }
+      const baseUrl = formatLlmBaseUrl({ host, port, tls });
+      if (!job._abort.signal.aborted) {
+        if (!String(job.progress.message || "").startsWith("Warming up")) {
+          job.progress.message = "Warming up…";
+        }
+        this._checkpointActive();
+        await warmupDecode({
+          baseUrl,
+          modelId: job.config.modelId,
+          abortSignal: job._abort.signal,
+          apiKey: job._apiKey,
+          debug,
+          promptType: job.config.promptType,
+          temperature: job.config.temperature,
+          thinking: job.config.thinking,
+        });
+      }
       for (const c of job.config.concurrencies) {
         if (job._abort.signal.aborted) {
           if (job.status === "running") {
@@ -748,7 +1123,24 @@ export class DecodeBenchManager {
           sampleHardware: job._sampleHardware,
           debug,
           apiKey: job._apiKey,
+          promptType: job.config.promptType,
+          temperature: job.config.temperature,
+          thinking: job.config.thinking,
+          contextTokens: job.config.contextTokens || 0,
+          contextSalt: job.benchId,
+          onPrefill: (done, total) => {
+            job.progress.prefill = { done, total };
+            job.progress.message =
+              done < total
+                ? `Prefilling ${formatContextSize(job.config.contextTokens)} context ${done + 1}/${total} for ×${c}…`
+                : `Running concurrency ${c}…`;
+            this._checkpointActive();
+          },
+          onLive: (tps) => {
+            job.progress.liveTps = tps;
+          },
         });
+        job.progress.prefill = null;
 
         if (job._abort.signal.aborted) {
           // Keep partial wave only if it fully succeeded before cancel
@@ -791,10 +1183,17 @@ export class DecodeBenchManager {
         }
       }
     } finally {
+      try {
+        job._closeTarget?.();
+      } catch {
+        /* ignore */
+      }
+      job._closeTarget = null;
       if (job.completedAt == null) job.completedAt = Date.now();
       this.activeBySpark.delete(job.sparkId);
       this._pushHistory(job);
       this._checkpointActive();
+      this._emitFinished(job);
     }
   }
 
@@ -808,6 +1207,8 @@ export class DecodeBenchManager {
     this._saveHistory();
   }
 }
+
+export { ALLOWED_CONCURRENCIES, DEFAULT_MAX_TOKENS, normalizeConcurrencies };
 
 function normalizeConcurrencies(raw) {
   if (!Array.isArray(raw)) return [];
@@ -836,6 +1237,7 @@ function publicJob(job) {
       job.completedAt != null
         ? job.completedAt - job.startedAt
         : Date.now() - job.startedAt,
+    owner: job.owner || null,
   };
 }
 
@@ -846,4 +1248,12 @@ export const DECODE_BENCH_DEFAULTS = {
   defaultMaxTokens: DEFAULT_MAX_TOKENS,
   minMaxTokens: MIN_MAX_TOKENS,
   maxMaxTokens: MAX_MAX_TOKENS,
+  promptTypes: [...DECODE_BENCH_TYPES],
+  defaultPromptType: DECODE_BENCH_DEFAULT_TYPE,
+  defaultTemperature: DEFAULT_TEMPERATURE,
+  minTemperature: MIN_TEMPERATURE,
+  maxTemperature: MAX_TEMPERATURE,
+  defaultThinking: DEFAULT_THINKING,
+  minContextTokens: PREFILL_MIN_CONTEXT_SIZE,
+  maxContextTokens: PREFILL_MAX_CONTEXT_SIZE,
 };
