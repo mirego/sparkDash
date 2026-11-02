@@ -1407,6 +1407,8 @@ export interface DecodeBenchConfig {
   temperature?: number;
   /** Thinking on (default). Older runs have none: they ran with it off. */
   thinking?: boolean;
+  /** Prompt tokens each stream carries before it decodes (deep-context start). Absent: empty context. */
+  contextTokens?: number;
   /** On-demand remote host (Tailscale HTTPS, etc.). */
   host?: string;
   tls?: boolean;
@@ -1424,6 +1426,10 @@ export interface DecodeBenchStreamResult {
   completionTokens: number;
   prefillTps: number;
   prefillTokens: number;
+  /** Prompt tokens the server served from its prefix cache. */
+  cachedTokens?: number;
+  /** Deep-context runs: did this stream decode from the prefilled KV? */
+  contextCache?: "cached" | "partial" | "uncached" | "unknown";
   totalMs: number;
   error: string | null;
   /** Exact prompt used for this stream (debug). */
@@ -1481,6 +1487,12 @@ export interface DecodeBenchLevelResult {
   totalCompletionTokens: number;
   durationMs: number;
   error: string | null;
+  /** Deep-context runs: the prefix cache did not serve every stream's context, so tok/s is not clean. */
+  warning?: string;
+  /** Deep-context runs: prompt tokens per stream and the time spent prefilling them before the wave. */
+  contextTokens?: number;
+  contextPrefillMs?: number;
+  contextCache?: { cached: number; partial: number; uncached: number; unknown: number };
   streams: DecodeBenchStreamResult[];
   model: string | null;
   /** ~1 Hz GPU/VRAM/power samples during the wave (debug). */
@@ -1504,6 +1516,8 @@ export interface DecodeBenchProgress {
   message: string;
   /** Generation tok/s measured from the streams of the running wave; null before the first token. */
   liveTps?: number | null;
+  /** Deep-context runs: streams prefilled so far for the current level. */
+  prefill?: { done: number; total: number } | null;
 }
 
 export interface DecodeBenchJob {
@@ -1528,6 +1542,8 @@ export interface DecodeBenchDefaults {
   defaultPromptType: DecodeBenchPromptType;
   defaultTemperature?: number;
   defaultThinking?: boolean;
+  minContextTokens?: number;
+  maxContextTokens?: number;
 }
 
 export interface DecodeBenchListResponse {
@@ -1549,6 +1565,8 @@ export interface StartDecodeBenchRequest {
   temperature?: number;
   /** Default true. */
   thinking?: boolean;
+  /** Prefill every stream with this many prompt tokens before the decode wave. 0 or omitted: start empty. */
+  contextTokens?: number;
   /** On-demand remote LLM host (hostname or URL). Skips this Spark's LAN/SSH path. */
   host?: string;
   tls?: boolean;
