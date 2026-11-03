@@ -62,7 +62,7 @@
     "concurrently": "^10.0.3",
     "i18next": "26.4.2",
     "jsdom": "^30.0.1",
-    "postcss": "^8.5.19",
+    "postcss": "^8.5.26",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-i18next": "17.0.15",
