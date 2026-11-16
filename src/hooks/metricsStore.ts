@@ -208,7 +208,10 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
     const m = s.metrics;
     if (m.gpu) {
       if (m.gpu.metricAvailability?.usage !== false) pushHistory(`${s.id}:gpu.usage`, m.gpu.usage, at);
-      if (m.gpu.metricAvailability?.temperature !== false) pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      // Skip a missing or zero reading. A privileged Mac collector can supply a real one.
+      if (m.gpu.metricAvailability?.temperature !== false && m.gpu.temperature != null && m.gpu.temperature > 0) {
+        pushHistory(`${s.id}:gpu.temp`, m.gpu.temperature, at);
+      }
       if (m.gpu.temperatures?.memory != null && Number.isFinite(m.gpu.temperatures.memory)) {
         pushHistory(`${s.id}:gpu.memTemp`, m.gpu.temperatures.memory, at);
       }
@@ -235,7 +238,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[], at = Date.now()): void 
       }
     }
     if (m.cpu) {
-      pushHistory(`${s.id}:cpu.usage`, m.cpu.usage, at);
+      if (m.cpu.usageAvailable !== false) pushHistory(`${s.id}:cpu.usage`, m.cpu.usage, at);
       // Skip 0°C / missing sensor so no fake floor is drawn on the sparkline.
       if (m.cpu.temperature != null && m.cpu.temperature > 0) {
         pushHistory(`${s.id}:cpu.temp`, m.cpu.temperature, at);

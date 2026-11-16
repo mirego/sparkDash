@@ -20,8 +20,10 @@ config/model-prices.json
 config/model-prices.json.*
 config/fleet-energy.json
 config/fleet-energy-monthly.json*
+config/power-meters.json
 config/fleet-energy-monthly.unreadable-*
 config/.fleet-energy.json.*.tmp
+config/fleet-energy.recent.json
 config/alerts.json
 config/alerts.json.*
 config/gpu-memory.json
@@ -34,6 +36,9 @@ config/*.bak.*
 *.log
 .DS_Store
 docs/
+!/docs/
+/docs/*
+!/docs/I18N-COVERAGE.md
 mockups/
 PLAN.md
 tetris.html
@@ -54,3 +59,10 @@ config/metrics-history.json.corrupt-*
 config/fleet-energy.scope-*.json
 config/*.tmp
 config/*.json.*.tmp
+__pycache__/
+*.pyc
+
+# Keep only the unified localization inventory under version control.
+!/docs/
+/docs/*
+!/docs/I18N-COVERAGE.md

@@ -92,11 +92,28 @@ const DEFAULTS = Object.freeze({
   mqttUsername: "",
   /** Topic root for everything published (no wildcards, no slashes at the edges). */
   mqttTopicPrefix: "sparkdash",
+  /** Publish Home Assistant MQTT discovery configs (requires MQTT publishing). */
+  mqttDiscovery: false,
+  /** Discovery prefix — match the integration's setting in Home Assistant. */
+  mqttDiscoveryPrefix: "homeassistant",
+  /**
+   * Show the read-only API Keys page (LiteLLM virtual keys via a host-side bridge on a unix
+   * socket). Off by default. The bridge socket and token never live here (settings.json is
+   * world-readable) — they come from SPARKDASH_APIKEYS_BRIDGE_SOCKET / _TOKEN.
+   */
+  apiKeysEnabled: false,
   /**
    * Hide harness sessions older than this. Finite: 1 minute through 14 days.
    * A missing or out-of-range value becomes 12 hours. There is no unlimited value.
    */
   occupancyMaxAgeMs: 12 * 60 * 60 * 1000,
+  /**
+   * GPU temperature (°C) at which the Health "thermal" finding warns, and at
+   * which it turns critical. Alerts reuse that finding, so these also decide
+   * when a notification goes out. Warn must stay below critical.
+   */
+  healthTempWarnC: 85,
+  healthTempCriticalC: 90,
 });
 
 const POLL_INTERVAL_MIN_MS = 500;
@@ -104,6 +121,31 @@ const POLL_INTERVAL_MAX_MS = 60_000;
 export const OCCUPANCY_AGE_MIN_MS = 60 * 1000;
 export const OCCUPANCY_AGE_MAX_MS = 14 * 24 * 60 * 60 * 1000;
 export const OCCUPANCY_AGE_DEFAULT_MS = 12 * 60 * 60 * 1000;
+export const HEALTH_TEMP_MIN_C = 40;
+export const HEALTH_TEMP_MAX_C = 110;
+
+/** A finite temperature inside the accepted range, otherwise null. */
+function healthTemp(value) {
+  if (value == null || value === "" || typeof value === "boolean") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= HEALTH_TEMP_MIN_C && n <= HEALTH_TEMP_MAX_C ? n : null;
+}
+
+/**
+ * Reject a settings write that would leave the thermal thresholds unusable:
+ * a value that is not a number in range, or a warning that is not below the
+ * critical value. Only checked when the patch touches one of the two keys.
+ */
+function assertHealthTemps(current, patch) {
+  if (!("healthTempWarnC" in patch) && !("healthTempCriticalC" in patch)) return;
+  const merged = { ...current, ...patch };
+  const range = `between ${HEALTH_TEMP_MIN_C} and ${HEALTH_TEMP_MAX_C} °C`;
+  const warn = healthTemp(merged.healthTempWarnC);
+  const critical = healthTemp(merged.healthTempCriticalC);
+  if (warn == null) throw new Error(`healthTempWarnC must be a number ${range}`);
+  if (critical == null) throw new Error(`healthTempCriticalC must be a number ${range}`);
+  if (warn >= critical) throw new Error("healthTempWarnC must be lower than healthTempCriticalC");
+}
 
 /** "" (follow the browser) or an IANA zone name this runtime knows. */
 export function isValidTimeZone(value) {
@@ -216,16 +258,31 @@ function _clampSettings(settings) {
   s.metricsHistory = Boolean(s.metricsHistory);
   s.alertsEnabled = Boolean(s.alertsEnabled);
   s.mqttEnabled = Boolean(s.mqttEnabled);
+  s.apiKeysEnabled = Boolean(s.apiKeysEnabled);
   s.mqttUrl = normalizeMqttUrl(s.mqttUrl);
   s.mqttUsername = typeof s.mqttUsername === "string" ? s.mqttUsername.trim().slice(0, 128) : "";
   // Trailing slashes are normal while typing; strip them instead of rejecting.
   const prefix = typeof s.mqttTopicPrefix === "string" ? s.mqttTopicPrefix.trim().replace(/\/+$/, "") : "";
   s.mqttTopicPrefix = isValidMqttPrefix(prefix) ? prefix : DEFAULTS.mqttTopicPrefix;
+  s.mqttDiscovery = Boolean(s.mqttDiscovery);
+  const discoveryPrefix = typeof s.mqttDiscoveryPrefix === "string" ? s.mqttDiscoveryPrefix.trim().replace(/\/+$/, "") : "";
+  s.mqttDiscoveryPrefix = isValidMqttPrefix(discoveryPrefix) ? discoveryPrefix : DEFAULTS.mqttDiscoveryPrefix;
   const age = Number(s.occupancyMaxAgeMs);
   s.occupancyMaxAgeMs =
     Number.isFinite(age) && age >= OCCUPANCY_AGE_MIN_MS && age <= OCCUPANCY_AGE_MAX_MS
       ? Math.round(age)
       : OCCUPANCY_AGE_DEFAULT_MS;
+  // A hand-edited settings.json can hold unusable thresholds; updateSettings()
+  // rejects them on write, so here both fall back together to keep warn < critical.
+  const warnC = healthTemp(s.healthTempWarnC);
+  const criticalC = healthTemp(s.healthTempCriticalC);
+  if (warnC != null && criticalC != null && warnC < criticalC) {
+    s.healthTempWarnC = warnC;
+    s.healthTempCriticalC = criticalC;
+  } else {
+    s.healthTempWarnC = DEFAULTS.healthTempWarnC;
+    s.healthTempCriticalC = DEFAULTS.healthTempCriticalC;
+  }
   // Ensure temperatureUnit is valid
   if (s.temperatureUnit !== "celsius" && s.temperatureUnit !== "fahrenheit") {
     s.temperatureUnit = DEFAULTS.temperatureUnit;
@@ -279,10 +336,12 @@ export function getSettings() {
 
 /**
  * Apply a partial patch, persist, and return the new settings.
+ * Throws when the GPU temperature thresholds in the patch are not usable.
  * @param {Partial<typeof DEFAULTS>} patch
  * @returns {typeof DEFAULTS}
  */
 export function updateSettings(patch) {
+  assertHealthTemps(_settings, _whitelist(patch));
   const merged = _clampSettings({ ..._settings, ..._whitelist(patch) });
   _settings = merged;
   saveSettings();

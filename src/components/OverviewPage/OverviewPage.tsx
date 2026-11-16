@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { AlertInstance, SparkSnapshot } from "../../api/types";
 import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
 import { shutdownAllSparks, updateAllHermes, wakeAllSparks } from "../../api/client";
@@ -66,6 +67,7 @@ export function OverviewPage({
   onSelectSpark,
   onNavigate,
 }: OverviewPageProps) {
+  const { t } = useTranslation("overview");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "online" | "offline" | "issues">("all");
   const withoutWorkers = useMemo(
@@ -107,7 +109,13 @@ export function OverviewPage({
   const dialogSpark = dialogSparkId ? visibleSparks.find((s) => s.id === dialogSparkId) ?? null : null;
 
   const [batchLoading, setBatchLoading] = useState(false);
-  const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
+  const [batchMsg, setBatchMsg] = useState<
+    | { kind: "hermes"; started: number; skipped: number; failed: number }
+    | { kind: "wake"; sent: number; failed: number }
+    | { kind: "shutdown"; ok: number; skipped: number; failed: number }
+    | { kind: "error"; reason: "hermesFailed" | "wakeFailed" | "shutdownFailed"; rawMessage?: string }
+    | null
+  >(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
@@ -158,13 +166,7 @@ export function OverviewPage({
       const started = res.results.filter((r) => r.started);
       const skipped = res.results.filter((r) => r.skipped).length;
       const failed = res.results.filter((r) => !r.ok && !r.skipped).length;
-      const parts = [`${started.length} update${started.length === 1 ? "" : "s"} started`];
-      if (skipped) parts.push(`${skipped} skipped`);
-      if (failed) parts.push(`${failed} failed`);
-      setBatchMsg({
-        text: parts.join(", "),
-        tone: failed === 0 ? "ok" : "err",
-      });
+      setBatchMsg({ kind: "hermes", started: started.length, skipped, failed });
       // Merge with any in-flight batch instead of replacing (server may skip
       // already-running jobs, which must not clear a live progress bar).
       setBatchRun((prev) => {
@@ -174,8 +176,9 @@ export function OverviewPage({
       });
     } catch (err: unknown) {
       setBatchMsg({
-        text: err instanceof Error ? err.message : "Batch hermes update failed",
-        tone: "err",
+        kind: "error",
+        reason: "hermesFailed",
+        rawMessage: err instanceof Error ? err.message : undefined,
       });
     } finally {
       setBatchLoading(false);
@@ -190,14 +193,12 @@ export function OverviewPage({
       const res = await wakeAllSparks();
       const ok = res.results.filter((r) => r.ok).length;
       const fail = res.results.filter((r) => !r.ok).length;
-      setBatchMsg({
-        text: fail === 0 ? `${ok} wake packet(s) sent` : `${ok} sent, ${fail} failed`,
-        tone: fail === 0 ? "ok" : "err",
-      });
+      setBatchMsg({ kind: "wake", sent: ok, failed: fail });
     } catch (err: unknown) {
       setBatchMsg({
-        text: err instanceof Error ? err.message : "Batch wake failed",
-        tone: "err",
+        kind: "error",
+        reason: "wakeFailed",
+        rawMessage: err instanceof Error ? err.message : undefined,
       });
     } finally {
       setBatchLoading(false);
@@ -214,17 +215,12 @@ export function OverviewPage({
       const ok = res.results.filter((r) => r.ok).length;
       const fail = res.results.filter((r) => !r.ok && !r.skipped).length;
       const skipped = res.results.filter((r) => r.skipped).length;
-      const parts = [`${ok} shut down`];
-      if (fail) parts.push(`${fail} failed`);
-      if (skipped) parts.push(`${skipped} skipped`);
-      setBatchMsg({
-        text: parts.join(", "),
-        tone: fail === 0 ? "ok" : "err",
-      });
+      setBatchMsg({ kind: "shutdown", ok, skipped, failed: fail });
     } catch (err: unknown) {
       setBatchMsg({
-        text: err instanceof Error ? err.message : "Batch shutdown failed",
-        tone: "err",
+        kind: "error",
+        reason: "shutdownFailed",
+        rawMessage: err instanceof Error ? err.message : undefined,
       });
     } finally {
       setBatchLoading(false);
@@ -236,15 +232,15 @@ export function OverviewPage({
     const allWorkersHidden = hideWorkers && sparks.length > 0 && withoutWorkers.length === 0;
     const allOffline = hideOffline && withoutWorkers.length > 0;
     const title = allWorkersHidden
-      ? "Worker nodes are hidden"
+      ? t("page.empty.workersHiddenTitle")
       : allOffline
-        ? "All Sparks are offline"
-        : "No Sparks registered";
+        ? t("page.empty.allOfflineTitle")
+        : t("page.empty.noSparksTitle");
     const detail = allWorkersHidden
-      ? "Hide worker nodes is on in Settings. Turn it off to show Worker-role Sparks again."
+      ? t("page.empty.workersHiddenDetail")
       : allOffline
-        ? "Auto-hide is enabled and no Sparks are currently online."
-        : "Click the + tab to add a DGX Spark unit.";
+        ? t("page.empty.allOfflineDetail")
+        : t("page.empty.noSparksDetail");
     return (
       <div className="panel ov mx-auto mt-16 max-w-md p-8 text-center">
         <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft text-accent">
@@ -265,10 +261,10 @@ export function OverviewPage({
     <div className="ov">
       <div className="ov-title">
         <div>
-          <h1>Overview</h1>
+          <h1>{t("page.title")}</h1>
           <div className="ov-meta">
-            {sparks.length} Spark{sparks.length === 1 ? "" : "s"}
-            <span className="tag tag--good">{onlineCount}/{visibleSparks.length} online</span>
+            {t("page.sparkCount", { count: sparks.length })}
+            <span className="tag tag--good">{t("page.onlineCount", { online: onlineCount, total: visibleSparks.length })}</span>
             {todayWh > 0 ? (
               <button type="button" onClick={() => setEnergyOpen(true)} className="energy-chip"
                 title="GPU energy consumed today (all Sparks) — click for daily/weekly/monthly history">
@@ -276,23 +272,35 @@ export function OverviewPage({
                 {fmtEnergyWh(todayWh)} / {fmtCost(todayWh)}
               </button>
             ) : null}
-            {memTotalMb > 0 ? <span>{formatMb(memTotalMb)} unified memory</span> : null}
-            {hiddenWorkerCount > 0 ? <span>{hiddenWorkerCount} worker{hiddenWorkerCount === 1 ? "" : "s"} hidden</span> : null}
+            {memTotalMb > 0 ? <span>{t("page.unifiedMemory", { memory: formatMb(memTotalMb) })}</span> : null}
+            {hiddenWorkerCount > 0 ? <span>{t("page.hiddenWorkers", { count: hiddenWorkerCount })}</span> : null}
           </div>
         </div>
         <div className="ov-btns">
           {batchMsg && (
-            <span className={`ov-batchmsg ${batchMsg.tone === "ok" ? "is-ok" : "is-err"}`} role="status">
-              {batchMsg.text}
+            <span className={`ov-batchmsg ${batchMsg.kind === "shutdown" ? (batchMsg.failed === 0 ? "is-ok" : "is-err") : batchMsg.kind !== "error" && batchMsg.failed === 0 ? "is-ok" : "is-err"}`} role="status">
+              {batchMsg.kind === "error"
+                ? batchMsg.rawMessage ?? (batchMsg.reason === "hermesFailed" ? t("batch.hermesFailed") : batchMsg.reason === "shutdownFailed" ? "Batch shutdown failed" : t("batch.wakeFailed"))
+                : batchMsg.kind === "hermes"
+                  ? [
+                      t("batch.hermesStarted", { count: batchMsg.started }),
+                      ...(batchMsg.skipped ? [t("batch.skipped", { count: batchMsg.skipped })] : []),
+                      ...(batchMsg.failed ? [t("batch.failed", { count: batchMsg.failed })] : []),
+                    ].join(", ")
+                  : batchMsg.kind === "shutdown"
+                    ? [`${batchMsg.ok} shut down`, ...(batchMsg.failed ? [`${batchMsg.failed} failed`] : []), ...(batchMsg.skipped ? [`${batchMsg.skipped} skipped`] : [])].join(", ")
+                    : batchMsg.failed === 0
+                      ? t("batch.wakeSent", { count: batchMsg.sent })
+                      : t("batch.wakeResult", { sent: batchMsg.sent, failed: batchMsg.failed })}
             </span>
           )}
           {batchProg && (
             <div className="ov-prog">
               <span className="ov-prog__label">
                 <RotateIcon className="h-3 w-3" />
-                Updating Hermes {"\u2014"} {batchProg.done}/{batchProg.total}
-                {batchProg.failed > 0 && <span className="text-danger">({batchProg.failed} failed)</span>}
-                <button type="button" onClick={() => setBatchRun(null)} aria-label="Dismiss update progress" title="Dismiss" className="ov-prog__x">
+                {t("batch.hermesProgress", { done: batchProg.done, total: batchProg.total })}
+                {batchProg.failed > 0 && <span className="text-danger">({t("batch.failed", { count: batchProg.failed })})</span>}
+                <button type="button" onClick={() => setBatchRun(null)} aria-label={t("batch.dismissProgress")} title={t("batch.dismiss")} className="ov-prog__x">
                   {"\u2715"}
                 </button>
               </span>
@@ -311,15 +319,15 @@ export function OverviewPage({
                   type="button"
                   onClick={() => void handleUpdateAllHermes()}
                   disabled={batchLoading}
-                  title="Run `hermes update` on every Spark with Hermes Agent enabled"
+                  title={t("batch.updateHermesTitle")}
                   className={`btn ${hermesPendingUpdateCount > 0 ? "ov-btn--pending" : ""}`}
                 >
                   <RotateIcon className="h-3.5 w-3.5" />
-                  Update Hermes
+                  {t("batch.updateHermes")}
                   {hermesPendingUpdateCount > 0 && (
                     <span
                       className="ov-badge"
-                      title={`${hermesPendingUpdateCount} Spark${hermesPendingUpdateCount === 1 ? "" : "s"} with a Hermes update available`}
+                      title={t("batch.hermesUpdateAvailable", { count: hermesPendingUpdateCount })}
                     >
                       {hermesPendingUpdateCount}
                     </span>
@@ -331,11 +339,11 @@ export function OverviewPage({
                   type="button"
                   onClick={() => void handleWakeAll()}
                   disabled={batchLoading}
-                  title="Wake dedicated GPU hosts that have a MAC configured. DGX Spark has no Wake-on-LAN."
+                  title={t("batch.wakeAllTitle")}
                   className="btn"
                 >
                   <PowerOnIcon className="h-3.5 w-3.5" />
-                  Wake all
+                  {t("batch.wakeAll")}
                 </button>
               )}
               <button
@@ -363,24 +371,24 @@ export function OverviewPage({
       />
 
       {showOverviewSearch ? (
-        <div className="ov-search" role="search" aria-label="Filter fleet units">
+        <div className="ov-search" role="search" aria-label={t("page.filters.aria")}>
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search up to 12 units"
-            aria-label="Search units by name"
+            placeholder={t("page.filters.searchPlaceholder")}
+            aria-label={t("page.filters.searchAria")}
             className="ov-input"
           />
           <select
             value={statusFilter}
             onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
-            aria-label="Filter units by status"
+            aria-label={t("page.filters.statusAria")}
             className="ov-input ov-input--select"
           >
-            <option value="all">All status</option>
-            <option value="online">Online</option>
-            <option value="offline">Offline</option>
-            <option value="issues">Issues</option>
+            <option value="all">{t("page.filters.all")}</option>
+            <option value="online">{t("page.filters.online")}</option>
+            <option value="offline">{t("page.filters.offline")}</option>
+            <option value="issues">{t("page.filters.issues")}</option>
           </select>
         </div>
       ) : null}
@@ -388,7 +396,7 @@ export function OverviewPage({
       <div className="ov-grid">
         <div className="ov-sparks" data-count={visibleSparks.length}>
           {visibleSparks.length === 0 && (
-            <p className="panel ov-empty">No units match the current search and status filters.</p>
+            <p className="panel ov-empty">{t("page.noMatches")}</p>
           )}
           {visibleSparks.map((spark) => {
             const ctx = cardContext.get(spark.id);
@@ -411,7 +419,7 @@ export function OverviewPage({
           {showFleetEnergy ? <FleetEnergyCard nodeCount={sparks.length} nodeNames={Object.fromEntries(sparks.map((s) => [s.id, s.name]))} onOpenDetails={onNavigate ? () => onNavigate(ENERGY_ID) : undefined} /> : null}
           {showLlmTokenTotals ? <FleetTokenTotals onOpenDetails={onNavigate ? () => onNavigate(TOKENS_ID) : undefined} /> : null}
           {showActivityFeed ? (
-            <section className="panel ov-card" aria-label="Recent activity">
+            <section className="panel ov-card" aria-label={t("activity.title")}>
               <ActivityFeed limit={6} onSelectSpark={onSelectSpark} onViewAll={onNavigate ? () => onNavigate(ACTIVITY_ID) : undefined} />
             </section>
           ) : null}
