@@ -7,6 +7,16 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.4] — 2026-11-17
+
+### Added
+- **Upstream sync #9 (PR #31, card t_d4cc76c5).** Merged upstream `e89f8d1d` into `release/custom` — 184 upstream commits, headliners: read-only API Keys page behind a host bridge (off by default), Apple Silicon Mac collectors (GPU temp, RAM, sensors, model launcher discovery), i18n page slices, overview decode/prefill tile caption polish.
+
+### Changed
+- **Dependency bumps (dependabot).** postcss 8.5.19→8.5.26 (PR #1), vite 8.1.4→8.3.5 (PR #22).
+
+---
+
 ## [2.3.3] — 2026-11-02
 
 ### Added
