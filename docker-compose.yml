@@ -69,9 +69,15 @@ services:
       - SPARKDASH_ALLOW_OPEN_REMOTE=${SPARKDASH_ALLOW_OPEN_REMOTE:-1}
       - SPARKDASH_ALLOWED_HOSTS=${SPARKDASH_ALLOWED_HOSTS:-}
       - SPARKDASH_MQTT_PASSWORD=${SPARKDASH_MQTT_PASSWORD:-}
+      - SPARKDASH_HA_TOKEN=${SPARKDASH_HA_TOKEN:-}
+      - SPARKDASH_APIKEYS_BRIDGE_SOCKET=${SPARKDASH_APIKEYS_BRIDGE_SOCKET:-}
+      - SPARKDASH_APIKEYS_BRIDGE_TOKEN=${SPARKDASH_APIKEYS_BRIDGE_TOKEN:-}
       - PORT=5555
       - LLM_PORT=8888
       - NODE_ENV=production
+      # Opt in only if this process shares the physical host's network namespace.
+      # RootlessKit can isolate the daemon even with network_mode: host above.
+      - SPARKDASH_HOST_NETWORK=${SPARKDASH_HOST_NETWORK:-0}
       - HOST_PROC_PATH=/host/proc
       - HOST_SYS_PATH=/host/sys
       - HOST_ROOT_PATH=/host/root

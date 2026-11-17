@@ -33,6 +33,7 @@ import type {
   PiMonoExportResponse,
   MetricsHistoryRange,
   MetricsHistoryResponse,
+  ModelDiscoveryResponse,
   OccupancyCheck,
   OccupancyHelper,
   OccupancyHelperInput,
@@ -43,6 +44,7 @@ import type {
   ShowcaseStartResponse,
   SparkConfig,
   SparkTestResponse,
+  RuntimeControlView,
   StartDecodeBenchRequest,
   PrefillBenchJob,
   PrefillBenchListResponse,
@@ -56,7 +58,7 @@ import { authHeaders, reportAuthRequired } from "./authToken";
 const BASE = "";
 
 // ─── Generic fetch wrapper ────────────────────────────────
-async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
+export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   // Only set Content-Type for requests that actually carry a body. Setting it
   // on GET/DELETE was a no-op but could trigger an unnecessary CORS preflight
   // (OPTIONS) in some proxy setups.
@@ -422,6 +424,16 @@ export function clearQualityBenchHistory(
   return apiFetch(`/api/sparks/${id}/llm/quality-bench${q}`, { method: "DELETE" });
 }
 
+/** Remove one saved run. A run still in flight must be cancelled first (409). */
+export function deleteQualityBenchRun(
+  id: string,
+  benchId: string
+): Promise<{ success: boolean }> {
+  return apiFetch(`/api/sparks/${id}/llm/quality-bench/history/${benchId}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── LLM Prompt Showcase ──────────────────────────────
 /** Start a concurrent prompt showcase (returns 202 session). */
 export function startShowcase(
@@ -590,6 +602,69 @@ export interface BatchPowerResult {
     mac?: string;
     broadcast?: string;
   }[];
+}
+
+/** Mac node runtime control. Never treats a non-ready state as success. */
+async function runtimeControlFetch(path: string, opts?: RequestInit): Promise<RuntimeControlView> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...opts,
+      headers: {
+        ...(opts?.body ? { "Content-Type": "application/json" } : {}),
+        ...authHeaders(),
+        ...(opts?.headers as Record<string, string> | undefined),
+      },
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "runtime control request failed";
+    return { state: "unavailable", reason, serving: null, targets: [], error: reason, transportError: true };
+  }
+  let body: Partial<RuntimeControlView>;
+  try {
+    body = await res.json();
+    if (!body || typeof body !== "object") throw new Error("invalid runtime control response");
+  } catch {
+    const reason = "Runtime control response was unreadable; checking operation status";
+    return { state: "unavailable", reason, serving: null, targets: [], error: reason, transportError: true };
+  }
+  if (body.state === "ready" || body.state === "unavailable" || body.state === "denied") {
+    return {
+      state: body.state,
+      reason: body.reason ?? body.error ?? null,
+      serving: body.serving ?? null,
+      targets: Array.isArray(body.targets) ? body.targets : [],
+      error: body.error ?? null,
+      output: body.output ?? null,
+      ok: body.ok,
+      authorized: body.authorized,
+      busy: body.busy,
+      operation: body.operation,
+    };
+  }
+  const reason = body.error || body.reason || `HTTP ${res.status}`;
+  if (res.status === 403) {
+    return { state: "denied", reason, serving: body.serving ?? null, targets: body.targets ?? [], error: reason };
+  }
+  return { state: "unavailable", reason, serving: null, targets: [], error: reason, ...(res.ok ? { transportError: true } : {}) };
+}
+
+export function fetchRuntimeControl(id: string): Promise<RuntimeControlView> {
+  return runtimeControlFetch(`/api/sparks/${encodeURIComponent(id)}/runtime-control`);
+}
+
+export function startMacRuntime(id: string, runtime: string, model?: string): Promise<RuntimeControlView> {
+  return runtimeControlFetch(`/api/sparks/${encodeURIComponent(id)}/runtime-control/start`, {
+    method: "POST",
+    body: JSON.stringify({ runtime, model: model ?? null }),
+  });
+}
+
+export function stopMacRuntime(id: string, runtime: string): Promise<RuntimeControlView> {
+  return runtimeControlFetch(`/api/sparks/${encodeURIComponent(id)}/runtime-control/stop`, {
+    method: "POST",
+    body: JSON.stringify({ runtime }),
+  });
 }
 
 /** Gracefully shut down a single Spark (host script: spark-shutdown). */
@@ -764,6 +839,11 @@ export function updateLauncher(
   });
 }
 
+/** Save the order of a Spark's model list (the full list of launcher ids, first to last). */
+export function reorderLaunchers(sparkId: string, order: string[]): Promise<{ launchers: LlmLauncher[] }> {
+  return apiFetch(`${launchersBase(sparkId)}/order`, { method: "PUT", body: JSON.stringify({ order }) });
+}
+
 export function removeLauncher(sparkId: string, launcherId: string): Promise<{ success: boolean }> {
   return apiFetch(`${launchersBase(sparkId)}/${encodeURIComponent(launcherId)}`, { method: "DELETE" });
 }
@@ -781,6 +861,14 @@ export function readLauncherJob(sparkId: string, jobId: string, since = 0): Prom
 /** Stop watching the active job. A start script keeps running on the Spark. */
 export function cancelLauncherJob(sparkId: string): Promise<{ success: boolean }> {
   return apiFetch(`${launchersBase(sparkId)}/jobs/active`, { method: "DELETE" });
+}
+
+/**
+ * "Discover on this Spark": scan the dashboard's own unit for launchable model
+ * folders, ollama weights and HF-cache repos (server caches the scan 15 s).
+ */
+export function discoverModels(): Promise<ModelDiscoveryResponse> {
+  return apiFetch("/api/model-launcher/discover");
 }
 
 // ─── Tool Eval ───────────────────────────────────────────

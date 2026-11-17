@@ -19,6 +19,8 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 Monitored units run **Linux**, **macOS**, or **Windows** (a Windows PC with an NVIDIA GPU — or an AMD-iGPU Windows host like a Strix Halo, whose GPU usage comes from Windows' GPU engine counters; see [Windows PCs](#windows-pcs)).
 
+**Apple Silicon Macs** (for example a Mac Studio serving models with [oMLX](https://github.com/jundot/omlx)) can be added as a **Mac** unit. They are read over SSH with stock macOS tools, optionally plus a small [on-device agent](agents/macos/README.md) that adds the model-runtime inventory and explicit unavailable readings. See [Mac units](#mac-units).
+
 <img src="./.github/screenshot.png" alt="sparkDash Overview page with multiple DGX Spark units, GPU metrics, and LLM status">
 
 ### LLM Prompt Showcase
@@ -41,10 +43,13 @@ Monitored units run **Linux**, **macOS**, or **Windows** (a Windows PC with an N
 - [Tailnet monitoring](#tailnet-monitoring)
 - [Tailscale Serve (HTTPS)](#tailscale-serve-https)
 - [Mobile PWA (install on a phone)](#mobile-pwa-install-on-a-phone)
+- [Kiosk (wall display)](#kiosk-wall-display)
 - [Glance integration](#glance-integration)
+- [Home Assistant](#home-assistant)
 - [Quality bench](#quality-bench)
 - [Prometheus](#prometheus)
 - [Alert notifications](#alert-notifications)
+- [Power meters (wall power)](#power-meters-wall-power)
 - [RoCE / RDMA monitoring](#roce--rdma-monitoring)
 - [Intel Arc GPUs](#intel-arc-gpus)
 - [Windows PCs](#windows-pcs)
@@ -138,6 +143,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Prefill benchmark** | Context-size sweep (1k–300k) of prefill tok/s and TTFT; unique prefix per size; persisted last run. Same remote targeting as decode |
 | **Quality benchmark** | Fixed, seeded quality suite (QA, reasoning, arithmetic, state tracking, GSM8K, MMLU, plus optional instruction following and long-context recall) at temperature 0; per-category and overall score; last 30 runs kept; paired compare with McNemar p-value. Same remote targeting as decode |
 | **Prompt Showcase** | Full-page multi-terminal LLM streaming demo (up to 32 prompts) with live tok/s and copy-out |
+| **Kiosk** | `/kiosk`: a full-screen wall display with no menus — fleet totals, a large-type card per unit with a 30-minute trace, and the active alerts, on one screen (see [Kiosk](#kiosk-wall-display)) |
 | **LLM inference health** | KV cache free/pool (vLLM `cache_config_info` token and byte size; usage % when the pool size is absent), run/wait queue, TTFT/E2E/ITL p95, preemptions, prefix cache, MTP accept from Prometheus `/metrics` (vLLM and q27; q27 FIFO-queues so the Requests tile reads “N run” without a wait gauge) |
 | **Multiple LLM ports** | Monitor several LLM servers on different ports simultaneously — each gets its own panel with independent backend detection and metrics |
 | **GPU processes** | See the top GPU processes by VRAM usage directly in the GPU panel, including process name and memory allocation |
@@ -159,6 +165,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Secrets** | SSH passwords AES-256-GCM encrypted; never in `sparks.json` or API responses |
 | **Docker-first** | Single privileged container for host metrics; prod and dev Compose files |
 | **Hot config** | Add / edit / remove / reorder Sparks from the UI with no process restart |
+| **Home Assistant** | Custom integration: one device per unit already on this dashboard ([Home Assistant](#home-assistant)) |
 
 ---
 
@@ -376,6 +383,24 @@ Service worker caching: hashed `assets/*` are cache-first (immutable), `index.ht
 
 ---
 
+## Kiosk (wall display)
+
+Open **`/kiosk`** (sidebar → **Kiosk**, or **Kiosk** in the command palette) on a TV or a spare monitor. It has no menus and shows up to six units on one screen in at least two rows (3 × 2 on a 16:9 wall), in whichever column count gives the largest cards; each card sizes its type from its share of the screen, so it reads from across a room on a 720p TV or a 4K wall. A larger fleet keeps that card size and scrolls under the header, snapping a whole row at a time.
+
+- **Header:** fleet decode tok/s with its 30-minute trace, GPU power, the hottest GPU, queued requests, energy and output tokens over the last 24 hours (from Fleet energy; marked *est.* when estimated), units online, and the clock in the configured time zone.
+- **A card per unit in large type:** name, role (a worker's names its head), the served model with its context (in a pill on the name line) and IP; memory split as on the Overview (model / system / other, with the space free, and system RAM on a host with a discrete card; a Mac, whose GPU shares the system's memory, shows its unified pool, how much of it is in use and what the system has available); GPU use, temperature and power, CPU use and temperature, free space on the root disk, and live decode and prefill tok/s in one block of figures; and a 30-minute trace of GPU and CPU use and generation / prefill tok/s, drawn as smooth curves that never overshoot a sample, that takes the rest of the card. The figures come from the same code as the Overview card; its smaller extras (per-stream rates, slots, power limits, CPU power, storage used / total, chips and the model launcher) stay on the Overview.
+- **Alerts:** a band at the bottom lists the same alerts as the Overview (the server's firing set while alert notifications are on), and is hidden when there are none.
+
+Traces come from **Settings → Metrics history** (one-minute averages, refreshed every minute), so a reloaded wall shows the last half hour at once; with history off they start from what the browser has collected. The wall never dims or flashes for a slow or failed update: it keeps its last good frame and the clock shows how old it is. The page keeps the screen awake where the browser supports it (Screen Wake Lock), hides the cursor after three seconds, and **Esc** returns to the dashboard. **Settings → Hide workers** and **Show VRAM breakdown** apply here too. Below 760 px wide (a phone) the cards stack and scroll.
+
+URL flags choose the layout without touching settings:
+
+| Flag | Effect |
+|------|--------|
+| `?fit=scroll` | Cards of a fixed 3:2 shape that scroll, instead of fitting one screen (`shrink`, the default) |
+| `?cols=N` | A fixed number of columns (1–8) instead of the layout that gives the largest cards |
+| `?theme=oled` | A theme for this screen only (`white`, `light`, `dark`, `oled`); it is not saved |
+
 ## Glance integration
 
 [Glance](https://github.com/glanceapp/glance) can show the cluster on a self-hosted dashboard with the community widget [`sparkdash-dgx-cluster`](https://github.com/glanceapp/community-widgets/tree/main/widgets/sparkdash-dgx-cluster) (contributed by [@linxichen](https://github.com/linxichen)). One `custom-api` card renders GPU temperature and usage, VRAM, generation tok/s, KV-cache usage, and uptime for a head node plus one worker, reading `/api/sparks/:id/metrics` directly:
@@ -404,6 +429,16 @@ Service worker caching: hashed `assets/*` are cache-first (immutable), `index.ht
 
 ---
 
+## Home Assistant
+
+Home Assistant can poll this dashboard directly. Copy [`homeassistant/custom_components/sparkdash`](./homeassistant/custom_components/sparkdash) into `config/custom_components/sparkdash`, restart, then **Settings → Devices & services → Add integration → sparkDash**. The URL is fetched by Home Assistant, not by the browser. sparkDash listens on loopback by default; a Home Assistant host on another machine needs a reachable address (`BIND_HOST`) and, unless you accept an open LAN port, `SPARKDASH_TOKEN`. The integration sends that token as `Authorization: Bearer` and never writes settings or power state.
+
+Each Spark already listed by `GET /api/sparks` becomes a device. Sensors cover GPU temperature, usage and power, system power, VRAM, CPU, memory, OOM risk, the first probed model, decode tok/s, active slots and uptime, plus an online flag. The poll interval is 30 seconds. One Spark that misses its metrics call does not drop the others. Reload the integration after you add a Spark.
+
+If you already run a broker, [MQTT](#mqtt) is the other path. Install steps, the entity list and the limits are in [homeassistant/README.md](./homeassistant/README.md).
+
+---
+
 ## Quality bench
 
 The **Quality** button on the LLM card scores whatever model the port is serving on a fixed suite, so you can compare models, quantizations and KV-cache formats over time. Every item comes from a seeded PRNG and has a stable id: two runs are the same questions, paired item by item.
@@ -425,7 +460,7 @@ The overall score is the mean of the category percentages. Long sizes that do no
 
 The dialog shows live progress, the per-category table (mean completion tokens and how many replies hit `max_tokens` for the thinking categories, keys found and stale answers for long recall), and a collapsible per-item table with reply excerpts. Pick an earlier run under **Compare with** to see both scores, how many replies were identical, how many items only one run got right, and the exact two-sided McNemar p-value. When p ≥ 0.05 the row reads *difference within noise*. **Copy results** copies a plain-text summary.
 
-The last 30 runs per unit are kept in `config/quality-bench-history.json`, with the label, model id, settings, and per-item pass/fail and reply hash. One quality run per unit at a time; it cannot overlap a decode or prefill bench or a showcase. A full default run is about 755 requests, and the thinking categories can take a while on slow models.
+The last 30 runs per unit are kept in `config/quality-bench-history.json`, with the label, model id, settings, and per-item pass/fail and reply hash. A run can be removed on its own — **Delete** in the history table of the Quality bench page, or **Delete run** in the dialog's footer — without touching the other runs or the other ports' history; a run still in flight is refused, so cancel it first. One quality run per unit at a time; it cannot overlap a decode or prefill bench or a showcase. A full default run is about 755 requests, and the thinking categories can take a while on slow models.
 
 <sub>Quality bench by Mia's AI Lab.</sub>
 
@@ -546,15 +581,64 @@ Opt-in (default **off**). **Settings → MQTT publishing** forwards what sparkDa
 mosquitto_sub -h homeassistant.local -t 'sparkdash/#' -v
 ```
 
-Publishing is best-effort: while the broker is unreachable sparkDash retries every 5 s in the background and drops messages instead of queueing them, so a long outage leaves a gap rather than a backlog. A slow broker is handled the same way: at most 100 publishes wait for acknowledgement at once, beyond that new events are dropped and changed readings are sent once it catches up, and a connection that leaves a publish unacknowledged for 30 s is reopened. Nothing on the publish path can block a poll loop (warnings are rate-limited to one line per 30 s). For Home Assistant, `PREFIX/status/{unitId}` drives a binary sensor and each `PREFIX/metrics/{unitId}` key maps to a template sensor; for Node-RED the JSON is directly `msg.payload`.
+Publishing is best-effort: while the broker is unreachable sparkDash retries every 5 s in the background and drops messages instead of queueing them, so a long outage leaves a gap rather than a backlog. A slow broker is handled the same way: at most 100 publishes wait for acknowledgement at once, beyond that new events are dropped and changed readings are sent once it catches up, and a connection that leaves a publish unacknowledged for 30 s is reopened. Nothing on the publish path can block a poll loop (warnings are rate-limited to one line per 30 s). For Home Assistant, turn on discovery (below) or map `PREFIX/status/{unitId}` to a binary sensor and each `PREFIX/metrics/{unitId}` key to a template sensor yourself; for Node-RED the JSON is directly `msg.payload`.
+
+### Home Assistant
+
+**Settings → Home Assistant discovery** (`mqttDiscovery`, off by default) publishes retained discovery configs under the discovery prefix (default `homeassistant`, matching the MQTT integration's setting), so Home Assistant creates everything by itself: one **device per unit** (the dashboard is its `via_device`) with sensors for CPU utilization and temperature, RAM used, memory available, board power, one set per GPU (utilization, temperature, power, memory used), one set per LLM endpoint (up, generation/prefill tok/s, KV cache, running requests), per-interface traffic, per-disk usage and an **online** binary sensor — plus a **sparkDash dashboard** connectivity sensor for the dashboard itself, whose last will marks it down if sparkDash dies.
+
+Entity states come from the same `PREFIX/metrics/{unitId}` and `PREFIX/status/{unitId}` topics as everything else; the metrics payloads are retained, so a freshly restarted Home Assistant shows the last values immediately. Each entity is **unavailable** unless the dashboard is connected *and* the unit is online — an offline unit reads unavailable, not stale. Entities appear when a unit, GPU, LLM port, interface or disk appears, and are removed when it goes away, when discovery is switched off or its prefix changes, and when MQTT publishing is switched off (sparkDash waits up to 1.5 s for the broker to confirm before disconnecting); if the broker is unreachable at that moment, the removal is sent when sparkDash reconnects. Because what was published is only remembered in memory, sparkDash also reads its retained discovery configs back from the broker on every connect (a subscription to `DISCOVERY/+/+/+/config`, so the MQTT user needs read access there) and empties any it no longer wants — a unit deleted, or discovery switched off, while sparkDash was stopped. Only configs with sparkDash's node ids and a state topic under its own topic prefix are touched, so other integrations and a second sparkDash with another prefix are left alone. With discovery off, only the dashboard's own config topic is checked unless one is found. Left over still: configs at a broker sparkDash no longer connects to, and ones under a discovery prefix changed while sparkDash was stopped; delete those in Home Assistant (Settings → Devices & services → the sparkDash device). A reading the collectors could not take renders `None`, so the entity shows unknown instead of a fabricated zero (Home Assistant ignores an empty rendering and would keep the last value).
 
 ---
 
+## Power meters (wall power)
+
+Opt-in (off unless `config/power-meters.json` exists). The Energy page normally **estimates** power from GPU and CPU telemetry. If your units are on metered outlets — a smart strip or plug, a metered PDU, anything Home Assistant already reads — sparkDash records **wall power** in the same energy accounting. The Energy page then shows wall power, with GPU (measured) and CPU (modelled) beside it. Live readings are replaced by the meter's own record as it arrives, the first start backfills its history, and gaps are filled from the estimate at a ratio learned per unit. A chip on the Energy page and the Activity log show whether each meter is connected. Meters are pluggable providers, with Home Assistant first. Setup, reconciliation and the provider interface: [docs/POWER-METERS.md](./docs/POWER-METERS.md).
+
+---
+
+## API Keys
+
+Opt-in (default **off**). **Settings → API Keys page** adds a read-only **API Keys** page listing the [LiteLLM](https://docs.litellm.ai/docs/proxy/virtual_keys) virtual keys of a LiteLLM proxy you run: alias, state, spend, budget and reset period, RPM / TPM limits, expiry and last activity, with a detail view per key. While the setting is off there is no sidebar, command-palette or mobile entry, and every `/api/apikeys/*` route answers `404`.
+
+sparkDash never talks to LiteLLM and never holds its master key. It talks only to a small **bridge** on the LiteLLM host, over a unix socket, and the bridge answers a fixed list of read-only calls. There is no direct mode. Creating, deleting, blocking or re-budgeting keys is not part of this page.
+
+Set two variables in the server's environment (never in `config/settings.json`, which is world-readable), then bind-mount the socket's directory into the container:
+
+| Variable | Meaning |
+| --- | --- |
+| `SPARKDASH_APIKEYS_BRIDGE_SOCKET` | Path of the bridge's unix socket as seen by the sparkDash process |
+| `SPARKDASH_APIKEYS_BRIDGE_TOKEN` | Token sparkDash sends to the bridge as `Authorization: Bearer …`; the bridge stores only its sha256. Read once at startup |
+
+**Rotating the bridge token.** sparkDash reads `SPARKDASH_APIKEYS_BRIDGE_TOKEN` once at startup, and the reference bridge reads the token's sha256 from `APIKEYS_BRIDGE_TOKEN_SHA256` once at startup. The reference bridge accepts a single token, so the old and the new one are never valid at the same time: between the two restarts below, the API Keys page shows an error (nothing else in the dashboard uses the bridge). Rotate in this order:
+
+1. Make a token and its hash: `TOKEN=$(openssl rand -hex 32)`, then `printf %s "$TOKEN" | sha256sum` (the hash is the 64 hex characters before the `-`).
+2. Bridge first: put the hash in `APIKEYS_BRIDGE_TOKEN_SHA256` (edit the unit and run `systemctl daemon-reload`, or add a drop-in with `systemctl edit sparkdash-apikeys-bridge`, which reloads by itself), then run `systemctl restart sparkdash-apikeys-bridge`. From then on the old token gets `401`.
+3. Then sparkDash: put the new token in `SPARKDASH_APIKEYS_BRIDGE_TOKEN` where you set it, and restart sparkDash. With Docker, recreate the container (`docker compose up -d --force-recreate`); `docker compose restart` keeps the old environment.
+
+Until step 3, sparkDash backs off after each rejection (see **Bad token, lockout and backoff** below), which keeps its rejected calls few and normally well under the bridge's lockout; the restart in step 3 clears that backoff, so the page works again at once. In the other order, the restarted sparkDash can start backing off against the old bridge and keep the page waiting after the bridge is updated. Under Docker the order matters for one more reason: with the example unit, systemd removes and recreates the socket's directory whenever the bridge restarts, and a container started before that keeps seeing the old, empty directory until it is restarted or recreated. If the bridge does lock out (for example because another process on the socket kept sending a wrong token), the lockout ends when the oldest rejection leaves the 10-minute window, or at once when the bridge restarts, since the count is kept in memory only; under Docker, restart or recreate the sparkDash container after such a bridge restart, for the reason above.
+
+**Bridge protocol** (version 1). Every request is `GET` with `Authorization: Bearer <token>` and gets a JSON reply:
+
+| Call | Reply |
+| --- | --- |
+| `GET /v1/health` | `{ version, upstream: "ok" \| "down" }` |
+| `GET /v1/keys` | `{ keys: [Key] }` |
+| `GET /v1/keys/<id>` | `{ key: Key }`, `404` for an unknown key. `<id>` is LiteLLM's 64-hex hashed key id |
+
+`Key` is `{ id, alias, state ("active" | "blocked" | "expired"), blocked, spend, maxBudget, budgetDuration, budgetResetAt, expires, createdAt, lastActive, rpmLimit, tpmLimit, maxParallelRequests, models }`. Any field may be `null`; key material (`sk-…`) is never part of a reply. sparkDash drops fields it does not know, and a spend or limit that is missing or not a number is shown as **unknown**, never as `0`. For a key with a budget period, LiteLLM's `spend` covers only the current period. The reference bridge answers `502` rather than part of the list when LiteLLM reports more than 5000 keys or sends a `/key/list` page whose `total_pages` is not a positive whole number (LiteLLM's reply for an empty key table, with `total_count` and `total_pages` both `0`, is an empty list). It reads each LiteLLM reply as a stream and stops, counting the call as failed, as soon as the reply passes 8 MB or its `Content-Length` says it will.
+
+**Bad token, lockout and backoff.** When the bridge answers `401` or `403`, sparkDash stops calling it for 30 s, doubling on each further rejection up to 15 minutes, and the page shows the error and the wait instead of data; the first accepted call resets the backoff. A `429` from the bridge is honoured with its `Retry-After` (at most 15 minutes). The reference bridge itself refuses every request with `429` after 10 rejected tokens within 10 minutes, until the oldest failure leaves the window; any process that can open the socket can therefore trigger that lockout, so keep the socket's group to the sparkDash user. The routes are also behind sparkDash's own auth and a 60-requests-per-minute limit per client.
+
+**Reference bridge.** `scripts/apikeys-bridge/bridge.js` (Node, no dependencies) implements exactly the three calls above, using LiteLLM's `/health/readiness`, `/key/list` and `/key/info` with the master key. It refuses every other method (`405`) and path (`404`) without contacting LiteLLM. `scripts/apikeys-bridge/sparkdash-apikeys-bridge.service.example` runs it under systemd with the master key passed through `LoadCredential`, so the key file can stay root-only. Hash the token with `printf %s "$TOKEN" | sha256sum`. You may write your own bridge instead: anything that speaks the protocol above works.
+
+**Audit log.** None: this page cannot change anything, so nothing is logged and nothing grows on disk.
+
 ## RoCE / RDMA monitoring
 
-Spark units with RDMA devices (the CX7 ports) get a **RoCE / RDMA** panel on their page, with no switch integration and no root. Per port: link state and rate, MTU, RX/TX traffic, interface errors and drops, PFC priorities, QoS trust mode (PCP or DSCP) and the DSCP map, global pause settings, and the RDMA counters (out of buffer, sequence errors, ACK timeouts, ECN-marked packets, CNPs sent and handled) plus ethtool discards, CRC errors and pause frames, with the change since the last sample.
+Spark units with RDMA devices (the CX7 ports) get a **RoCE / RDMA** panel on their page, with no switch integration and no root. Per port: link state and rate, MTU, netdev RX/TX traffic, RDMA payload throughput (the port's own `port_rcv_data` / `port_xmit_data` counters), interface errors and drops, PFC priorities, QoS trust mode (PCP or DSCP) and the DSCP map, global pause settings, and the RDMA counters (out of buffer, sequence errors, ACK timeouts, ECN-marked packets, CNPs sent and handled) plus ethtool discards, CRC errors and pause frames, with the change since the last sample.
 
-Everything comes from the Spark itself: `/sys/class/infiniband`, `/sys/class/net`, `ethtool -S` / `-a` and `mlnx_qos -i`. The fast part (link, counters, traffic) is read about every 5 s; the slow part (ethtool counters, PFC and trust) every 30 s. Units without RDMA devices are skipped and re-checked every 10 minutes. The API exposes it as `metrics.roce` in `/api/sparks/:id/metrics`.
+Everything comes from the Spark itself: `/sys/class/infiniband`, `/sys/class/net`, `ethtool -S` / `-a` and `mlnx_qos -i`. The fast part (link, RDMA payload rates, counters, netdev traffic) is read about every 5 s; the slow part (ethtool counters, PFC and trust) every 30 s. Units without RDMA devices are skipped and re-checked every 10 minutes. The API exposes it as `metrics.roce` in `/api/sparks/:id/metrics`.
 
 Two health findings use it: **a RoCE link went down** (a port that was up, critical) and **RoCE is dropping packets** (RDMA loss counters such as `out_of_buffer` or sequence errors rising for three samples in a row, or port discards / CRC errors rising on two consecutive 30 s readings; a single dropped frame is not reported). Ports that never came up are not reported. Switch telemetry (PFC and ECN statistics on the switch side) is not part of this; it could be added later as an optional integration.
 
@@ -615,14 +699,14 @@ LM Studio (:1234), Ollama (:11434) and TensorFold (:8888) are one-click presets 
 | Engine | Signal |
 |--------|--------|
 | llama.cpp | `/slots` with per-slot timings |
-| vLLM | Prometheus `/metrics` (the default for OpenAI-compatible servers) |
+| vLLM | Prometheus `/metrics` (the default for OpenAI-compatible servers); `GET /version` supplies the engine version shown on the LLM panel |
 | SGLang | native `/server_info` / `/get_server_info` + `/model_info` |
 | LM Studio | `/api/v0/models` — model entries carry a load `state` (a contract no other engine has) |
 | Ollama | native `/api/tags` |
 | ds4-server | `ds4_*` Prometheus series |
 | EXL3 | `/health` with backend + token totals |
 | q27 | Prometheus exposition |
-| TensorFold | `owned_by` on `/v1/models`, totals from `/health` |
+| TensorFold | `owned_by` on `/v1/models`, totals from `/health`, and `/health`'s `version` when the build names one |
 | FreeToken | `/v1/stats` throughput contract |
 | Strata | `/health` reports `service: "strata"`, checked before the llama.cpp-compatible `/slots`; JSON `/metrics` supplies rates |
 
@@ -648,6 +732,8 @@ sparkDash only needs the engine's HTTP port; it does not care how the engine was
 - The dashboard container uses `network_mode: host`, so a port published on the unit's loopback or LAN address is reachable as `127.0.0.1` (this unit) or its LAN IP (a remote unit). Benchmarks on a remote unit whose server only listens on loopback fall back to an SSH tunnel.
 - A Docker-based start script that detaches (`docker run -d`) shows **Stopped** in the Models panel because the script's process group is gone, while the port probe shows **Serving**. Treat the port status as the source of truth (the **Output** button re-opens the script's output while it runs).
 - Provisioning models (pulling weights, choosing a recipe) stays with your own tool; the Models panel only runs the `start.sh` / `stop.sh` you register.
+
+**Discover on this Spark.** On the local unit, the *Add a model* dialog scans the machine when it opens (and on the button) and lists what it finds: directories holding a `start.sh` under `$HOME`, `$HOME/llms`, `$HOME/models` and `$HOME/Qwen*` (depth 3, at most 30), model names from `ollama list` inside the `spark-ollama-engine` container when it is running, and repos in `~/.cache/huggingface/hub`. The commands are fixed read-only templates (`find`, `docker ps`, `docker exec … ollama list`, `ls`); nothing from the browser reaches them. They run **as the host SSH user** through the launcher's `nsenter` + `setpriv` drop, the same privilege the launchers themselves use. `MODEL_DISCOVERY_ROOTS` (colon-separated) adds scan roots; each root must pass a character allow-list, and the value is **shell-expanded** on the unit (so `$HOME/x` and `Qwen*` work), not treated as a literal path list. Results are cached for 15 s and the route is rate-limited and local-unit-only.
 
 Model launchers require Bash, util-linux `setsid`, and GNU `tail` with `--pid` support on the Linux unit. **Start** and live **Output** drain the log before reporting completion, including the last line without a newline. The follower tracks the script's whole process group, so output continues when the wrapper exits but the model process is still running.
 
@@ -845,10 +931,13 @@ sparkDash/
 │   ├── collectors/      SystemCollector, LlmProbe, ssh, RoCE, Windows (PowerShell)
 │   ├── health/          HealthEvaluator (findings)
 │   ├── energy/          Fleet energy tracker + monthly archive
+│   ├── powermeter/      Opt-in wall-power meters: providers, polling, history reconciliation (recorded by energy/)
 │   ├── llmtokens/       Token ledger · events/ Activity log · metrics/ Unit history (GPU chart, Temps week, 48 h / 30 d tiers)
 │   ├── llmlaunch/       Model launchers · tooleval/ Tool Eval Bench
 │   ├── secretsStore.js  Encrypted password persistence
 │   └── validate.js      Host/user validation (SSRF-minded)
+├── homeassistant/       Home Assistant custom integration
+│   └── custom_components/sparkdash
 ├── config/              Runtime state (volume; secrets gitignored)
 ├── assets/              Logo (bolt.svg) and legacy media
 ├── .github/             README screenshot and Showcase video; image publish workflow
@@ -880,7 +969,7 @@ sparkDash/
 | GET/POST | `/api/restart` | `GET` says whether the server can restart itself (Docker with a restart policy); `POST` shuts down cleanly so Docker starts it again |
 | DELETE | `/api/events` · `/api/fleet-energy` | Clear Activity or Fleet energy: everything, or only entries older than `?olderThanMs=` |
 | DELETE | `/api/llm-token-totals` | Reset Token totals (all Sparks, or one with `?sparkId=`) |
-| GET | `/api/health` · `/api/auth/status` | Bind / auth mode; whether a token is required and accepted |
+| GET | `/api/health` · `/api/auth/status` | Bind / auth mode, the running server's version; whether a token is required and accepted |
 | GET · PUT · DELETE | `/api/sparks/:id/gpu-clock` | GPU clock cap on a Spark unit: status, apply (`maxMHz`, `persist`), remove (see [GPU clock cap](#gpu-clock-cap)) |
 | POST | `/api/sparks/gpu-clock-all` | GPU clock cap on every Spark at once: `{ maxMHz, persist? }`, or `{ reset: true }`; one result per unit (see [GPU clock cap](#gpu-clock-cap)) |
 | POST | `/api/sparks/:id/shutdown` · `/wake` · `/api/sparks/shutdown-all` · `/wake-all` | Power controls (see [Power controls](#power-controls-shutdown--wake-on-lan)) |
@@ -902,12 +991,13 @@ sparkDash/
 | GET | `/api/sparks/:id/llm/daily` | Daily busy decode/prefill tok/s (`port`, `days`) |
 | POST | `/api/sparks/:id/llm/bench` | Start decode benchmark (202); poll/cancel/clear on the same path |
 | POST | `/api/sparks/:id/llm/prefill-bench` | Start prefill + TTFT context sweep (202); poll/cancel/clear on the same path |
-| POST | `/api/sparks/:id/llm/quality-bench` | Start quality suite (202); `GET` lists active / last / history summaries, `GET :benchId` returns a full run, `DELETE :benchId` cancels, `DELETE` clears history |
+| POST | `/api/sparks/:id/llm/quality-bench` | Start quality suite (202); `GET` lists active / last / history summaries, `GET :benchId` returns a full run, `DELETE :benchId` cancels a run in flight (`409` once it has finished), `DELETE history/:benchId` removes one saved run, `DELETE` clears the history |
 | GET | `/metrics` | Prometheus exposition (opt-in, see [Prometheus](#prometheus)) |
 | GET | `/api/alerts` · `/api/alerts/config` | Firing, pending and recent alerts; rules and channels (URLs masked) — see [Alert notifications](#alert-notifications) |
 | PUT/POST | `/api/alerts/config` · `/api/alerts/test` | Save rules and channels; send a test message (both `409` while notifications are off) |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
+| GET | `/api/apikeys/status` · `/api/apikeys/keys` · `/api/apikeys/keys/:id` | Read-only API keys views through the host bridge (opt-in, `404` while off; see [API Keys](#api-keys)) |
 | WS | `/ws` | Real-time metrics stream |
 
 There is no application authentication on the HTTP/WebSocket API. sparkDash therefore binds to loopback and refuses direct LAN binding. Use an SSH tunnel, authenticated TLS reverse proxy, or Tailscale Serve; see [Remote access](./docs/REMOTE-ACCESS.md).
@@ -962,7 +1052,10 @@ Gear icon in the header, or `GET`/`PUT` `/api/settings`:
 | Metrics history (`metricsHistory`) | false | Keep 48 h of 1-minute and 30 days of 15-minute history per unit (GPU, memory headroom, CPU, RAM, network, LLM tok/s and KV) and show it in a History panel at the bottom of each unit's page (also `GET /api/sparks/:id/history`). The panel polls every 30 s only while it is on screen. Readings are gaps, not zeros, while a unit is offline or a collection is failed or older than 3 × the poll interval (at least 15 s). Stored in `config/metrics-history.json` (at most ~1 MB per unit, +~0.3 MB per LLM port), saved every 5 min and on shutdown; nothing is recorded or written while off |
 | Alert notifications (`alertsEnabled`) | false | Notify ntfy / Discord / Slack / a webhook about Health findings and Overview exceptions (see [Alert notifications](#alert-notifications)); while off nothing is evaluated or sent |
 | MQTT publishing | false | Publish the activity feed, per-unit availability and readings to an MQTT broker as they change (see [MQTT](#mqtt)); broker URL, username and topic prefix are set in the same dialog |
+| Home Assistant discovery | false | Publish retained MQTT discovery configs so Home Assistant creates the devices and sensors itself (see [Home Assistant](#home-assistant)) |
+| API Keys page (`apiKeysEnabled`) | false | Read-only page of LiteLLM virtual keys through a host-side bridge (see [API Keys](#api-keys)); while off there is no navigation entry and `/api/apikeys/*` answers `404` |
 | Session age (`occupancyMaxAgeMs`) | 12 hours | Hide harness sessions older than this. Settings offers 1 hour through 14 days. A missing or out-of-range value becomes 12 hours. There is no unlimited value |
+| GPU temperature alerts (`healthTempWarnC`, `healthTempCriticalC`) | 85, 90 | °C at which the Health finding for a hot GPU warns and turns critical; Alert notifications use the same limits. Each is a number from 40 to 110 and the warning must be lower than critical, otherwise the save is refused (`400` from `PUT /api/settings`). The values apply to every unit and to NVIDIA cards only, as before |
 
 ### Harness sessions
 
@@ -1002,6 +1095,9 @@ Copy `.env.example` to `.env` if needed:
 | `SPARKDASH_ALLOW_OPEN_REMOTE` | `1` | Unset, empty, or `1`: a non-loopback bind without `SPARKDASH_TOKEN` stays open. `0`: refuse to start without a token (fail closed). |
 | `SPARKDASH_ALLOWED_HOSTS` | _(empty)_ | Only for a reverse proxy on a custom domain: comma-separated names a loopback bind should also answer to. `localhost`, IP addresses, this machine's hostname and its Tailscale name work without it. |
 | `SPARKDASH_MQTT_PASSWORD` | _(empty)_ | Password for the MQTT broker configured in Settings → MQTT (the URL and username live in `settings.json`). Read once at startup. |
+| `SPARKDASH_HA_TOKEN` | _(empty)_ | Long-lived Home Assistant access token for [power meters](./docs/POWER-METERS.md) (the URL and outlets live in `config/power-meters.json`). Read once at startup. |
+| `SPARKDASH_APIKEYS_BRIDGE_SOCKET` | _(empty)_ | Unix socket of the API keys bridge (see [API Keys](#api-keys)). Read once at startup. |
+| `SPARKDASH_APIKEYS_BRIDGE_TOKEN` | _(empty)_ | Token sent to the API keys bridge; never stored in `settings.json`. Read once at startup. |
 | `SPARKDASH_HELPER_HOSTS` | _(empty)_ | Extra hostnames allowed for harness occupancy helpers, comma separated. `localhost`, `127.0.0.1` and `::1` are always allowed. The dashboard connects only to an address from that lookup and does not follow redirects |
 | `OCCUPANCY_POLL_MS` | `15000` | How often the dashboard reads each helper's cache. Clamped to 5–120 seconds |
 | `PORT` | `5555` | HTTP + WebSocket listen port |
@@ -1017,7 +1113,7 @@ Copy `.env.example` to `.env` if needed:
 | `POLL_INTERVAL_HERMES` | `600000` | Hermes Agent update check poll (ms) |
 | `POLL_INTERVAL_TAILSCALE` | `30000` | Tailnet probe poll (ms) |
 | `TAILSCALE_PROBE_TIMEOUT_MS` | `8000` | Timeout for `tailscale status --json` (ms) |
-| `POLL_INTERVAL_NVERR` | `60000` | Kernel journal scan for NVRM `NV_ERR_NO_MEMORY` (ms) |
+| `POLL_INTERVAL_NVERR` | `60000` | Incremental kernel journal reads for NV_ERR, Xid and OOM counters (ms), after the initial backfill |
 | `HERMES_UPDATE_TIMEOUT_MS` | `600000` | Hard timeout for running `hermes update` over SSH (ms) |
 | `POLL_INTERVAL_LIVENESS` | `5000` | Online/SSH liveness check (ms) |
 | `SPARKDASH_SECRETS_KEY` | _(auto)_ | Passphrase or 64-char hex for secret encryption |
@@ -1030,6 +1126,7 @@ Copy `.env.example` to `.env` if needed:
 | `MAX_ACTIVE_BENCH_JOBS` | `2` | Benchmarks (decode, prefill, quality) that may run at the same time across the whole fleet; each unit still runs one at a time. Clamped to 1–32. A start above the cap is refused with 429. Docker compose passes it through; set it in `.env`. |
 | `FLEET_ENERGY_JSON_PATH` | `config/fleet-energy.json` | Rolling fleet-energy persistence path |
 | `FLEET_ENERGY_MONTHLY_JSON_PATH` | `config/fleet-energy-monthly.json` | Permanent monthly energy archive |
+| `POWER_METERS_CONFIG_PATH` | `config/power-meters.json` | Opt-in [power meters](./docs/POWER-METERS.md): the feature runs only when this file exists |
 | `GPU_HISTORY_JSON_PATH` | `config/gpu-history.json` | 8 h GPU chart history |
 | `GPU_HISTORY_LONG_JSON_PATH` | `config/gpu-history-long.json` | 7-day minute-resolution GPU history (Temps page) |
 | `METRICS_HISTORY_JSON_PATH` | `config/metrics-history.json` | 48 h / 30 d unit history (only with `metricsHistory` on) |
@@ -1050,6 +1147,7 @@ For compatibility, `SSH_CONTROL_PERSIST` is accepted as a seconds-based fallback
 1. Click **+** next to *Sparks* in the sidebar (or **Add Spark / GPU host** in the Sparks menu on a phone).
 2. Choose **Unit type**:
    - **NVIDIA DGX Spark** — the default; hardware summary shows DGX Spark specs and the CX7 IP field is available.
+   - **Apple Silicon Mac** — a Mac monitored over SSH with macOS tools, optionally through the [Mac node agent](agents/macos/README.md) for runtime detection; see [Mac units](#mac-units).
    - **Dedicated GPU host** — any Linux machine with an NVIDIA GPU. It is monitored exactly like a Spark (SSH + `nvidia-smi`) but is **not** reported as a DGX Spark: the header shows a detected hardware summary (GPU model, CPU, RAM) instead of fixed GB10 specs, and the page shows separate **RAM** and **VRAM** panels (VRAM from `nvidia-smi`, RAM from system memory). On the unit page, RAM → Network → Storage stack in the right column with GPU filling the left column. A host with **more than one GPU** needs nothing extra: every card `nvidia-smi` lists is collected, the header names them all, the GPU panel shows a block per card, and `metrics.gpu` stays the aggregate (hottest / busiest card, summed power and VRAM) with the per-card detail under `gpu.gpus[]`.
    - **Windows PC with an NVIDIA GPU** — a Windows machine with the OpenSSH Server and the NVIDIA driver; see [Windows PCs](#windows-pcs). Always a remote unit; no model launchers, CPU temperature or Hermes / Tailnet checks.
 3. Set **Name** and choose whether this is **This host**. Local units do not require a LAN IP or SSH; their optional LAN IP enables browser links. On a dedicated GPU host it also directs Wake-on-LAN. Remote units require a LAN IP/host, SSH user, and key or password. Key auth in Docker needs a key mounted into the container (see Quick start).
@@ -1076,6 +1174,76 @@ Local, macOS and Windows units are skipped. Additional models are
 labelled **Loaded**. Throughput, benchmarks and token totals still apply to the
 configured LLM endpoints; discovery does not add a monitored endpoint. Offline
 units do not display stale discovered models.
+### Mac units
+
+A unit with **Unit type → Apple Silicon Mac** (`kind: "mac"`) is always remote. Without the optional [Mac node agent](agents/macos/README.md), it is read over SSH with stock macOS tools:
+
+| Metric | Source |
+|---|---|
+| CPU usage | `top -l 1` |
+| Unified memory in use (like Activity Monitor: app + wired + compressed), GPU-wired share, free, swap | `hw.memsize`, `vm_stat`, `vm.swapusage` |
+| Disk | `df -k` on the data volume (`/System/Volumes/Data`) |
+| Network | `netstat -ib` on the default-route interface |
+| GPU busy %, GPU clock, GPU / CPU / combined power, thermal pressure | `sudo -n powermetrics` (one 0.5 s sample per poll) |
+| Uptime | `kern.boottime` |
+| Hardware header (model, chip, cores, memory) | `sysctl` |
+
+The non-privileged reads share one SSH call per poll. Metal wires MLX weights and KV cache while a model is working, but macOS can un-wire an idle model back into ordinary app memory without freeing it, so memory in use counts app memory as well as wired pages; the wired share is reported separately. SSH does not supply CPU or GPU temperatures. For measured temperatures, see the agent's [opt-in root collector](agents/macos/README.md#opt-in-root-temperatures).
+
+**Requirements on the Mac**
+- Remote Login (SSH) enabled, and the sparkDash host's key in the account's `authorized_keys`.
+- For GPU activity and power, passwordless sudo for the exact `powermetrics` call the collector
+  makes, e.g. `/etc/sudoers.d/sparkdash`:
+  `youruser ALL=(root) NOPASSWD: /usr/bin/powermetrics -n 1 -i 500 --samplers gpu_power,cpu_power,thermal`.
+  Pin the arguments: a bare `NOPASSWD: /usr/bin/powermetrics` also matches every other sampler and
+  option, which is effectively root. Without the rule the GPU fields read **n/a** and everything
+  else still works.
+- For the LLM card, the model server port reachable from the sparkDash host.
+
+**Mac node agent (optional, recommended).** Installing [`agents/macos`](agents/macos/README.md)
+— one stdlib-only Python script, no `pip install` — and setting the unit's
+**Mac node agent** port reads the Mac from the device instead of over SSH, and
+adds runtime inventory and explicit metric availability:
+
+- **Runtime inventory.** The overview card shows runtimes as chips; the Mac page
+  gets a **Model runtimes** panel. See the agent guide's
+  [inventory rules](agents/macos/README.md#runtime-inventory) and
+  [elevated-process privacy rules](agents/macos/README.md#opt-in-root-temperatures).
+- **Runtime launcher (Mac node only).** The Mac page also has a launcher tile:
+  runtime picker, model picker, and one Launch or Stop action. It talks to the
+  agent `/control` endpoint and stays unavailable until
+  `SPARKDASH_MAC_CONTROL_TOKEN` is set on both the agent and the dashboard.
+  Nothing is started just to refresh the tile. A failed action shows the
+  command's error, and the serving line comes from a live probe. Other unit
+  types do not get this control. See
+  [Runtime control](agents/macos/README.md#runtime-control).
+- **Honest availability.** Missing metrics render as **unavailable** with the
+  node's reason in the tooltip; CPU and GPU temperature rows also show the reason
+  inline. See the [agent guide](agents/macos/README.md) for metric sources and
+  privilege requirements. A Mac (or Linux host) carries a platform badge, so it
+  is never mistaken for a Spark.
+
+See the agent guide's [snapshot and SSH fallback contract](agents/macos/README.md#run-it)
+for collection ownership and pending samples. When fallback is needed, the UI
+shows **Runtimes (agent unreachable)** rather than claiming nothing is serving.
+DGX Spark behaviour is untouched: no agent, no runtime row, and the card is
+unchanged apart from the platform badge.
+
+**Example unit** (`config/sparks.json`, or add it in the UI):
+
+```json
+{
+  "id": "mac-studio",
+  "name": "mac-studio",
+  "kind": "mac",
+  "lanIp": "100.64.0.10",
+  "ssh": { "host": "100.64.0.10", "user": "macuser", "auth": "key" },
+  "agent": { "port": 8790 },
+  "llmPorts": [8000],
+  "role": "standalone",
+  "llmMonitoring": true
+}
+```
 
 ### Power controls (shutdown / Wake-on-LAN)
 
@@ -1175,7 +1343,7 @@ If host memory remains low, compare Linux `MemAvailable` and per-process residen
 
 ### Health findings
 
-`server/health/HealthEvaluator.js` runs a handful of rules over metrics sparkDash already collects, once per Spark, and reports them as `health[]` on the unit's snapshot. A rule never guesses: a missing metric raises nothing. Findings carry a severity, a detail and a hint, show up as chips on the Overview cards and in full on the unit page, and the monitor writes an Activity event when one appears or clears (never for the first baseline after a restart). The kernel Xid / OOM counters come from one cached `journalctl -k` scan per minute.
+`server/health/HealthEvaluator.js` runs a handful of rules over metrics sparkDash already collects, once per Spark, and reports them as `health[]` on the unit's snapshot. A rule never guesses: a missing metric raises nothing. Findings carry a severity, a detail and a hint, show up as chips on the Overview cards and in full on the unit page, and the monitor writes an Activity event when one appears or clears (never for the first baseline after a restart). The kernel NV_ERR / Xid / OOM counters share one cached journal cursor. Reads process at most 10,000 records and have a host-side 3-second hard timeout, including over SSH. Initial history is backfilled one page per 10 seconds (when polled); counters remain unknown until the baseline is complete. Later reads resume after the cursor at `POLL_INTERVAL_NVERR` cadence rather than scanning the whole boot journal again. Failed reads retain the last complete reading and retry after that interval.
 
 ### Windows units
 
@@ -1258,9 +1426,9 @@ Contributions are welcome. Conventions:
 
 Settings → Language switches immediately between English and 简体中文, remembers the choice in this browser (`sparkdash-locale`) and updates `<html lang>`. It applies without Save and preserves pending settings edits. A supported stored preference takes precedence over the browser language; unsupported languages fall back to English. Simplified Chinese tags and the earlier `zh-Hans` preference map to `zh-CN`; Traditional Chinese is not supported yet. Switching still works for the current page when browser storage is blocked.
 
-This foundation translates Settings and its embedded browser-alert controls. Navigation, other pages, the separate Alerts dialog, access-token prompt and raw server diagnostics remain English for later page-sized changes. Server settings and other users' language preferences are unaffected.
+The translated surfaces include the foundation's Settings rows and embedded browser-alert controls; desktop and mobile navigation, command palette, theme controls, connection/error banners, open-access warning and install prompt; the Overview page with its unit cards, fleet metrics, activity/alert controls and inline actions; the Spark detail page, including the GPU, CPU, system RAM and unified-memory panels, GPU history-chart controls, the shared process table, the LLM live panel (metrics/help, port/API-key settings, benchmark entry controls and sessions), LLM history/daily charts and cumulative token tables, headers/actions, storage, network, RoCE, Tailscale, ComfyUI, metric history, model scripts/launcher and Hermes update controls; fleet reports (token totals, cost comparison, energy and monthly archives, temperature charts, activity filters/exports and kiosk presentation); device setup (Add/Edit Spark, per-unit GPU clock controls, Harness setup, alert configuration and access-token dialogs); Decode, Prefill, Quality and Tool Eval benchmark workflows with their generated share cards; and the embedded and full-screen Showcase views. Language changes preserve drafts, selected ranges, filters, chart geometry, pending requests and token accounting. Raw server events and diagnostics, user-supplied names, device/interface identifiers, model names, commands, prompts, streamed output and stable option/metric IDs remain unchanged. See [UI localization coverage](docs/I18N-COVERAGE.md) for merged, pending and unwired slices. Server settings and other users' language preferences are unaffected.
 
-`src/i18n/index.ts` owns one i18next/react-i18next instance, initialized by `src/main.tsx` before React mounts. The small `language` and `settings` catalogs are bundled eagerly. English JSON in `src/locales/en/` is the source of truth and fallback; `src/locales/zh-CN/` mirrors each page or namespace. Add future namespace imports and resources to this same loader.
+`src/i18n/index.ts` owns one i18next/react-i18next instance, initialized by `src/main.tsx` before React mounts. The `settings`, `language`, `shell`, `overview`, `spark`, `activity`, `statistics`, `devices`, `hardware`, `shareCards`, `toolMessages`, `tooleval`, `benchmarks` and `showcase` catalogs are bundled eagerly. English JSON in `src/locales/en/` is the source of truth and fallback; `src/locales/zh-CN/` mirrors each page or namespace. Add future namespace imports and resources to this same loader.
 
 Use `const { t } = useTranslation("settings")` with static keys such as `t("dialog.save")`. Add the English entry first, then its translation. Use plain i18next interpolation (`"Hello, {{name}}"`) and ordinary plural keys (`items_one` / `items_other` with a numeric `count`); there is no ICU plugin or `intl-messageformat`. React escapes rendered text. Keep IDs, settings values and raw diagnostics separate from display text, and store stable message reasons rather than translated strings so feedback updates on language changes.
 

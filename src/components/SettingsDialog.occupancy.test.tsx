@@ -35,10 +35,14 @@ const settings = {
   prometheusExport: false,
   intelVramSudo: false,
   occupancyMaxAgeMs: 12 * 60 * 60 * 1000,
+  healthTempWarnC: 85,
+  healthTempCriticalC: 90,
   mqttEnabled: false,
   mqttUrl: "",
   mqttUsername: "",
   mqttTopicPrefix: "sparkdash",
+  mqttDiscovery: false,
+  mqttDiscoveryPrefix: "homeassistant",
 } satisfies Settings;
 
 describe("SettingsDialog session age", () => {
