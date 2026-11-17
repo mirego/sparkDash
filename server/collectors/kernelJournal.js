@@ -29,11 +29,14 @@ class KernelJournalOutputError extends Error {
   }
 }
 
-/** The timeout runs on the monitored host, inside nsenter/SSH, with no pipeline. */
+/** The deadline and process-group cleanup run on the monitored host, inside nsenter/SSH. */
 export function kernelJournalCommand(boot, cursor, timeoutSeconds = 3) {
-  const base = `exec timeout --signal=KILL ${timeoutSeconds}s journalctl -k --no-pager -q -o json --output-fields=MESSAGE,_BOOT_ID --show-cursor -n +${KERNEL_JOURNAL_PAGE_SIZE}`;
+  const command = `journalctl -k --no-pager -q -o json --output-fields=MESSAGE,_BOOT_ID --show-cursor -n +${KERNEL_JOURNAL_PAGE_SIZE}`;
+  const runInProcessGroup = (journalctlCommand) =>
+    `setsid ${journalctlCommand} & command_pid=$!; ( sleep ${timeoutSeconds} & timer_pid=$!; trap 'kill "$timer_pid" 2>/dev/null; wait "$timer_pid" 2>/dev/null; exit 0' TERM; wait "$timer_pid"; kill -KILL -"$command_pid" 2>/dev/null ) & watchdog_pid=$!; wait "$command_pid"; status=$?; kill "$watchdog_pid" 2>/dev/null; wait "$watchdog_pid" 2>/dev/null; exit "$status"`;
+  const base = runInProcessGroup(command);
   const resume = BOOT_ID.test(boot ?? "") && CURSOR.test(cursor ?? "")
-    ? `if [ "$boot" = '${boot}' ]; then ${base} --after-cursor='${cursor}'; else ${base}; fi`
+    ? `if [ "$boot" = '${boot}' ]; then ${runInProcessGroup(`${command} --after-cursor='${cursor}'`)}; else ${base}; fi`
     : base;
   return `boot=$(tr -d '-' < /proc/sys/kernel/random/boot_id) || exit 1; printf '%s\\n' "$boot"; ${resume}`;
 }
