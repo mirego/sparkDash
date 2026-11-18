@@ -167,7 +167,7 @@ test("a record that does not match is never acted on", { skip: SKIP }, async () 
   try {
     const s = await startScan(sb);
     const original = fs.readFileSync(s.stateFile, "utf8");
-    const count = tagged(s.id).length;
+    const before = tagged(s.id);
     const edit = (from, to) => fs.writeFileSync(s.stateFile, original.replace(from, to));
 
     edit(`OWNER=${s.record.OWNER}`, `OWNER=${Number(s.record.OWNER) + 1}`);
@@ -192,7 +192,8 @@ test("a record that does not match is never acted on", { skip: SKIP }, async () 
     r = job(sb, "cancel", s.id, 400, 400);
     assert.deepEqual([r.outcome, r.reason], ["unknown", "no-record"]);
 
-    assert.equal(tagged(s.id).length, count, "nothing was signalled");
+    const after = new Set(tagged(s.id));
+    assert.ok(before.every((pid) => after.has(pid)), "no process from the scan was signalled");
     // A symbolic link in place of the record is not followed.
     fs.writeFileSync(path.join(sb.dir, "elsewhere"), original);
     fs.symlinkSync(path.join(sb.dir, "elsewhere"), s.stateFile);
