@@ -21,6 +21,7 @@ const REAL_PERL = (() => {
     return "";
   }
 })();
+const REAL_MV = execFileSync("sh", ["-c", "command -v mv"], { encoding: "utf8" }).trim();
 const HELPER = new URL("../scripts/sdhelper.pl", import.meta.url).pathname;
 const skip = !REAL_PERL ? "perl is not installed" : isRoot ? "runs as an ordinary account" : false;
 
@@ -153,6 +154,27 @@ test("without renameat2, mv -n --no-copy -T is used after its self-test", { skip
   const sb = sandbox();
   try {
     fs.writeFileSync(path.join(sb.bin, "uname"), "#!/bin/sh\necho mystery-cpu\n", { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(sb.bin, "mv"),
+      `#!/bin/sh
+after_options=0
+source=
+destination=
+for arg do
+  if [ "$arg" = -- ]; then after_options=1; continue; fi
+  if [ "$after_options" = 1 ]; then
+    if [ -z "$source" ]; then source=$arg; else destination=$arg; fi
+  fi
+done
+occupied=0
+if [ -e "$destination" ] || [ -L "$destination" ]; then occupied=1; fi
+"${REAL_MV}" "$@"
+status=$?
+if [ "$occupied" = 1 ] && { [ -e "$source" ] || [ -L "$source" ]; }; then exit 0; fi
+exit "$status"
+`,
+      { mode: 0o755 }
+    );
     const top = tree(sb);
     const r = del(sb, top, [], { PATH: `${sb.bin}:${process.env.PATH}` });
     assert.equal(r.res.ok, true, r.out);

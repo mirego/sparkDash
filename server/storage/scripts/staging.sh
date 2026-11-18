@@ -37,7 +37,7 @@ sd_rename_ready() {
   SD_MT=.sparkdash-mvtest-$$
   rm -f "$SD_MT-a" "$SD_MT-b" "$SD_MT-c" 2>/dev/null
   if printf a >"$SD_MT-a" && printf b >"$SD_MT-b" &&
-    ! mv -n --no-copy -T -- "$SD_MT-a" "$SD_MT-b" 2>/dev/null && [ -e "$SD_MT-a" ] && [ "$(cat "$SD_MT-b")" = b ] &&
+    { mv -n --no-copy -T -- "$SD_MT-a" "$SD_MT-b" 2>/dev/null || :; } && [ -e "$SD_MT-a" ] && [ "$(cat "$SD_MT-b")" = b ] &&
     mv -n --no-copy -T -- "$SD_MT-a" "$SD_MT-c" 2>/dev/null && [ ! -e "$SD_MT-a" ] && [ -e "$SD_MT-c" ]; then
     SD_RN=mv
   fi
