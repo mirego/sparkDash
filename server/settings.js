@@ -1,4 +1,5 @@
 import fs from "fs";
+import { energyPeriodsError, energyPriceValue, normalizeEnergyPeriods } from "../src/shared/energyTariff.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import { atomicWrite } from "./util/atomicWrite.js";
@@ -51,6 +52,13 @@ const DEFAULTS = Object.freeze({
   /** Currency symbol shown next to the estimated cost. */
   energyCurrency: "$",
   /**
+   * "flat": every hour costs energyPricePerKwh. "tou" (time of use): the hours in
+   * energyPricePeriods have their own price, all other hours cost energyPricePerKwh.
+   */
+  energyPriceMode: "flat",
+  /** Time-of-use periods: [{ from: 0-23, to: 1-24, price, days: "all" | "weekdays" | "weekends" }]; see src/shared/energyTariff.js. */
+  energyPricePeriods: [],
+  /**
    * VRAM bars on the Overview cards and the GPU panel split memory into LLM
    * engine / system / other / free and judge severity by absolute headroom.
    * On by default; off restores the single percentage-coloured bar. The UI
@@ -62,6 +70,12 @@ const DEFAULTS = Object.freeze({
    * Off by default: when off the path answers 404.
    */
   prometheusExport: false,
+  /**
+   * Let a sudo password be typed in the dashboard over plain http from another machine. Off by
+   * default: the password would cross the network unencrypted, so it is otherwise only accepted over
+   * https or from the machine itself. For a LAN you trust.
+   */
+  allowPlainSudoPassword: false,
   /**
    * Let the Intel (xe) probe read root-only debugfs VRAM through `sudo -n`.
    * Off by default: without it VRAM falls back to the PCI BAR size and no sudo runs.
@@ -114,6 +128,13 @@ const DEFAULTS = Object.freeze({
    */
   healthTempWarnC: 85,
   healthTempCriticalC: 90,
+  /**
+   * Stream-sample engines without gauges (Settings → LLM). Off by default: while on, the
+   * probe of a gauge-less engine (Pico) sends one tiny streamed completion every 15 s and
+   * measures its own decode tok/s from the token window. Sampling pauses while a bench,
+   * showcase or model launch owns the unit.
+   */
+  llmStreamSample: false,
 });
 
 const POLL_INTERVAL_MIN_MS = 500;
@@ -145,6 +166,20 @@ function assertHealthTemps(current, patch) {
   if (warn == null) throw new Error(`healthTempWarnC must be a number ${range}`);
   if (critical == null) throw new Error(`healthTempCriticalC must be a number ${range}`);
   if (warn >= critical) throw new Error("healthTempWarnC must be lower than healthTempCriticalC");
+}
+
+/** Reject a write whose time-of-use periods are unusable (bad hours or price, or two periods sharing an hour). */
+function assertEnergyPeriods(patch) {
+  if (!("energyPricePeriods" in patch)) return;
+  const err = energyPeriodsError(patch.energyPricePeriods);
+  if (!err) return;
+  if (err.code === "too-many") throw new Error("energyPricePeriods allows at most 12 periods");
+  if (err.code === "overlap") throw new Error(`energyPricePeriods: period ${err.index + 1} overlaps period ${err.other + 1}`);
+  throw new Error(
+    err.index < 0
+      ? "energyPricePeriods must be a list"
+      : `energyPricePeriods: period ${err.index + 1} needs whole hours from 0-23 to 1-24 (not equal), a price from 0 to 100 and days all, weekdays or weekends`
+  );
 }
 
 /** "" (follow the browser) or an IANA zone name this runtime knows. */
@@ -245,8 +280,10 @@ function _clampSettings(settings) {
   s.showKpiTokens = Boolean(s.showKpiTokens);
   s.showActivityFeed = Boolean(s.showActivityFeed);
   // Electricity price: a non-negative finite number, otherwise "not set".
-  const price = s.energyPricePerKwh == null || s.energyPricePerKwh === "" ? null : Number(s.energyPricePerKwh);
-  s.energyPricePerKwh = Number.isFinite(price) && price >= 0 && price <= 100 ? price : null;
+  s.energyPricePerKwh = energyPriceValue(s.energyPricePerKwh);
+  s.energyPriceMode = s.energyPriceMode === "tou" ? "tou" : "flat";
+  // A hand-edited list that does not validate is dropped whole: half a tariff would misprice hours.
+  s.energyPricePeriods = normalizeEnergyPeriods(s.energyPricePeriods);
   s.energyCurrency =
     typeof s.energyCurrency === "string" && s.energyCurrency.trim() && s.energyCurrency.trim().length <= 4
       ? s.energyCurrency.trim()
@@ -254,6 +291,8 @@ function _clampSettings(settings) {
   s.timeZone = isValidTimeZone(s.timeZone) ? String(s.timeZone).trim() : "";
   s.showVramBreakdown = Boolean(s.showVramBreakdown);
   s.prometheusExport = Boolean(s.prometheusExport);
+  // Only a real `true` turns it on: a string like "false" must not count as enabled.
+  s.allowPlainSudoPassword = s.allowPlainSudoPassword === true;
   s.intelVramSudo = Boolean(s.intelVramSudo);
   s.metricsHistory = Boolean(s.metricsHistory);
   s.alertsEnabled = Boolean(s.alertsEnabled);
@@ -283,6 +322,8 @@ function _clampSettings(settings) {
     s.healthTempWarnC = DEFAULTS.healthTempWarnC;
     s.healthTempCriticalC = DEFAULTS.healthTempCriticalC;
   }
+  // Ensure the stream-sample switch is boolean
+  s.llmStreamSample = Boolean(s.llmStreamSample);
   // Ensure temperatureUnit is valid
   if (s.temperatureUnit !== "celsius" && s.temperatureUnit !== "fahrenheit") {
     s.temperatureUnit = DEFAULTS.temperatureUnit;
@@ -296,9 +337,10 @@ function _clampSettings(settings) {
 
 /** Load settings from disk, falling back to defaults. */
 export function loadSettings() {
+  let parsed = null;
   try {
     const raw = fs.readFileSync(SETTINGS_PATH, "utf-8");
-    const parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw);
     _settings = _clampSettings({ ...DEFAULTS, ..._whitelist(parsed) });
     // A broker URL with credentials written by an older build (or by hand) is
     // dropped above; rewrite the file so the secret does not linger on disk.
@@ -342,6 +384,7 @@ export function getSettings() {
  */
 export function updateSettings(patch) {
   assertHealthTemps(_settings, _whitelist(patch));
+  assertEnergyPeriods(_whitelist(patch));
   const merged = _clampSettings({ ..._settings, ..._whitelist(patch) });
   _settings = merged;
   saveSettings();

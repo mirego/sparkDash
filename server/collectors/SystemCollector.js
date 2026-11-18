@@ -501,37 +501,36 @@ export function oomRiskFor(availableMB) {
 }
 
 /**
- * Extended nvidia-smi GPU query for health telemetry.
- *
- * Adds passive-cooling (fan), multi-zone thermal (memory junction), clock
- * rates, power state, and ECC error counters on top of the existing
- * temperature/utilization/power fields. Field ORDER is significant —
- * `_parseGpuLine` maps CSV columns to these names positionally.
- *
- * On GB10 some fields are N/A (e.g. `ecc.errors.*` when ECC isn't enabled,
- * `clocks.mem` for unified memory) — every value is run through
- * `_parseSmiNumber`/null-guards so a missing field degrades gracefully to
- * `null` instead of reading as a false 0.
+ * NVIDIA health query. Field order is significant and shared by local/remote collection:
+ * 0-9 upstream temperature/utilization/power/clocks/throttle fields; 10-14 fork
+ * memory temperature, memory clock, P-state and ECC counters; 15-17 identity;
+ * 18-22 fan speed and PCIe link generation/width fields. Missing/N/A readings
+ * are null-guarded rather than presented as healthy measured values.
  */
 const GPU_QUERY_FIELDS = [
-  "fan.speed",
   "temperature.gpu",
-  "temperature.memory",
   "utilization.gpu",
   "power.draw",
   "power.limit",
-  "clocks.sm",
-  "clocks.mem",
-  "pstate",
-  "ecc.errors.corrected.volatile.total",
-  "ecc.errors.uncorrected.volatile.total",
-  // ── thermal-throttle columns (appended; positions 11-16) ──
   "clocks.current.sm",
   "clocks.max.sm",
   "clocks_throttle_reasons.hw_thermal_slowdown",
   "clocks_throttle_reasons.sw_thermal_slowdown",
   "clocks_throttle_reasons.hw_slowdown",
   "clocks_throttle_reasons.sw_power_cap",
+  "temperature.memory",
+  "clocks.mem",
+  "pstate",
+  "ecc.errors.corrected.volatile.total",
+  "ecc.errors.uncorrected.volatile.total",
+  "index",
+  "name",
+  "uuid",
+  "fan.speed",
+  "pcie.link.gen.current",
+  "pcie.link.gen.max",
+  "pcie.link.width.current",
+  "pcie.link.width.max",
 ];
 const GPU_QUERY = `--query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits`;
 
@@ -895,9 +894,7 @@ export class SystemCollector {
   async _getGPUAll() {
     const vramRead = this._intelVram.stale;
     const [gpuOut, amd, clockCapMHz, intelOut] = await Promise.all([
-      // Fork keeps the extended GPU_QUERY (fan/temps.memory/clocks.mem/pstate/ecc)
-      // merged over upstream's shorter query; .catch(() => null) is upstream's
-      // nvidia-side-failed sentinel.
+      // Keep the shared extended query; null marks nvidia-smi failure for mixed GPU hosts.
       this._nvidiaSmi(GPU_QUERY).catch(() => null),
       this._probeLocalAmd(),
       this._readLocalClockCap(),
@@ -1008,6 +1005,14 @@ export class SystemCollector {
   /** Where sysfs may be mounted: the host bind mount in the container, else /sys. */
   _sysRoots() {
     return [HOST_PATHS.SYS, "/sys"];
+  }
+
+  /**
+   * The sysfs root to read: the host bind mount when it exists (Docker), else /sys. Outside a container
+   * `/host/sys` does not exist, and a read that joined HOST_PATHS.SYS directly found no sensor at all.
+   */
+  _sysRoot(roots = this._sysRoots()) {
+    return roots.find((root) => fs.existsSync(root)) ?? roots[roots.length - 1];
   }
 
   /**
@@ -1251,10 +1256,9 @@ export class SystemCollector {
 
   /**
    * Parse every line of the `--query-gpu` output — one per physical GPU.
-   * Fields 0-16 are the extended GPU_QUERY_FIELDS metrics (fan, temps, clocks,
-   * pstate, ECC, throttle reasons); 17-19 (`index,name,uuid`) identify the card.
-   * Every column is null-guarded so a missing/[N/A] field degrades gracefully
-   * instead of reading as a false 0. Returns [] when nvidia-smi printed nothing.
+   * Merged layout: 0-9 upstream metrics, 10-14 extended fork metrics,
+   * 15-17 identity, and 18-22 fan/PCIe. Legacy fork and upstream positional
+   * layouts remain supported; unavailable readings stay null.
    */
   _parseGpuLines(output, { source = "nvidia" } = {}) {
     const lines = String(output ?? "").trim().split("\n").filter(Boolean);
@@ -1262,12 +1266,10 @@ export class SystemCollector {
       const parts = line.split(",").map((s) => s.trim());
       const num = (j) => this._parseSmiNumber(parts[j]);
       const n = parts.length;
-      // Layouts seen in the wild (field count disambiguates):
-      //  n=20 extended metrics + index,name,uuid; n=17 extended (GPU_QUERY_FIELDS);
-      //  n=11 extended core w/o throttle columns; n=13 upstream short
-      //  (temp,util,draw,limit,sm,max,4 throttle flags,index,name,uuid).
-      // Every column is null-guarded so a missing/[N/A] field degrades to null.
+      // Layouts: n=23 merged query; n=20/17/11 legacy fork layouts; upstream
+      // positional output has 13 columns (or 18 with fan/PCIe fields).
       let fan = null;
+      let pcie = null;
       let temperature;
       let temperatureMemory = null;
       let usage;
@@ -1291,7 +1293,34 @@ export class SystemCollector {
         if (/^[0-9]+$/i.test(s)) return `P${s}`;
         return /^\[?n\/a\]?$/i.test(s) || s === "" ? null : s;
       };
-      if (n === 17 || n === 20) {
+      if (n === 23) {
+        fan = num(18);
+        temperature = num(0) ?? 0;
+        usage = num(1) ?? 0;
+        powerDraw = num(2);
+        powerLimit = num(3) ?? 120;
+        smClockMHz = num(4);
+        smClockMaxMHz = num(5);
+        hwThermal = this._parseSmiActive(parts[6]);
+        swThermal = this._parseSmiActive(parts[7]);
+        hwSlowdown = this._parseSmiActive(parts[8]);
+        powerCap = this._parseSmiActive(parts[9]);
+        temperatureMemory = num(10);
+        clockMem = num(11);
+        pstate = normPstate(parts[12]);
+        eccCorrected = num(13);
+        eccUncorrected = num(14);
+        index = num(15) ?? i;
+        name = parts[16] && !/^\[?n\/a\]?$/i.test(parts[16]) ? parts[16] : null;
+        uuid = parts[17] && /^GPU-/i.test(parts[17]) ? parts[17] : null;
+        const pcieGen = num(19);
+        const pcieGenMax = num(20);
+        const pcieWidth = num(21);
+        const pcieWidthMax = num(22);
+        pcie = pcieGen == null && pcieWidth == null
+          ? null
+          : { gen: pcieGen, genMax: pcieGenMax, width: pcieWidth, widthMax: pcieWidthMax };
+      } else if (n === 17 || n === 20) {
         fan = num(0);
         temperature = num(1) ?? 0;
         temperatureMemory = num(2);
@@ -1327,11 +1356,8 @@ export class SystemCollector {
         eccCorrected = num(9);
         eccUncorrected = num(10);
       } else {
-        // Upstream positional layout (12/13 cols): temp,util,draw,limit,sm,max,
-        // 4 throttle flags, then index,name,uuid — used by the Windows adapter
-        // path and fixtures; every field null-guarded.
-        const rawTemperature = num(0);
-        temperature = rawTemperature ?? 0;
+        // Upstream positional layout, optionally with appended fan and PCIe fields.
+        temperature = num(0) ?? 0;
         usage = num(1) ?? 0;
         powerDraw = num(2) ?? 0;
         powerLimit = num(3) ?? 120;
@@ -1344,6 +1370,14 @@ export class SystemCollector {
         index = num(10) ?? i;
         name = parts[11] && !/^\[?n\/a\]?$/i.test(parts[11]) ? parts[11] : null;
         uuid = parts[12] && /^GPU-/i.test(parts[12]) ? parts[12] : null;
+        fan = num(13);
+        const pcieGen = num(14);
+        const pcieGenMax = num(15);
+        const pcieWidth = num(16);
+        const pcieWidthMax = num(17);
+        pcie = pcieGen == null && pcieWidth == null
+          ? null
+          : { gen: pcieGen, genMax: pcieGenMax, width: pcieWidth, widthMax: pcieWidthMax };
       }
       const rawTemperature = temperature;
       const rawUsage = usage;
@@ -1358,6 +1392,8 @@ export class SystemCollector {
         name,
         uuid,
         fan,
+        fanPct: fan,
+        pcie,
         temperature,
         temperatureMemory,
         usage,
@@ -1546,6 +1582,10 @@ export class SystemCollector {
         temperature: d.temperature,
         usage: d.usage,
         power: { draw: d.powerDraw, limit: d.powerLimit },
+        // Fan speed in % of its maximum, and the PCIe link now and at its best. A card with no memory
+        // figures of its own (the GB10) shares the CPU's link, so its PCIe numbers say nothing and are left out.
+        fanPct: d.fanPct ?? null,
+        pcie: mem.total == null ? null : d.pcie ?? null,
         vram,
         throttle: d.throttle,
         processes: this._topProcesses(own),
@@ -1780,10 +1820,10 @@ export class SystemCollector {
   }
 
   /** Local sensor candidates: hwmon chips by allowlist, then thermal zones. */
-  _localCpuTempCandidates() {
+  _localCpuTempCandidates(sysRoot = this._sysRoot()) {
     const candidates = [];
     try {
-      const hwmonDir = path.join(HOST_PATHS.SYS, "class/hwmon");
+      const hwmonDir = path.join(sysRoot, "class/hwmon");
       if (fs.existsSync(hwmonDir)) {
         for (const entry of fs.readdirSync(hwmonDir)) {
           const nameFile = path.join(hwmonDir, entry, "name");
@@ -1805,7 +1845,7 @@ export class SystemCollector {
       /* fall through to thermal zones */
     }
     try {
-      const thermalDir = path.join(HOST_PATHS.SYS, "class/thermal");
+      const thermalDir = path.join(sysRoot, "class/thermal");
       if (fs.existsSync(thermalDir)) {
         const zones = fs.readdirSync(thermalDir).filter((z) => z.startsWith("thermal_zone"));
         for (const zone of zones) {
@@ -2206,7 +2246,7 @@ export class SystemCollector {
 
   async _getNetworkLinkSpeedMbps(iface) {
     try {
-      const speedFile = path.join(HOST_PATHS.SYS, "class/net", iface, "speed");
+      const speedFile = path.join(this._sysRoot(), "class/net", iface, "speed");
       const raw = fs.readFileSync(speedFile, "utf-8").trim();
       const n = parseInt(raw, 10);
       return Number.isFinite(n) && n > 0 ? n : null;
@@ -2266,6 +2306,7 @@ export class SystemCollector {
       cpuUsed: usedMB - gpuUsedMB,
       used: usedMB,
       available: availableMB,
+      availableSource: availMatch ? "linux-memavailable" : null,
       percentage,
       oomRisk,
       bandwidth,
@@ -2277,7 +2318,7 @@ export class SystemCollector {
     try {
       const vramRead = this._intelVram.stale;
       const cmd = [
-        `if command -v nvidia-smi >/dev/null 2>&1; then printf '\\n__NVIDIA__\\n'; nvidia-smi --query-gpu=${GPU_QUERY_FIELDS.join(",")},index,name,uuid --format=csv,noheader,nounits 2>/dev/null; printf '\\n__NVIDIA_VRAM__\\n'; nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null; printf '\\n__NVIDIA_APPS__\\n'; nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid --format=csv,noheader,nounits 2>/dev/null; fi`,
+        `if command -v nvidia-smi >/dev/null 2>&1; then printf '\\n__NVIDIA__\\n'; nvidia-smi --query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits 2>/dev/null; printf '\\n__NVIDIA_VRAM__\\n'; nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null; printf '\\n__NVIDIA_APPS__\\n'; nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid --format=csv,noheader,nounits 2>/dev/null; fi`,
         `${AMD_SMI_RESOLVER}; if [ -n "$amd_smi" ]; then printf '\\n__AMD__\\n'; "$amd_smi" metric -u -p -m -t --json 2>/dev/null; printf '\\n__AMD_LIMITS__\\n'; "$amd_smi" static -l --json 2>/dev/null; fi`,
         `printf '\\n__INTEL__\\n'; ${buildIntelProbeScript({ sudo: this._intelSudo.allowed && getSettings().intelVramSudo, vram: vramRead })}`,
         "printf '\\n__MEMINFO__\\n'; grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null",
@@ -3065,6 +3106,7 @@ export class SystemCollector {
         cpuUsed: cpuUsedMB,
         used: usedMB,
         available: availableMB,
+        availableSource: availMatch ? "linux-memavailable" : null,
         percentage,
         oomRisk,
         bandwidth: { current: 0, peak: 400 },

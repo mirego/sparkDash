@@ -21,6 +21,7 @@ import { LlmDailyChart } from "./LlmDailyChart";
 import { LlmTokenTotals } from "./LlmTokenTotals";
 import { parseLlmTargetInput } from "../../shared/llmTarget.js";
 import { backendLabel } from "../../shared/llmBackends.js";
+import { formatTokensCompact } from "../../shared/tokenFormat.js";
 import { LlmTrendChart } from "./LlmTrendChart";
 import type { BenchKind } from "./BenchSwitcher";
 import { engineStateLabel } from "./llmEngineState";
@@ -29,6 +30,7 @@ import { InflightReqPills } from "../OverviewPage/SparkCard";
 import { formatSince } from "../../shared/formatSince";
 import { measuredGenerationTps } from "../../shared/llmRate";
 import { ConversationList } from "./ConversationList";
+import { LlmCachePanel } from "./LlmCachePanel";
 
 interface LlmPanelProps {
   llm: LlmMetrics | null;
@@ -477,6 +479,8 @@ export function LlmPanel({
   const prefillTps = llm?.prefillTps ?? 0;
   const isStrata = llm?.backend === "strata";
   const isTensorFold = llm?.backend === "tensorfold";
+  const isPico = llm?.backend === "pico";
+  const sampledDecode = llm?.generationTpsSource === "probe-sample";
   const completedPrefill = llm?.prefillTpsSource?.startsWith("completed-") === true;
   const showPrefillSplit = llm?.cachedPrefillTps != null || llm?.uncachedPrefillTps != null;
   const cachedPrefillTps = llm?.cachedPrefillTps ?? 0;
@@ -882,6 +886,8 @@ export function LlmPanel({
                     <span className="ov-tps__dots" aria-hidden />
                     <small>{t("llm.decoding")}</small>
                   </>
+                ) : isPico && !sampledDecode && llm?.generationTpsSource !== "dashboard-stream" ? (
+                  <span title={t("llm.sampleOffHelp")}>—</span>
                 ) : (
                   <>
                     {fmtTps(generationTps)}
@@ -892,6 +898,16 @@ export function LlmPanel({
               <TrendLine data={genHistory} height={44} color="var(--color-accent)" />
               {genAvg != null && <span className="sp-avg mono">{t("llm.average", { value: fmtAvg(genAvg) })}</span>}
               {isStrata && llm?.generationTpsSource === "slot-mean" && <span className="sp-avg">{t("llm.activeSlotMean")}</span>}
+              {llm?.generationTpsSource === "dashboard-stream" && (
+                <span className="sp-avg" title={t("llm.dashboardStreamHelp")}>
+                  {t("llm.dashboardStream")}
+                </span>
+              )}
+              {sampledDecode && (
+                <span className="sp-avg" title={t("llm.sampledHelp")}>
+                  {t("llm.sampled")}
+                </span>
+              )}
               {measured && llm?.perStreamTps != null && (
                 <span
                   className="sp-avg mono"
@@ -932,7 +948,7 @@ export function LlmPanel({
                     <span className="ov-tps__dots" aria-hidden />
                     <small title={isStrata ? t("llm.strataPrefillingHelp") : t("llm.prefillingHelp")}>{t("llm.prefilling")}</small>
                   </>
-                ) : isTensorFold && prefillTps <= 0 && !completedPrefill ? (
+                ) : (isTensorFold || isPico) && prefillTps <= 0 && !completedPrefill ? (
                   <span title={t("llm.prefillNotMeasuredHelp")}>—</span>
                 ) : (
                   <>
@@ -944,7 +960,9 @@ export function LlmPanel({
               <TrendLine data={prefillHistory} height={44} color="var(--color-info)" />
               {prefillAvg != null && <span className="sp-avg mono">{t("llm.average", { value: fmtAvg(prefillAvg) })}</span>}
               {isStrata && prefillTps > 0 && <span className="sp-avg">{t("llm.lastReportedMean")}</span>}
-              {isTensorFold && !completedPrefill && prefillTps <= 0 && <span className="sp-avg">{t("llm.notMeasuredLive")}</span>}
+              {(isTensorFold || isPico) && !completedPrefill && prefillTps <= 0 && !llm?.prefillActive && (
+                <span className="sp-avg">{t("llm.notMeasuredLive")}</span>
+              )}
               {measured && completedPrefill && (
                 <span className="sp-avg" title={t("llm.completedPrefillHelp")}>
                   {t("llm.effectiveIncludesCached")}
@@ -980,6 +998,10 @@ export function LlmPanel({
               </div>
             </div>
           )}
+
+          {/* TensorFold reports the shared pool and the snapshot store itself; its per-stream KV ratio
+              never stands in for pool occupancy, so it has no kvCache tile below. */}
+          {llm?.backend === "tensorfold" && available && <LlmCachePanel llm={llm} />}
 
           <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
           <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
@@ -1203,8 +1225,15 @@ export function LlmPanel({
                 </button>
               </div>
             </div>
-            <div className="sp-tile" title={t("llm.engineGeneratedHelp")}>
-              <b>{llm && llm.totalOutputTokens > 0 ? llm.totalOutputTokens.toLocaleString() : "—"}</b>
+            <div
+              className="sp-tile"
+              title={
+                llm?.totalOutputTokens != null && llm.totalOutputTokens > 0
+                  ? `${llm.totalOutputTokens.toLocaleString()} tokens · ${t("llm.engineGeneratedHelp")}`
+                  : t("llm.engineGeneratedHelp")
+              }
+            >
+              <b>{llm && llm.totalOutputTokens > 0 ? formatTokensCompact(llm.totalOutputTokens) : "—"}</b>
               <span>{t("llm.engineGenerated")}</span>
             </div>
           </div>
