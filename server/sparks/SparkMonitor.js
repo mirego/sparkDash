@@ -10,6 +10,7 @@ import { LlmProbe } from "../collectors/LlmProbe.js";
 import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
 import { TailscaleProbe } from "../collectors/TailscaleProbe.js";
+import { AtticProbe } from "../collectors/AtticProbe.js";
 import { llmDaily } from "../collectors/LlmDaily.js";
 import { HealthEvaluator } from "../health/HealthEvaluator.js";
 import { getSettings } from "../settings.js";
@@ -23,6 +24,7 @@ import {
   POLL_INTERVAL_LIVENESS,
   POLL_INTERVAL_HERMES,
   POLL_INTERVAL_TAILSCALE,
+  POLL_INTERVAL_ATTIC,
   LLM_PORT,
   COMFY_PORT,
   HOST_PATHS,
@@ -118,8 +120,10 @@ const HEALTH_LABELS = {
 export class SparkMonitor {
   /**
    * @param {object} spark
-   * @param {{ onWolMac?: (sparkId: string, mac: string) => void, onHermesChange?: () => void, resolveHeadModelId?: ((headId: string) => string | null), pollIntervalMs?: number }} [options]
+   * @param {{ onWolMac?: (sparkId: string, mac: string) => void, onHermesChange?: () => void, resolveHeadModelId?: ((headId: string) => string | null), resolveHeadLlmProgressAt?: ((headId: string) => number | null), pollIntervalMs?: number, llmProbeOptions?: () => object }} [options]
    *   pollIntervalMs: Settings → Poll interval; drives the fast collector timers.
+   *   llmProbeOptions: per-probe options for every LlmProbe this monitor builds
+   *   (e.g. the opt-in stream-sample callbacks); evaluated at construction time.
    */
   constructor(spark, options = {}) {
     this.spark = spark;
@@ -147,13 +151,16 @@ export class SparkMonitor {
     // map; never writes back to registry config (derived display only).
     this._resolveHeadModelId =
       typeof options.resolveHeadModelId === "function" ? options.resolveHeadModelId : null;
+    this._resolveHeadLlmProgressAt =
+      typeof options.resolveHeadLlmProgressAt === "function" ? options.resolveHeadLlmProgressAt : null;
+    this._llmProbeOptions = typeof options.llmProbeOptions === "function" ? options.llmProbeOptions : null;
     this.collector = createCollector(spark);
 
     // One LlmProbe per port — none when LLM monitoring is off
     this.llmProbes = new Map();
     if (this._llmMonitoringEnabled(spark)) {
       for (const port of this._llmPorts()) {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(port, new LlmProbe(spark, port, this._llmProbeOptions ? this._llmProbeOptions() : undefined));
       }
     }
 
@@ -166,6 +173,9 @@ export class SparkMonitor {
     this.tailscaleProbe = this._tailscaleMonitoringEnabled(spark)
       ? new TailscaleProbe(spark)
       : null;
+
+    /** @type {AtticProbe | null} */
+    this.atticProbe = this._atticMonitoringEnabled(spark) ? new AtticProbe(spark) : null;
 
     /** @type {HermesProbe | null} */
     this.hermesProbe = this._hermesMonitoringEnabled(spark)
@@ -218,6 +228,7 @@ export class SparkMonitor {
       /** Mac-agent units only: detected model runtimes + what it could not read. */
       runtimes: null,
       unavailable: null,
+      attic: null,
     };
     this._lastUpdate = {};
     /** domain → epoch ms of the last poll that returned real data (see _domainSucceeded). Not in snapshot(): it would defeat the broadcast cache. */
@@ -269,6 +280,7 @@ export class SparkMonitor {
     this._tailscaleIntervalId = null;
     /** @type {ReturnType<typeof setInterval> | null} */
     this._runtimesIntervalId = null;
+    this._atticIntervalId = null;
     this._running = false;
     this._runGeneration = 0;
     /** @type {Record<string, boolean | symbol>} in-flight domain guards */
@@ -288,6 +300,7 @@ export class SparkMonitor {
     const prevComfyPort = this._comfyPort(this.spark);
     const wasHermes = this._hermesMonitoringEnabled(this.spark);
     const wasTailscale = this._tailscaleMonitoringEnabled(this.spark);
+    const wasAttic = this._atticMonitoringEnabled(this.spark);
     this.collector.invalidatePendingCollections();
     this._runGeneration += 1;
     this._inflight = {};
@@ -320,7 +333,7 @@ export class SparkMonitor {
         existing.spark = spark;
         this.llmProbes.set(port, existing);
       } else {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(port, new LlmProbe(spark, port, this._llmProbeOptions ? this._llmProbeOptions() : undefined));
       }
     }
     for (const [port, probe] of prevProbes) {
@@ -366,6 +379,18 @@ export class SparkMonitor {
       this._metrics.tailscale = null;
     }
 
+    // Display-carveout probe — create / update / clear
+    if (this._atticMonitoringEnabled()) {
+      if (this.atticProbe) {
+        this.atticProbe.setTarget(spark);
+      } else {
+        this.atticProbe = new AtticProbe(spark);
+      }
+    } else {
+      this.atticProbe = null;
+      this._metrics.attic = null;
+    }
+
     // Hermes probe — create / update / clear
     if (this._hermesMonitoringEnabled()) {
       if (this.hermesProbe) {
@@ -393,6 +418,9 @@ export class SparkMonitor {
     }
     if (this._running && wasTailscale !== this._tailscaleMonitoringEnabled()) {
       this._restartTailscalePollInterval();
+    }
+    if (this._running && wasAttic !== this._atticMonitoringEnabled()) {
+      this._restartAtticPollInterval();
     }
   }
 
@@ -432,6 +460,24 @@ export class SparkMonitor {
       if (id) return id;
     }
     return null;
+  }
+
+  /** Last measured inference progress on this node, never a worker's inherited progress. */
+  llmProgressAt() {
+    if (!this.online || !this._llmMonitoringEnabled()) return null;
+    return this._healthEval.llmProgressAt;
+  }
+
+  /** A worker without local probes uses only its explicitly configured head. */
+  _headLlmProgressAt() {
+    const role = this.spark.role || (this.spark.workerNode ? "worker" : "standalone");
+    const headId = this.spark.workerHeadId;
+    if (role !== "worker" || this._llmMonitoringEnabled() || !headId || headId === this.spark.id) return null;
+    try {
+      return this._resolveHeadLlmProgressAt?.(headId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -522,6 +568,29 @@ export class SparkMonitor {
       );
       this._intervals.push(this._tailscaleIntervalId);
       void this._pollDomain("tailscale");
+    }
+  }
+
+  /**
+   * Opt-in display-carveout card (GB10 Sparks; default off). When off, no
+   * probe exists and nothing runs.
+   * @param {object} [spark]
+   */
+  _atticMonitoringEnabled(spark = this.spark) {
+    return Boolean(spark?.atticMonitoring);
+  }
+
+  /** Start or clear the display-carveout poll timer based on monitoring flag. */
+  _restartAtticPollInterval() {
+    if (this._atticIntervalId != null) {
+      clearInterval(this._atticIntervalId);
+      this._intervals = this._intervals.filter((id) => id !== this._atticIntervalId);
+      this._atticIntervalId = null;
+    }
+    if (this._atticMonitoringEnabled() && this._running) {
+      this._atticIntervalId = setInterval(() => this._pollDomain("attic"), POLL_INTERVAL_ATTIC);
+      this._intervals.push(this._atticIntervalId);
+      void this._pollDomain("attic");
     }
   }
 
@@ -649,6 +718,7 @@ export class SparkMonitor {
     this._restartHermesPollInterval();
     this._restartTailscalePollInterval();
     this._restartRuntimesPollInterval();
+    this._restartAtticPollInterval();
     // Liveness on a slightly slower cadence
     this._intervals.push(setInterval(() => this._checkOnline(), POLL_INTERVAL_LIVENESS));
     console.log(`[SparkMonitor] ${this.spark.id} started`);
@@ -669,6 +739,7 @@ export class SparkMonitor {
     this._hermesIntervalId = null;
     this._tailscaleIntervalId = null;
     this._runtimesIntervalId = null;
+    this._atticIntervalId = null;
     this._inflight = {};
     for (const probe of this.llmProbes.values()) {
       try {
@@ -692,6 +763,7 @@ export class SparkMonitor {
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
     const comfyOn = this._comfyMonitoringEnabled();
     const tailscaleOn = this._tailscaleMonitoringEnabled();
+    const atticOn = this._atticMonitoringEnabled();
     return {
       id: this.spark.id,
       name: this.spark.name,
@@ -727,6 +799,7 @@ export class SparkMonitor {
       comfyMonitoring: comfyOn,
       comfyPort: this._comfyPort(),
       tailscaleMonitoring: tailscaleOn,
+      atticMonitoring: atticOn,
       hermes: this._hermes,
       health: this._health,
       hardware: this._hardwareSummary,
@@ -748,6 +821,7 @@ export class SparkMonitor {
         residentModels: this._metrics.residentModels,
         comfy: comfyOn ? this._metrics.comfy : null,
         tailscale: tailscaleOn ? this._metrics.tailscale : null,
+        attic: atticOn ? this._metrics.attic : null,
       },
     };
   }
@@ -810,6 +884,7 @@ export class SparkMonitor {
           network: this._metrics.network,
           roce: this._metrics.roce,
           llm: this._metrics.llm,
+          headLlmProgressAt: this._headLlmProgressAt(),
         runtimes: this._metrics.runtimes,
         unavailable: this._metrics.unavailable,
         agentOnline: this._metrics.agentOnline ?? null,
@@ -856,6 +931,8 @@ export class SparkMonitor {
    */
   _holdFindings(findings, now) {
     this._healthSeen ??= new Map();
+    // Measured progress disproves a stall; do not retain the old warning for 90 seconds.
+    if (this._healthEval.lowPowerProgressing) this._healthSeen.delete("low-power");
     for (const f of findings) this._healthSeen.set(f.id, { finding: f, at: now });
     const out = [...findings];
     const present = new Set(findings.map((f) => f.id));
@@ -1057,6 +1134,7 @@ export class SparkMonitor {
       this._pollDomain("comfy"),
       this._pollDomain("hermes"),
       this._pollDomain("tailscale"),
+      this._pollDomain("attic"),
       this._pollDomain("residentModels"),
     ]);
   }
@@ -1096,6 +1174,7 @@ export class SparkMonitor {
     if (domain === "tailscale" && !this._tailscaleMonitoringEnabled()) return;
     // Only agent-backed units can report runtimes / declared gaps.
     if (domain === "runtimes" && typeof this.collector.collectRuntimes !== "function") return;
+    if (domain === "attic" && !this._atticMonitoringEnabled()) return;
     const runGeneration = this._runGeneration;
     const pollToken = Symbol(domain);
     this._inflight[domain] = pollToken;
@@ -1145,6 +1224,9 @@ export class SparkMonitor {
           break;
         case "tailscale":
           result = this.tailscaleProbe ? await this.tailscaleProbe.probe() : null;
+          break;
+        case "attic":
+          result = this.atticProbe ? await this.atticProbe.probe() : null;
           break;
         case "hermes":
           result = this.hermesProbe ? await this.hermesProbe.check() : null;
@@ -1207,7 +1289,7 @@ export class SparkMonitor {
           {
             const probes = Array.from(this.llmProbes.values());
             this._metrics.llm = this._stampLlmLastActive(probes, result);
-            this._updateHealth();
+            this._updateHealth("llm");
             for (let i = 0; i < result.length; i++) {
               const probe = probes[i];
               if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
@@ -1219,6 +1301,9 @@ export class SparkMonitor {
           break;
         case "tailscale":
           this._metrics.tailscale = result;
+          break;
+        case "attic":
+          this._metrics.attic = result;
           break;
         case "hermes":
           this.applyHermesCheck(result);

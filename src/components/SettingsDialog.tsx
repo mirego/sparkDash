@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { isValidTimeZone, listTimeZones } from "../shared/timeZone";
+import { reloadPage } from "../shared/reloadPage";
 import { fetchSettings, updateSettings } from "../api/client";
+import { EnergyPriceSetting, energyPeriodsMessage } from "./EnergyPriceSetting";
 import { clearToken, getToken, onTokenChange, requestTokenPrompt } from "../api/authToken";
 import type { Settings } from "../api/types";
 import { useModalPresence } from "../hooks/useModalPresence";
@@ -20,6 +22,8 @@ interface SettingsDialogProps {
   onClose: () => void;
   onSaved: (settings: Settings) => void;
   onOpenHarness?: () => void;
+  /** Open at this section (id "settings-section-<section>"), e.g. "energy"; see hooks/settingsLink. */
+  section?: string | null;
   /** Version reported by the running server; absent when health could not be read. */
   serverVersion?: string | null;
 }
@@ -125,7 +129,7 @@ const AGE_PRESETS = [
   { unit: "days", count: 14, value: 14 * 24 * 60 * 60 * 1000 },
 ];
 
-export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVersion }: SettingsDialogProps) {
+export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, section = null, serverVersion }: SettingsDialogProps) {
   const { t } = useTranslation("settings");
   /** The server's own version wins: a stale dist must not report its build as the server's. */
   const displayVersion = serverVersion || packageJson.version;
@@ -158,6 +162,9 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
   const [theme, setTheme] = useState<ThemeId>(readTheme);
   const [tokenSet, setTokenSet] = useState(() => getToken() !== "");
   const [showAlerts, setShowAlerts] = useState(false);
+  // What the server had when the dialog opened: pages read whether a sudo password may be typed
+  // when they load, so changing it takes a reload to show.
+  const plainPasswordAtOpen = useRef<boolean | null>(null);
 
   // While the Alerts dialog is open on top, Escape belongs to it alone.
   const closeOnEscape = useCallback(() => {
@@ -166,6 +173,16 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
   useEscape(closeOnEscape);
 
   useEffect(() => onTokenChange((token) => setTokenSet(token !== "")), []);
+
+  // Opened at a section: bring it into view once the settings have loaded, and focus its main field.
+  const settingsReady = open && !loading && settings != null;
+  useEffect(() => {
+    if (!settingsReady || !section) return;
+    const el = document.getElementById(`settings-section-${section}`);
+    if (!el) return;
+    el.scrollIntoView?.({ block: "start" });
+    el.querySelector<HTMLElement>("[data-settings-focus]")?.focus({ preventScroll: true });
+  }, [settingsReady, section]);
 
   useEffect(() => {
     if (!open) {
@@ -181,7 +198,9 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
     setLoading(true);
     fetchSettings()
       .then((s) => {
-        if (!cancelled) setSettings(s);
+        if (cancelled) return;
+        plainPasswordAtOpen.current = Boolean(s.allowPlainSudoPassword);
+        setSettings(s);
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -243,6 +262,12 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
       setError(tempsError);
       return;
     }
+    const periodsError = energyPeriodsMessage(settings, t);
+    if (periodsError) {
+      setInvalidTimeZone(null);
+      setError(periodsError);
+      return;
+    }
     setSaving(true);
     setError(null);
     setInvalidTimeZone(null);
@@ -258,6 +283,9 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
       setDirty(false);
       onSaved(result);
       onClose();
+      if (plainPasswordAtOpen.current !== null && Boolean(result.allowPlainSudoPassword) !== plainPasswordAtOpen.current) {
+        reloadPage();
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -534,6 +562,12 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
                 onChange={(v) => update({ prometheusExport: v })}
               />
               <ToggleRow
+                title={t("toggles.allowPlainSudoPassword.title")}
+                help={t("toggles.allowPlainSudoPassword.help")}
+                checked={Boolean(settings.allowPlainSudoPassword)}
+                onChange={(v) => update({ allowPlainSudoPassword: v })}
+              />
+              <ToggleRow
                 title={t("toggles.intelVramSudo.title")}
                 help={t("toggles.intelVramSudo.help")}
                 checked={Boolean(settings.intelVramSudo)}
@@ -546,14 +580,20 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
                 onChange={(v) => update({ metricsHistory: v })}
               />
               <ToggleRow
+                title={t("toggles.llmStreamSample.title")}
+                help={t("toggles.llmStreamSample.help")}
+                checked={Boolean(settings.llmStreamSample)}
+                onChange={(v) => update({ llmStreamSample: v })}
+              />
+              <ToggleRow
                 title={t("mqtt.publishing.title")}
                 help={t("mqtt.publishing.help")}
                 checked={Boolean(settings.mqttEnabled)}
                 onChange={(v) => update({ mqttEnabled: v })}
               />
               <ToggleRow
-                title="API Keys page"
-                help="Read-only view of LiteLLM virtual keys, served by a host-side bridge on a unix socket. Off by default; needs SPARKDASH_APIKEYS_BRIDGE_SOCKET and SPARKDASH_APIKEYS_BRIDGE_TOKEN in the server's environment. See the README's API Keys section."
+                title={t("toggles.apiKeys.title")}
+                help={t("toggles.apiKeys.help")}
                 checked={Boolean(settings.apiKeysEnabled)}
                 onChange={(v) => update({ apiKeysEnabled: v })}
               />
@@ -633,40 +673,7 @@ export function SettingsDialog({ open, onClose, onSaved, onOpenHarness, serverVe
                 checked={Boolean(settings.showFleetEnergy)}
                 onChange={(v) => update({ showFleetEnergy: v })}
               />
-              <SettingRow
-                title={t("electricityPrice.title")}
-                help={t("electricityPrice.help")}
-                htmlFor="settings-energy-price"
-              >
-                <div className="set-price">
-                  <input
-                    id="settings-energy-currency"
-                    type="text"
-                    aria-label={t("electricityPrice.currency")}
-                    maxLength={4}
-                    value={settings.energyCurrency ?? "$"}
-                    onChange={(e) => update({ energyCurrency: e.target.value })}
-                    className="field-input field-input--currency"
-                  />
-                  <input
-                    id="settings-energy-price"
-                    type="number"
-                    min={0}
-                    max={100}
-                    step="0.01"
-                    inputMode="decimal"
-                    placeholder="0.15"
-                    value={settings.energyPricePerKwh ?? ""}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      if (raw === "") return update({ energyPricePerKwh: null });
-                      const val = parseFloat(raw);
-                      if (!isNaN(val)) update({ energyPricePerKwh: val });
-                    }}
-                    className="field-input field-input--price"
-                  />
-                </div>
-              </SettingRow>
+              <EnergyPriceSetting settings={settings} update={update} />
               <ToggleRow
                 title={t("toggles.llmTokenTotals.title")}
                 help={t("toggles.llmTokenTotals.help")}

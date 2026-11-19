@@ -18,6 +18,15 @@ const TOKEN_LIFETIMES_PATH =
 /** AES key file (auto-generated if SPARKDASH_SECRETS_KEY unset). */
 const SECRETS_KEY_PATH =
   process.env.SECRETS_KEY_PATH || path.join(ROOT, "config", ".secrets-key");
+/** Storage Manager: the latest disk analysis per unit, so it survives a restart (gitignored). */
+const STORAGE_SCANS_JSON_PATH =
+  process.env.STORAGE_SCANS_JSON_PATH || path.join(ROOT, "config", "storage-scans.json");
+/** Storage Manager: sudo passwords the user chose to remember, encrypted with the secrets key (gitignored). */
+const STORAGE_SUDO_JSON_PATH =
+  process.env.STORAGE_SUDO_JSON_PATH || path.join(ROOT, "config", "storage-sudo.json");
+/** Storage Manager: per-Spark acknowledgements that allow deleting folders as administrator (gitignored). */
+const STORAGE_ACKS_JSON_PATH =
+  process.env.STORAGE_ACKS_JSON_PATH || path.join(ROOT, "config", "storage-acks.json");
 /** Daily LLM tok/s rollups (gitignored). */
 const LLM_DAILY_JSON_PATH =
   process.env.LLM_DAILY_JSON_PATH || path.join(ROOT, "config", "llm-daily.json");
@@ -96,6 +105,7 @@ function parseMaxActiveBenchJobs(raw) {
 const MAX_ACTIVE_BENCH_JOBS = parseMaxActiveBenchJobs(process.env.MAX_ACTIVE_BENCH_JOBS);
 const COMFY_PROBE_TIMEOUT_MS = parseInt(process.env.COMFY_PROBE_TIMEOUT_MS || "3000", 10);
 const TAILSCALE_PROBE_TIMEOUT_MS = parseInt(process.env.TAILSCALE_PROBE_TIMEOUT_MS || "8000", 10);
+const ATTIC_PROBE_TIMEOUT_MS = parseInt(process.env.ATTIC_PROBE_TIMEOUT_MS || "8000", 10);
 const SSH_CONNECT_TIMEOUT = 5; // seconds
 // Reuse one authenticated SSH connection per Spark instead of dialing a new one
 // for every collector tick. Set SSH_MULTIPLEX=0 to go back to one connection
@@ -115,6 +125,8 @@ const POLL_INTERVAL_LLM = parseInt(process.env.POLL_INTERVAL_LLM || "2000", 10);
 const POLL_INTERVAL_COMFY = parseInt(process.env.POLL_INTERVAL_COMFY || "2000", 10);
 // Tailnet membership changes slowly; each poll is an SSH round-trip.
 const POLL_INTERVAL_TAILSCALE = parseInt(process.env.POLL_INTERVAL_TAILSCALE || "30000", 10);
+// The display-carveout card: what is lent changes when a server starts or stops; each poll is an SSH round-trip.
+const POLL_INTERVAL_ATTIC = parseInt(process.env.POLL_INTERVAL_ATTIC || "15000", 10);
 // Incremental kernel error reads after backfill, independent of the GPU poll interval.
 const POLL_INTERVAL_NVERR = parseInt(process.env.POLL_INTERVAL_NVERR || "60000", 10);
 // dmon -c 1 -d 1 blocks ~1s; default 2s avoids stacking with in-flight guards
@@ -246,6 +258,9 @@ const HOST_PATHS = {
 };
 
 export {
+  STORAGE_SCANS_JSON_PATH,
+  STORAGE_SUDO_JSON_PATH,
+  STORAGE_ACKS_JSON_PATH,
   SPARKS_JSON_PATH,
   GPU_MEMORY_JSON_PATH,
   SPARKS_SECRETS_PATH,
@@ -268,6 +283,7 @@ export {
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,
+  ATTIC_PROBE_TIMEOUT_MS,
   SSH_CONNECT_TIMEOUT,
   SSH_MULTIPLEX,
   POLL_INTERVAL_GPU,
@@ -279,6 +295,7 @@ export {
   MAX_ACTIVE_BENCH_JOBS,
   parseMaxActiveBenchJobs,
   POLL_INTERVAL_TAILSCALE,
+  POLL_INTERVAL_ATTIC,
   POLL_INTERVAL_NVERR,
   POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
