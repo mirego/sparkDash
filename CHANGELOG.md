@@ -7,6 +7,13 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.5] — 2026-11-19
+
+### Added
+- **Upstream sync #10 (PR #32, card t_f69516b4).** Merged upstream `791a0837` into `release/custom` — 62 upstream commits. Headliners: **Storage Manager** (new Storage page — disk scans, delete advice, Docker image/container cleanup, quarantine; server/storage module + scripts), **spark-attic** probe + guided install with validation-failure explanations, **GPU power controls** (power-limit/clock commands + GpuPowerSection), **LLM quality benchmark suite expansion** (MMLU-Pro / MATH-500 / GSM8k-Platinum datasets, fidelity corpus, divergence + verdict scoring), **CacheHistory** metrics (per-pool cache history + UI charts), **time-of-use electricity pricing** with cost lines on the energy chart, Pico/TensorFold LLM probe fixes (live rates, prefill-hold tests), ComfyUI model-class listing, and full Storage i18n (en + zh-CN).
+
+---
+
 ## [2.3.4] — 2026-11-17
 
 ### Added
