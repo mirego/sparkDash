@@ -7,6 +7,15 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.6] — 2026-11-20
+
+### Changed
+- **Upstream sync #11 (PR #33, card t_e69da01c).** Merged upstream `e8df8638` into `release/custom` — spark-attic installer pinned to v0.1.6 (adds the Ubuntu firmware-console display fix from 0.1.5), with checksum pinning and consistent confirm-copy (en + zh-CN) and README version reference. Fork preserved: version, lockfile, workflows, VulnHunter/REA/Tools removals.
+- Stabilized the storage rename self-test to be exit-status agnostic (upstream `841c076`).
+- Added a regression test pinning the installer release, checksum and confirm-copy consistency (`9c9825d`).
+
+---
+
 ## [2.3.5] — 2026-11-19
 
 ### Added
