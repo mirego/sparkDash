@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { registerAtticInstallRoute, INSTALL_PROGRAM } from '../attic/install.js';
+
+const atticConfirm = (lng) => JSON.parse(readFileSync(new URL(`../../src/locales/${lng}/devices.json`, import.meta.url), 'utf8')).edit.atticInstallConfirm;
 
 function setup(run = async () => {}) {
   let handler;
@@ -15,6 +18,23 @@ function setup(run = async () => {}) {
   };
   return { call, spark };
 }
+
+test('installer pins one verified release matching the confirmation text', () => {
+  const urls = [...INSTALL_PROGRAM.matchAll(/https:\/\/github\.com\/bertholomus\/spark-attic\/releases\/download\/(v\d+\.\d+\.\d+)\/install\.sh/g)];
+  assert.equal(urls.length, 1);
+  assert.equal((INSTALL_PROGRAM.match(/releases\/download\//g) || []).length, 1);
+  const version = urls[0][1];
+
+  assert.equal((INSTALL_PROGRAM.match(/\b[0-9a-f]{64}\b/g) || []).length, 1);
+  assert.match(INSTALL_PROGRAM, /\b[0-9a-f]{64}\b\s+"\$tmp\/install\.sh" \| sha256sum -c -/);
+
+  const en = atticConfirm('en'), zh = atticConfirm('zh-CN');
+  assert.deepEqual(en.match(/v\d+\.\d+\.\d+/g), [version]);
+  assert.deepEqual(zh.match(/v\d+\.\d+\.\d+/g), [version]);
+  assert.match(en, /stop its graphical desktop/);
+  assert.match(en, /disconnect/);
+  assert.ok(zh.includes('停止图形桌面'));
+});
 
 test('installation requires confirmation, supported Spark and enabled monitoring', async () => {
   let calls = 0;
