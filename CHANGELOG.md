@@ -145,6 +145,9 @@ Format: version sections are listed newest first.
 ### Fixed
 - **Sidebar tab selection survives WebSocket snapshots (PR #15, t_81856622).** Clicking a reserved page (Token totals, Fleet energy, Activity, …) no longer snaps back to Overview about a second later when a WS snapshot arrived: the snapshot handler now keeps the active page id instead of resetting it. Page ids are always valid — only a spark id that left the fleet falls back to Overview. Includes unit coverage in `src/hooks/useSnapshot.test.tsx`.
 
+### Changed
+- Install spark-attic v0.1.6 (was v0.1.4). It adds the Ubuntu firmware-console display fix from 0.1.5; the status file and the installer's `--check`/`--plain` flags are unchanged.
+
 ### Added
 - Show an Installed badge in Edit Spark when the spark-attic service is detected.
 
