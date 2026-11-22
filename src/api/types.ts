@@ -447,10 +447,25 @@ export interface CpuMetrics {
 }
 
 // ─── RAM metrics ─────────────────────────────────────────
+export type MacMemoryPressure = "normal" | "warning" | "critical" | "unknown";
+
+/** Disjoint physical RAM slices in MiB; GPU allocations belong within these slices. */
+export interface MacPhysicalMemory {
+  apps: number;
+  wired: number;
+  compressed: number;
+  cached: number;
+  free: number;
+  other: number;
+}
+
 export interface RamMetrics {
   used: number;
   total: number;
   percentage: number;
+  physical?: MacPhysicalMemory | null;
+  memoryPressure?: MacMemoryPressure;
+  swap?: { total: number; used: number; free: number };
 }
 
 // ─── Storage metrics ─────────────────────────────────────
@@ -548,9 +563,13 @@ export interface UnifiedMemoryMetrics {
   used: number;
   available: number;
   percentage: number;
-  oomRisk: "low" | "medium" | "high";
+  oomRisk: "low" | "medium" | "high" | null;
+  memoryPressure?: MacMemoryPressure;
+  physical?: MacPhysicalMemory | null;
+  swap?: { total: number; used: number; free: number };
   bandwidth: {
-    current: number;
+    /** GB/s; null when the local unit's dmon read failed or is unsupported (not measured). */
+    current: number | null;
     peak: number;
   };
 }
@@ -564,7 +583,7 @@ export interface LlmMetrics {
   measurementValid?: boolean;
   /** Why the last poll's stats could not be read; null while they can. */
   measurementError?: string | null;
-  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "strata" | "flare" | "locals" | "splash" | "pico" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "strata" | "flare" | "locals" | "splash" | "pico" | "ignis" | null;
   /** How the monitor reaches the engine: its own address, or an SSH forward when only SSH gets there. */
   via?: "direct" | "ssh-tunnel";
   modelId: string | null;
@@ -1390,7 +1409,14 @@ export interface FleetEnergy {
   coverage31dWindowMs?: number;
   nodeCoverage24hMs: Record<string, number>;
   nodeCoverage31dMs: Record<string, number>;
+  /**
+   * Mean watts per hour of the reporting series: the sum over the machines that reported,
+   * so one sleeping unit no longer blanks the slot. Falls back to the full-fleet series on
+   * records written before it existed.
+   */
   hourlyWatts24h: Array<number | null>;
+  /** How many nodes each hourly figure was summed over (null = no data in that slot). */
+  hourlyReportingNodeCount24h?: Array<number | null>;
   /** Wall power from external meters; present only while power meters are configured. */
   wall?: FleetWallEnergy;
 }
@@ -1425,6 +1451,8 @@ export interface FleetWallEnergy {
   nodeCoverage24hMs: Record<string, number>;
   nodeCoverage31dMs: Record<string, number>;
   hourlyWatts24h: Array<number | null>;
+  /** Absent on wall power: its fleet series stays full-fleet only. */
+  hourlyReportingNodeCount24h?: Array<number | null>;
 }
 
 // ─── API responses ────────────────────────────────────────
@@ -2812,6 +2840,16 @@ export interface EnergyHistoryRow {
   avgWatts: number | null;
   fleetEnergyWh: number;
   fleetCoverageMs: number;
+  /**
+   * The series the charts draw: energy summed over the nodes reporting in each minute, so an
+   * hour with one unit asleep still has a value. Older records fall back to the full-fleet
+   * figures above.
+   */
+  avgReportingWatts?: number | null;
+  reportingEnergyWh?: number;
+  reportingCoverageMs?: number;
+  /** Fewest nodes the reporting series covered in this hour (null = no reporting data). */
+  reportingNodeCount?: number | null;
   outputTokens: number;
   coveredOutputTokens: number;
   // ── Optional, present only in hours that have them ──
