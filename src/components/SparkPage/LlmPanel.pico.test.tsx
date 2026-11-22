@@ -47,7 +47,7 @@ it("shows Pico's counter-derived window decode rate", () => {
     generationTps: 40, generationTpsSource: "window" as const,
     prefillTps: 0, decodeActive: true,
   };
-  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} />);
+  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} llmHost={null} lanIp="127.0.0.1" />);
   expect(container.querySelector(".sp-decode .big-num")?.textContent).toBe("40.0tok/s");
   expect(container.textContent).not.toContain("sampled");
 });
@@ -58,7 +58,7 @@ it("shows no Pico decode figure when the front end publishes no counters", () =>
     generationTps: 0, generationTpsSource: null,
     prefillTps: 0, decodeActive: false,
   };
-  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} />);
+  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} llmHost={null} lanIp="127.0.0.1" />);
   expect(container.querySelector(".sp-decode .big-num")?.textContent).toBe("—");
 });
 
@@ -70,11 +70,24 @@ it("shows Pico's measured prefill split and the request gauges from /metrics", (
     uncachedPrefillTps: 400, cachedPrefillTps: 1600,
     requestsRunning: 2, requestsWaiting: 1,
   };
-  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} />);
+  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} llmHost={null} lanIp="127.0.0.1" />);
   // The split is computed tokens only, so the label must not claim it includes cached tokens.
   expect(container.textContent).toContain("Computed tokens · cached excluded");
   expect(container.textContent).not.toContain("Effective rate · includes cached tokens");
   expect(container.textContent).toContain("400.0tok/s");
-  // The two request gauges are the only engine tiles a counter-only build can fill.
-  expect(container.textContent).toContain("2 / 1");
+  // The fork's Engine cell formats the gauges as run/wait.
+  expect(container.textContent).toContain("2 run / 1 wait");
+  // Missing counters must not produce invented tiles.
+  expect(container.textContent).not.toContain("KV Cache");
+  expect(container.textContent).not.toContain("TTFT p95");
+  expect(container.textContent).not.toContain("Preempts");
+});
+
+it("shows no Pico Engine cell without a running-request counter", () => {
+  const llm = {
+    ...makeSpark().metrics.llm[0], backend: "pico" as const,
+    requestsRunning: null, requestsWaiting: 0,
+  };
+  const { container } = render(<LlmPanel llm={llm} sparkId="fixture" llmPort={8888} llmHost={null} lanIp="127.0.0.1" />);
+  expect(container.textContent).not.toContain("run /");
 });
