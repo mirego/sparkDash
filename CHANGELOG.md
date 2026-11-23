@@ -7,6 +7,14 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.7] — 2026-11-23
+
+### Added
+- **Upstream sync #12 (PR #34, card t_9f8ed280).** Merged upstream `1991eec5` into `release/custom` — 17 upstream commits after sync #11. Headliners: **nvidia-smi streaming collector** (long-lived loop-mode `nvidia-smi` readers via `server/collectors/nvidia-smi-load.sh` + `nvidiaSmiStream.js`, with pending-read/stopping-child lifecycle fixes and null for unmeasured bandwidth), **ignis LLM engine metrics** (`/ui/metrics` owned_by-ignis engines, counter reads measured up to 30 s apart, used-pages gauge treated as unmeasured rather than 0%), **Pico counter-derived decode/prefill** surfaced in the LLM panel, **macOS physical memory + native pressure** with headroom fallback, **DSH 0.2.2 occupancy-helper adapter** (token-to-cookie auth, remote launch-token kept off cleartext links), and fleet-energy fixes (gap = no reporters; intensity metric direction clarified). Fork preserved: version, lockfile, workflows, VulnHunter/REA/Tools removals.
+- Fork follow-up: surface merged Ignis/Pico counters in the fork engine grid (`3f0f541`).
+
+---
+
 ## [2.3.6] — 2026-11-20
 
 ### Changed
