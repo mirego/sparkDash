@@ -565,10 +565,14 @@ export function LlmPanel({
 
   const fmtTps = (n: number) => (n >= 1000 ? Math.round(n).toLocaleString() : n.toFixed(1));
   const fmtAvg = (n: number) => (n >= 100 ? n.toFixed(0) : n.toFixed(1));
-  const isVllm = llm != null && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "flare" || llm.backend === "locals" || llm.backend === "splash");
+  const isVllm = llm != null && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "flare" || llm.backend === "locals" || llm.backend === "splash" || llm.backend === "ignis");
   // FreeToken reports KV use, active requests and a TTFT mean in /v1/stats; the tiles below are null-gated.
   const isFreeToken = llm?.backend === "freetoken";
-  const showEngineTiles = isVllm || isFreeToken || isStrata;
+  // Pico publishes the two request gauges on /metrics (pico-dgx-ds4 >= the /metrics front end); every
+  // other tile stays null-gated, so a build without counters shows only what it measured.
+  const isPicoCounters = isPico && llm?.requestsRunning != null;
+  const picoOnlyMeasured = isPicoCounters;
+  const showEngineTiles = isVllm || isFreeToken || isStrata || isPicoCounters;
   const kvTone =
     llm?.kvCacheUsage == null
       ? ""
@@ -886,7 +890,7 @@ export function LlmPanel({
                     <span className="ov-tps__dots" aria-hidden />
                     <small>{t("llm.decoding")}</small>
                   </>
-                ) : isPico && !sampledDecode && llm?.generationTpsSource !== "dashboard-stream" ? (
+                ) : isPico && llm?.generationTpsSource == null ? (
                   <span title={t("llm.sampleOffHelp")}>—</span>
                 ) : (
                   <>
@@ -965,7 +969,9 @@ export function LlmPanel({
               )}
               {measured && completedPrefill && (
                 <span className="sp-avg" title={t("llm.completedPrefillHelp")}>
-                  {t("llm.effectiveIncludesCached")}
+                  {llm?.prefillTpsSource === "completed-split"
+                    ? t("llm.completedPrefillSplit")
+                    : t("llm.effectiveIncludesCached")}
                 </span>
               )}
             </div>
@@ -1238,9 +1244,9 @@ export function LlmPanel({
             </div>
           </div>
 
-          {llm && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "strata" || llm.backend === "locals" || llm.backend === "splash") && (
+          {llm && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "strata" || llm.backend === "locals" || llm.backend === "splash" || llm.backend === "ignis" || isPicoCounters) && (
             <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
-              <div className="space-y-0.5">
+              {(!picoOnlyMeasured || llm.kvCacheUsage != null) && <div className="space-y-0.5">
                 <MetricInfoTip
                   id="kvCache"
                   label="KV Cache"
@@ -1263,7 +1269,7 @@ export function LlmPanel({
                     ? `${(llm.kvCacheUsage * 100).toFixed(1)}%`
                     : "—"}
                 </div>
-              </div>
+              </div>}
               <div className="space-y-0.5">
                 <MetricInfoTip
                   id="requests"
@@ -1283,7 +1289,7 @@ export function LlmPanel({
                     : "—"}
                 </div>
               </div>
-              <div className="space-y-0.5">
+              {(!picoOnlyMeasured || llm.ttftP95Seconds != null) && <div className="space-y-0.5">
                 <MetricInfoTip
                   id="ttftP95"
                   label="TTFT p95"
@@ -1294,8 +1300,8 @@ export function LlmPanel({
                 <div className="font-tabular text-sm text-text">
                   {llm.ttftP95Seconds != null ? `${llm.ttftP95Seconds.toFixed(3)}s` : "—"}
                 </div>
-              </div>
-              <div className="space-y-0.5">
+              </div>}
+              {(!picoOnlyMeasured || llm.preemptionsTotal != null) && <div className="space-y-0.5">
                 <MetricInfoTip
                   id="preempts"
                   label="Preempts"
@@ -1309,11 +1315,11 @@ export function LlmPanel({
                     ? Math.round(llm.preemptionsTotal).toLocaleString()
                     : "—"}
                 </div>
-              </div>
+              </div>}
             </div>
           )}
 
-          {llm && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "strata" || llm.backend === "locals" || llm.backend === "splash") && (
+          {llm && (llm.backend === "vllm" || llm.backend === "q27" || llm.backend === "radiance" || llm.backend === "strata" || llm.backend === "locals" || llm.backend === "splash" || llm.backend === "ignis") && (
             <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 sm:grid-cols-4">
               <div className="space-y-0.5">
                 <MetricInfoTip
