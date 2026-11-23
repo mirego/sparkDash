@@ -87,6 +87,7 @@ import {
 } from "./collectors/OpenCodeExport.js";
 import { perModelUsageObject } from "./collectors/PerUserModelUsageTracker.js";
 import { resolveInflightSparkId, requestBelongsToSpark } from "./util/inflightSpark.js";
+import { buildOpenRequestsForSpark } from "./util/openRequests.js";
 import { MODEL_REGISTRY_PATH } from "./config.js";
 import { buildPimonoConfig } from "./collectors/PimonoConfigExport.js";
 import { InferenceActivityStore } from "./collectors/InferenceActivity.js";
@@ -3515,6 +3516,14 @@ async function buildSnapshotPayload(sparks = orderedSnapshots()) {
         // same key-prefix pills onto every Spark card — only requests that
         // landed on this spark.id (from X-Fleet-Backend / pin alias).
         llm.activeUsers = filterActiveUsersForSpark(allActiveUsers, spark.id);
+        llm.proxyOpenRequests = buildOpenRequestsForSpark(
+          allActiveUsers._openRequests || [],
+          allActiveUsers._source,
+          spark.id,
+        );
+        // UI marks the box stale when a refresh is this late (3 broadcast ticks,
+        // floor 15 s) — scales with Settings → Poll interval (max 60 s).
+        llm.proxyOpenRequests.staleAfterMs = Math.max(15_000, 3 * (getSettings().pollIntervalMs || 0));
         llm.recentRequests = filterRecentForSpark(
           allActiveUsers._recentRequests || [],
           spark.id,

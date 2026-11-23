@@ -19,6 +19,7 @@ import { PrefillBenchDialog } from "./PrefillBenchDialog";
 import { QualityBenchDialog } from "./QualityBenchDialog";
 import { LlmDailyChart } from "./LlmDailyChart";
 import { LlmTokenTotals } from "./LlmTokenTotals";
+import { OpenRequestsBox } from "./OpenRequestsBox";
 import { parseLlmTargetInput } from "../../shared/llmTarget.js";
 import { backendLabel } from "../../shared/llmBackends.js";
 import { formatTokensCompact } from "../../shared/tokenFormat.js";
@@ -857,6 +858,7 @@ export function LlmPanel({
             </button>
           </div>
           <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
+          <OpenRequestsBox data={llm?.proxyOpenRequests} />
           <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
         </div>
       ) : (
@@ -1444,6 +1446,7 @@ export function LlmPanel({
           )}
           <LlmDailyChart sparkId={sparkId} llmPort={llmPort} />
           <LlmTrendChart sparkId={sparkId} llmPort={llmPort} />
+          <OpenRequestsBox data={llm?.proxyOpenRequests} />
           <LlmTokenTotals sparkId={sparkId} llmPort={llmPort} />
         </div>
       )}

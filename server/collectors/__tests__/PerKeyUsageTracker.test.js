@@ -59,14 +59,88 @@ test("getActiveUsers maps /inflight to active/waiting/inputBytes per user", asyn
   }
 });
 
-test("getActiveUsers returns [] on proxy failure", async () => {
+test("getActiveUsers returns an unavailable array on proxy failure", async () => {
   const originalFetch = global.fetch;
   global.fetch = async () => {
     throw new Error("proxy down");
   };
   try {
     const users = await getActiveUsers();
-    assert.deepEqual(users, []);
+    assert.equal(Array.isArray(users), true);
+    assert.equal(users.length, 0);
+    assert.equal(users._source.status, "unavailable");
+    assert.deepEqual(users._openRequests, []);
+    assert.match(users._source.error, /proxy down/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("getActiveUsers marks non-200 responses unavailable", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: false, status: 503 });
+  try {
+    const users = await getActiveUsers();
+    assert.equal(Array.isArray(users), true);
+    assert.equal(users.length, 0);
+    assert.equal(users._source.status, "unavailable");
+    assert.equal(users._source.error, "HTTP 503");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("getActiveUsers prefers v2 requests and whitelists internal request fields", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      schemaVersion: 2,
+      generatedAt: 100,
+      bootId: "boot",
+      users: { alice: { waiting: 1, active: 0, requests: [{ id: "legacy" }] } },
+      requests: [{
+        id: "v2-id", user: "alice", state: "queued", phase: "waiting", model: "m",
+        promptEstTokens: 10, promptSource: "estimate", maxTokens: 20,
+        completionEstTokens: 0, completionSource: "estimate", ageSec: 5,
+        idleSec: 2, ttftSec: null, sparkId: "anton", backend: "internal",
+        path: "/private", headers: { authorization: "secret" },
+      }],
+    }),
+  });
+  try {
+    const users = await getActiveUsers();
+    assert.equal(users._source.status, "ok");
+    assert.equal(users._source.schemaVersion, 2);
+    assert.deepEqual(users._openRequests, [{
+      id: "v2-id", user: "alice", model: "m", state: "queued",
+      promptEstTokens: 10, promptSource: "estimate", maxTokens: 20,
+      completionEstTokens: 0, completionSource: "estimate", ageSec: 5,
+      idleSec: 2, ttftSec: null, sparkId: "anton", backend: "internal",
+    }]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("getActiveUsers flattens legacy requests and derives phase and user labels", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      users: {
+        alice: { waiting: 1, active: 0, requests: [{ id: "q", phase: "waiting" }] },
+        bob: { waiting: 0, active: 1, requests: [{ id: "s", phase: "generating" }] },
+      },
+    }),
+  });
+  try {
+    const users = await getActiveUsers();
+    assert.equal(users._source.status, "legacy");
+    assert.deepEqual(users._openRequests.map(({ id, user, state }) => ({ id, user, state })), [
+      { id: "q", user: "alice", state: "queued" },
+      { id: "s", user: "bob", state: "streaming" },
+    ]);
   } finally {
     global.fetch = originalFetch;
   }

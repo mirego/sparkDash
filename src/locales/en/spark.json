@@ -264,7 +264,22 @@
     "completedPrefillHelp": "Token and prefill-time deltas over requests that finished in the same window; not continuous live throughput.",
     "effectiveIncludesCached": "Effective rate · includes cached tokens",
     "completedPrefillSplit": "Computed tokens · cached excluded",
-    "completedDecodeRate": "{{rate}} tok/s · last completions"
+    "completedDecodeRate": "{{rate}} tok/s · last completions",
+    "openRequests": {
+      "title": "Open requests ({{count}})",
+      "unavailable": "Proxy unavailable — open requests unknown",
+      "empty": "No open requests",
+      "stale": "Stale",
+      "staleCount": "Open request count unavailable — refresh is stale",
+      "queued": "Queued",
+      "streaming": "Streaming",
+      "prompt": "Prompt ≈ {{value}}",
+      "max": "Max {{value}}",
+      "generated": "Generated {{value}}",
+      "age": "Age {{value}}",
+      "unknownUser": "Unknown user",
+      "unattributed": "{{count}} request(s) not attributed to a Spark"
+    }
   },
   "sessions": {
     "title": "Sessions",

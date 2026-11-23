@@ -575,6 +575,32 @@ export interface UnifiedMemoryMetrics {
 }
 
 // ─── LLM metrics ─────────────────────────────────────────
+export interface ProxyOpenRequest {
+  id: string;
+  label: string;
+  model?: string | null;
+  state?: "queued" | "streaming" | string | null;
+  promptEstTokens?: number | null;
+  promptSource?: string | null;
+  maxTokens?: number | null;
+  completionEstTokens?: number | null;
+  completionSource?: string | null;
+  ageSec?: number | null;
+  idleSec?: number | null;
+  ttftSec?: number | null;
+}
+
+export interface ProxyOpenRequests {
+  status: "ok" | "legacy" | "unavailable";
+  fetchedAt: number | null;
+  generatedAt: number | null;
+  schemaVersion: number | null;
+  requests: ProxyOpenRequest[];
+  unattributedCount: number;
+  /** Refresh age (ms) after which the UI shows the box as stale. Default 15 s. */
+  staleAfterMs?: number;
+}
+
 export interface LlmMetrics {
   /** The LLM port this snapshot came from — lets the UI match panels to probes by port, not array position. */
   port?: number;
@@ -726,6 +752,8 @@ export interface LlmMetrics {
    * Auth-proxy: accepted but no first response byte yet (upstream queue or prefill).
    */
   proxyRequestsWaiting?: number | null;
+  /** Per-Spark open requests reported by the auth-proxy, safely whitelisted. */
+  proxyOpenRequests?: ProxyOpenRequests;
   /**
    * Users with active or waiting (in-flight) requests, reported by the
    * auth-proxy in real-time. Each entry includes whether the user has any

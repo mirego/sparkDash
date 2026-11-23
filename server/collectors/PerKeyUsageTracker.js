@@ -477,20 +477,65 @@ export function getAllModelUsers() {
  * @returns {{ label: string, requests: number }[]}
  */
 export async function getActiveUsers() {
+  let fetchedAt = Date.now();
   try {
     const resp = await fetch("http://127.0.0.1:8317/inflight", {
       signal: AbortSignal.timeout(2000),
     });
-    if (!resp.ok) return [];
+    fetchedAt = Date.now();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const payload = await resp.json();
+    fetchedAt = Date.now();
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("Invalid /inflight response");
+    }
+
+    const isLegacy = payload.schemaVersion == null;
+    const source = {
+      status: isLegacy ? "legacy" : "ok",
+      fetchedAt,
+      generatedAt: payload.generatedAt ?? null,
+      bootId: payload.bootId ?? null,
+      schemaVersion: payload.schemaVersion ?? null,
+      error: null,
+    };
     // Envelope: { users: { prefix: {...} }, recent: [...] }
     // Legacy flat map still supported.
     const result =
-      payload && typeof payload === "object" && payload.users && typeof payload.users === "object"
+      payload.users && typeof payload.users === "object" && !Array.isArray(payload.users)
         ? payload.users
         : payload;
-    const recentRaw = Array.isArray(payload?.recent) ? payload.recent : [];
-    // Return flat list with status + overall running/waiting counts
+    const recentRaw = Array.isArray(payload.recent) ? payload.recent : [];
+    const rawOpenRequests = Array.isArray(payload.requests)
+      ? payload.requests
+      : Object.entries(result).flatMap(([label, counts]) =>
+          Array.isArray(counts?.requests)
+            ? counts.requests.map((request) => ({
+                ...request,
+                user: label,
+                state: request.phase === "waiting" ? "queued" : "streaming",
+              }))
+            : [],
+        );
+    const openRequests = rawOpenRequests.map((request) => ({
+      id: request.id,
+      user: request.user ?? request.label ?? "",
+      model: request.model ?? null,
+      state: isLegacy
+        ? (request.phase === "waiting" ? "queued" : "streaming")
+        : request.state,
+      promptEstTokens: request.promptEstTokens ?? null,
+      promptSource: request.promptSource ?? null,
+      maxTokens: request.maxTokens ?? null,
+      completionEstTokens: request.completionEstTokens ?? null,
+      completionSource: request.completionSource ?? null,
+      ageSec: request.ageSec ?? null,
+      idleSec: request.idleSec ?? null,
+      ttftSec: request.ttftSec ?? null,
+      sparkId: request.sparkId ?? null,
+      backend: request.backend ?? null,
+    }));
+
     const users = [];
     let totalRunning = 0;
     let totalWaiting = 0;
@@ -547,7 +592,6 @@ export async function getActiveUsers() {
         });
       }
     }
-    // Attach aggregated counts so the snapshot can use them
     users._totalRunning = totalRunning;
     users._totalWaiting = totalWaiting;
     users._recentRequests = recentRaw.map((r) => ({
@@ -570,9 +614,21 @@ export async function getActiveUsers() {
       backend: r.backend ?? null,
       sparkId: r.sparkId ?? null,
     }));
+    users._source = source;
+    users._openRequests = openRequests;
     return users.sort((a, b) => b.requests - a.requests);
   } catch (err) {
-    return [];
+    const unavailable = [];
+    unavailable._source = {
+      status: "unavailable",
+      fetchedAt,
+      generatedAt: null,
+      bootId: null,
+      schemaVersion: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    unavailable._openRequests = [];
+    return unavailable;
   }
 }
 
