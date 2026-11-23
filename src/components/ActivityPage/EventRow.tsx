@@ -5,6 +5,7 @@ import type { ActivityEvent } from "../../api/types";
 import { ChevronRightIcon } from "../ui/icons";
 import { Tag, type TagTone } from "../ui/Tag";
 import { splitMessage } from "../OverviewPage/activityFormat";
+import { RequestEndedDetail } from "../OverviewPage/RequestActivity";
 import { categorize, formatClock, formatStamp } from "./activityStats";
 
 const SEV_TONE: Record<ActivityEvent["severity"], TagTone> = { error: "bad", warn: "warn", success: "good", info: "info" };
@@ -93,16 +94,18 @@ function formatAgo(ts: number, now: number): string {
           {severityLabels[e.severity]}
         </span>
         <p className="ac-row__msg">
-          {before}
-          {name &&
-            (clickable ? (
-              <button type="button" className="ac-spark" onClick={() => onSelectSpark!(e.sparkId as string)} title={t("row.openSpark", { name })}>
-                {name}
-              </button>
-            ) : (
-              <strong>{name}</strong>
-            ))}
-          {after}
+          {e.type === "request.ended" ? <RequestEndedDetail event={e} onSelectSpark={onSelectSpark} /> : <>
+            {before}
+            {name &&
+              (clickable ? (
+                <button type="button" className="ac-spark" onClick={() => onSelectSpark!(e.sparkId as string)} title={t("row.openSpark", { name })}>
+                  {name}
+                </button>
+              ) : (
+                <strong>{name}</strong>
+              ))}
+            {after}
+          </>}
         </p>
         <Tag tone={e.severity === "info" ? "neutral" : SEV_TONE[e.severity]} className="ac-row__tag" title={e.type}>
           {label}

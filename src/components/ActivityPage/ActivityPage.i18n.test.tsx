@@ -8,6 +8,9 @@ import { exportText } from "./activityStats";
 import { useActivityFeed } from "./useActivityFeed";
 
 vi.mock("./useActivityFeed", () => ({ useActivityFeed: vi.fn() }));
+vi.mock("../../hooks/useRequestActivity", () => ({
+  useRequestActivity: () => ({ data: null, loading: true, clientError: false, endedSignal: 0 }),
+}));
 const now = Date.UTC(2026, 9, 31, 12);
 const events: ActivityEvent[] = [
   { id: 2, ts: now - 120_000, type: "spark.offline", severity: "error", sparkId: "raw-id", sparkName: "Raw <host>", message: "Raw <host> offline: E_CONN", data: { diagnostic: "Raw error", count: 0 } },

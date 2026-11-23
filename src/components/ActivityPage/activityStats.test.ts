@@ -22,6 +22,7 @@ function ev(over: Partial<ActivityEvent> = {}): ActivityEvent {
 describe("categorize / typeLabel", () => {
   it("maps every emitted type to a category", () => {
     expect(categorize("spark.online")).toBe("status");
+    expect(categorize("request.ended")).toBe("requests");
     expect(categorize("spark.offline")).toBe("status");
     expect(categorize("gpu.throttle.thermal")).toBe("thermal");
     expect(categorize("gpu.throttle.cleared")).toBe("thermal");
@@ -88,6 +89,8 @@ describe("filterEvents + counts", () => {
     expect(isFilterActive(EMPTY_FILTER)).toBe(false);
   });
   it("filters by severity set, category, spark and range", () => {
+    const request = ev({ id: 11, type: "request.ended", severity: "info", message: "request finished" });
+    expect(filterEvents([...events, request], { ...EMPTY_FILTER, category: "requests" }, NOW).map((e) => e.id)).toEqual([11]);
     expect(filterEvents(events, { ...EMPTY_FILTER, severities: ["error", "warn"] }, NOW).map((e) => e.id)).toEqual([10, 9]);
     expect(filterEvents(events, { ...EMPTY_FILTER, category: "bench" }, NOW).map((e) => e.id)).toEqual([8]);
     expect(filterEvents(events, { ...EMPTY_FILTER, sparkId: "b" }, NOW).map((e) => e.id)).toEqual([9, 8]);

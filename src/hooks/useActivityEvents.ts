@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchEvents } from "../api/client";
 import type { ActivityEvent } from "../api/types";
 
@@ -9,8 +9,11 @@ const KEEP = 50;
  * Fleet activity events (newest first). Fetches once, then polls every 15 s
  * while the tab is visible (the snapshot WebSocket is deliberately untouched).
  */
-export function useActivityEvents(opts?: { sparkId?: string }) {
+export function useActivityEvents(opts?: { sparkId?: string; refreshKey?: number }) {
   const sparkId = opts?.sparkId;
+  const refreshKey = opts?.refreshKey;
+  const refreshKeyRef = useRef(refreshKey);
+  const loadRef = useRef<() => void>(() => {});
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +35,7 @@ export function useActivityEvents(opts?: { sparkId?: string }) {
       }
     };
 
+    loadRef.current = () => { void load(); };
     const start = () => {
       if (timer == null) timer = setInterval(() => void load(), POLL_MS);
     };
@@ -57,6 +61,12 @@ export function useActivityEvents(opts?: { sparkId?: string }) {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [sparkId]);
+
+  useEffect(() => {
+    if (refreshKeyRef.current === refreshKey) return;
+    refreshKeyRef.current = refreshKey;
+    if (!document.hidden) loadRef.current();
+  }, [refreshKey, sparkId]);
 
   return { events, loading, error };
 }
