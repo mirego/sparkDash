@@ -238,7 +238,22 @@
     "sampleOffHelp": "该引擎不发布任何实时计数器。在设置中开启“对流采样无指标引擎”，让面板自行测量解码 tok/s。",
     "completedPrefillHelp": "同一窗口内已完成请求的 Token 与预填充耗时增量；并非持续的实时吞吐。",
     "effectiveIncludesCached": "有效速率 · 包含缓存 Token",
-    "completedDecodeRate": "{{rate}} tok/s · 最近完成"
+    "completedDecodeRate": "{{rate}} tok/s · 最近完成",
+    "openRequests": {
+      "title": "未完成请求（{{count}}）",
+      "unavailable": "代理不可用 — 未知未完成请求数",
+      "empty": "没有未完成请求",
+      "stale": "数据已过期",
+      "staleCount": "请求计数不可用 — 数据已过期",
+      "queued": "排队中",
+      "streaming": "流式传输",
+      "prompt": "提示词 ≈ {{value}}",
+      "max": "上限 {{value}}",
+      "generated": "已生成 {{value}}",
+      "age": "耗时 {{value}}",
+      "unknownUser": "未知用户",
+      "unattributed": "{{count}} 个请求未关联到 Spark"
+    }
   },
   "sessions": {
     "title": "会话",
