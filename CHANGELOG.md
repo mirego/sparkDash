@@ -7,6 +7,14 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.9] — 2026-11-23
+
+### Added
+- **LLM request activity (PR #37, card t_98955a1d).** Server-side request lifecycle tracker (`server/events/RequestLifecycle.js`) feeding EventLog; open + completed LLM requests now appear in fleet Overview Recent activity and the Activity page (`useRequestActivity`, `RequestActivity` component, en + zh-CN locales, styles) — plus headed request-activity E2E with an isolated fake `/inflight` stack.
+- **Upstream sync #13 (PR #36, card t_6ac3ed69).** Merged upstream `86f972e2` into `release/custom` — 3 upstream commits after sync #12: storage management on generic Linux GPU hosts (not only DGX Sparks), **Remove agent junk** (`agentJunk.js` + `agent-junk.sh`, AgentJunk tab), and upstream release 2.91.0. Fork preserved: version, lockfile, workflows, VulnHunter/REA/Tools removals; fork guard test added for Linux GPU host safety.
+
+---
+
 ## [2.3.8] — 2026-11-23
 
 ### Added
