@@ -7,6 +7,13 @@ Format: version sections are listed newest first.
 
 ---
 
+## [2.3.8] — 2026-11-23
+
+### Added
+- **Per-Spark Open requests box (PR #35, card t_57a8a955).** New `OpenRequestsBox` component on the Spark page — per-Spark view of open/streaming/queued LLM requests, with tests.
+
+---
+
 ## [2.3.7] — 2026-11-23
 
 ### Added
