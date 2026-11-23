@@ -1,13 +1,22 @@
 import fs from "fs";
 import path from "path";
 import childProcess from "child_process";
-import { HOST_PATHS, GPU_MEMORY_JSON_PATH, DGX_SPARK, HARDWARE_DEFAULTS, POLL_INTERVAL_NVERR } from "../config.js";
+import {
+  HOST_PATHS,
+  GPU_MEMORY_JSON_PATH,
+  DGX_SPARK,
+  HARDWARE_DEFAULTS,
+  POLL_INTERVAL_NVERR,
+  POLL_INTERVAL_COMPUTE_APPS,
+} from "../config.js";
 import { normalizeMac, WOL_INTERFACE } from "../wol.js";
 import { sshExec } from "./ssh.js";
 import { getSettings } from "../settings.js";
 import { RoceSampler } from "./roce.js";
 import { KernelJournal } from "./kernelJournal.js";
+import { NvidiaSmiStream, dmonAssembler, gpuQueryAssembler } from "./nvidiaSmiStream.js";
 import { IntelSudoGate, IntelVramCache, buildIntelProbeScript, parseIntelProbe, sampleIntelCards } from "./intelGpu.js";
+import { MAC_MEMORY_CMD, macMemoryFromOutput } from "./macMemory.js";
 import {
   WINDOWS_GPU_SCRIPT,
   WINDOWS_SYSTEM_SCRIPT,
@@ -164,6 +173,7 @@ const MACMON_CANDIDATES = [
   "$HOME/.cargo/bin/macmon",
 ].filter(Boolean);
 export const MACMON_CMD =
+  `${MAC_MEMORY_CMD}; ` +
   // The GPU's share of unified memory first (macmon only reports RAM as a whole): the driver's
   // "In use system memory" per accelerator, filtered to those lines, so macmon's JSON stays last.
   `ioreg -r -d 1 -w 0 -c IOAccelerator 2>/dev/null | grep -o '"In use system memory"=[0-9]*'; ` +
@@ -533,6 +543,8 @@ const GPU_QUERY_FIELDS = [
   "pcie.link.width.max",
 ];
 const GPU_QUERY = `--query-gpu=${GPU_QUERY_FIELDS.join(",")} --format=csv,noheader,nounits`;
+const GPU_QUERY_FIELD_COUNT = GPU_QUERY_FIELDS.length; // 23
+const GPU_QUERY_INDEX_FIELD = GPU_QUERY_FIELDS.indexOf("index"); // 15
 
 /**
  * SystemCollector — collects hardware metrics for a Spark.
@@ -609,6 +621,17 @@ for c in containers:
 print(json.dumps(models))
 PY`;
 
+const NVIDIA_COMPUTE_APPS_QUERY =
+  "--query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid --format=csv,noheader,nounits";
+/**
+ * `dmon -s B` does not exist on every driver (GB10 / 580.159.03 rejects it), so
+ * a dmon reader that fails this many times in a row right after starting is
+ * given up on: bandwidth is then unavailable until the readers are restarted.
+ */
+const NVIDIA_DMON_MAX_QUICK_FAILURES = 3;
+/** How long a read waits for the first sample of a just-started nvidia-smi reader, on top of one interval. */
+const NVIDIA_SMI_FIRST_SAMPLE_WAIT_MS = 5000;
+
 /** Separates `df` output from the block-device counters in the remote storage command. */
 const REMOTE_IO_MARKER = "---sparkdash-block-io---";
 /** Samples of one disk closer together than this (ms) are the same poll and share one rate. */
@@ -656,6 +679,11 @@ export class SystemCollector {
 
     // Rootless-Docker nsenter state (classified once, then remembered).
     this._nsenterBroken = false;
+    // Long-lived local nvidia-smi readers; off (per-call spawns) until a monitor enables them.
+    this._smiStreamIntervals = null;
+    this._smiGpuStream = null;
+    this._smiDmonStream = null;
+    this._computeAppsRead = null;
     /** Cached "container netns is the host's" check (network_mode: host). */
     this._containerNetnsShared = null;
   }
@@ -893,21 +921,26 @@ export class SystemCollector {
   // ─── GPU helpers ─────────────────────────────────────────
   async _getGPUAll() {
     const vramRead = this._intelVram.stale;
+    const gpuStream = this._nvidiaGpuStream();
     const [gpuOut, amd, clockCapMHz, intelOut] = await Promise.all([
-      // Keep the shared extended query; null marks nvidia-smi failure for mixed GPU hosts.
-      this._nvidiaSmi(GPU_QUERY).catch(() => null),
+      // Shared extended query (long-lived stream or one-shot); null marks nvidia-smi failure for mixed GPU hosts.
+      gpuStream
+        ? this._readNvidiaSmiStream(gpuStream)
+        : this._nvidiaSmi(GPU_QUERY).catch(() => null),
       this._probeLocalAmd(),
       this._readLocalClockCap(),
       this._probeIntelLocal(vramRead),
     ]);
-    const nvidiaDevices = this._parseGpuLines(gpuOut ?? "");
+    const nvidiaDevices = this._parseGpuLines(gpuStream && gpuOut != null ? this._streamedGpuLines(gpuOut) : (gpuOut ?? ""));
     this._applyClockCap(nvidiaDevices, clockCapMHz);
     const intelDevices = this._intelDevices(this._sampleIntel(intelOut, vramRead));
     const otherDevices = [...amd.devices, ...intelDevices];
     // nvidia-smi failing is normal on a host without NVIDIA; installed-but-failing next to an Intel card is not.
     const nvidiaFailed = gpuOut === null && intelDevices.length > 0 && (await this._nvidiaSmiInstalled());
     this._lastVramPerDevice = [];
-    const nvidiaVram = nvidiaDevices.length ? await this._queryNvidiaVram() : { used: 0, total: 0, percentage: 0, available: 0 };
+    // The streamed query carries memory.used,memory.total after the GPU fields.
+    const memOut = gpuStream && gpuOut != null ? this._streamedVramLines(gpuOut) : null;
+    const nvidiaVram = nvidiaDevices.length ? await this._queryNvidiaVram({ memOut }) : { used: 0, total: 0, percentage: 0, available: 0 };
     const otherVram = this._sumDeviceVram(otherDevices);
     const devices = [...nvidiaDevices, ...otherDevices];
     const gpu = this._aggregateGpuDevices(devices);
@@ -1139,16 +1172,15 @@ export class SystemCollector {
    * `percentage` is `used / MemTotal` so it is comparable to the Unified Memory
    * percentage (both denominate against the same pool).
    */
-  async _queryNvidiaVram({ computeOut = null } = {}) {
+  async _queryNvidiaVram({ computeOut = null, memOut = null } = {}) {
     let used = null;
     let total = null;
     let availableMB = 0;
 
     try {
-      const memOut = await this._nvidiaSmi(
-        "--query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+      const perDevice = this._parseVramLines(
+        memOut ?? (await this._nvidiaSmi("--query-gpu=memory.used,memory.total --format=csv,noheader,nounits"))
       );
-      const perDevice = this._parseVramLines(memOut);
       this._lastVramPerDevice = perDevice;
       ({ used, total } = this._sumVram(perDevice));
     } catch {
@@ -1161,12 +1193,7 @@ export class SystemCollector {
     let computeAppsQueried = false;
     let computeSum = 0;
     try {
-      const raw =
-        computeOut != null
-          ? computeOut
-          : await this._nvidiaSmi(
-              "--query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid --format=csv,noheader,nounits"
-            );
+      const raw = computeOut != null ? computeOut : await this._computeAppsOut();
       const apps = this._parseComputeApps(raw);
       this.nvidiaComputeAppsCache.clear();
       for (const app of apps) {
@@ -2286,17 +2313,25 @@ export class SystemCollector {
     const availableMB = Math.round(availKB / 1024);
     const oomRisk = oomRiskFor(availableMB);
 
-    // Memory bandwidth (nvidia-smi dmon) — host namespaces when in Docker
-    let bandwidth = { current: 0, peak: 400 };
+    // Memory bandwidth (nvidia-smi dmon) — host namespaces when in Docker.
+    // `current: null` = not measured (dmon failed, unsupported, stale or unparsable), never 0.
+    let bandwidth = { current: null, peak: 400 };
     try {
-      const dmonOut = await this._nvidiaSmi("dmon -c 1 -d 1 -s B");
-      const dmonLines = dmonOut.trim().split("\n").filter((l) => !l.startsWith("#") && l.trim());
+      const dmonStream = this._nvidiaDmonStream();
+      // No fresh streamed sample: no data line, so bandwidth stays unreported.
+      const dmonOut = dmonStream
+        ? ((await this._readNvidiaSmiStream(dmonStream)) ?? "")
+        : await this._nvidiaSmi("dmon -c 1 -d 1 -s B");
+      // No trim: the columns are read with the data line's leading padding, as in the full dmon output.
+      const dmonLines = dmonOut.split("\n").filter((l) => !l.startsWith("#") && l.trim());
       if (dmonLines.length > 0) {
         const parts = dmonLines[dmonLines.length - 1].split(/\s+/);
-        const readMBs = parseFloat(parts[2]) || 0;
-        const writeMBs = parseFloat(parts[3]) || 0;
-        const totalGBs = (readMBs + writeMBs) / 1024;
-        bandwidth = { current: Math.round(totalGBs * 100) / 100, peak: 400 };
+        const readMBs = parseFloat(parts[2]);
+        const writeMBs = parseFloat(parts[3]);
+        if (Number.isFinite(readMBs) && Number.isFinite(writeMBs)) {
+          const totalGBs = (readMBs + writeMBs) / 1024;
+          bandwidth = { current: Math.round(totalGBs * 100) / 100, peak: 400 };
+        }
       }
     } catch {}
 
@@ -2703,6 +2738,7 @@ export class SystemCollector {
       }
       // Not a macmon field: the GPU's share of unified memory from the same SSH call (bytes, or null).
       sample.gpuInUseBytes = parseMacGpuMemory(out);
+      sample.macMemory = macMemoryFromOutput(out);
       return sample;
     });
     const entry = { at: now, promise, ttl: 1500 };
@@ -2731,8 +2767,9 @@ export class SystemCollector {
       const temperature = r1(j.temp?.gpu_temp_avg);
       const usage = Math.round((Number(j.gpu_usage?.[1]) || 0) * 100);
       const draw = r1(j.gpu_power);
-      const total = Math.round((Number(j.memory?.ram_total) || 0) / 1048576);
-      const ramUsed = Math.round((Number(j.memory?.ram_usage) || 0) / 1048576);
+      const ram = await this._macmonRam();
+      const total = ram?.total ?? 0;
+      const ramUsed = ram?.used ?? 0;
       // The GPU's own share when the driver reports it, as on a Spark; otherwise the whole pool's use.
       const used = macGpuUsedMB(j, ramUsed) ?? ramUsed;
       const vram = {
@@ -2803,11 +2840,13 @@ export class SystemCollector {
 
   async _macmonRam() {
     try {
-      const m = (await this._macmonSample()).memory || {};
-      const total = Math.round((Number(m.ram_total) || 0) / 1048576);
-      const used = Math.round((Number(m.ram_usage) || 0) / 1048576);
+      const sample = await this._macmonSample();
+      const m = sample.memory || {};
+      const native = sample.macMemory ?? macMemoryFromOutput("");
+      const total = native.total ?? Math.round((Number(m.ram_total) || 0) / 1048576);
+      const used = native.used ?? Math.round((Number(m.ram_usage) || 0) / 1048576);
       if (!(total > 0)) return null;
-      return { used, total, percentage: Math.round((used / total) * 100) };
+      return { ...native, used, total, percentage: Math.round((used / total) * 100) };
     } catch {
       return null;
     }
@@ -2815,7 +2854,7 @@ export class SystemCollector {
 
   async _getRemoteUnifiedMemoryMac() {
     const ram = await this._macmonRam();
-    if (!ram) return this._defaultUnifiedMemory();
+    if (!ram) return { ...this._defaultUnifiedMemory(), memoryPressure: "unknown", oomRisk: null };
     let gpuUsed = 0;
     try {
       gpuUsed = macGpuUsedMB(await this._macmonSample(), ram.used) ?? 0;
@@ -2823,13 +2862,12 @@ export class SystemCollector {
       /* _macmonRam just read the same sample; a failure here keeps the pool unsplit */
     }
     return {
-      total: ram.total,
+      ...ram,
       gpuUsed,
       cpuUsed: ram.used - gpuUsed,
       used: ram.used,
       available: Math.max(0, ram.total - ram.used),
       percentage: ram.percentage,
-      oomRisk: ram.percentage > 85 ? "high" : ram.percentage > 60 ? "medium" : "low",
       bandwidth: { current: 0, peak: 0 },
     };
   }
@@ -3440,6 +3478,136 @@ export class SystemCollector {
     const smi = this._nvidiaSmiPath || "nvidia-smi";
     const cmd = `${smi} ${smiArgs} 2>/dev/null`;
     return this._execOnHost(cmd);
+  }
+
+  /**
+   * Read local nvidia-smi through long-lived loop-mode processes instead of a
+   * spawn per poll (see nvidiaSmiStream.js). The monitor that owns this
+   * collector passes its poll intervals; one-shot users keep the per-call path.
+   * A changed interval restarts the readers at the new cadence.
+   * @param {{ gpu: number, memory: number }} intervals
+   */
+  useNvidiaSmiStreams({ gpu, memory }) {
+    if (!this.spark.isLocal) return;
+    const prev = this._smiStreamIntervals;
+    if (prev && prev.gpu === gpu && prev.memory === memory) return;
+    this._disposeNvidiaSmiStreams();
+    this._smiStreamIntervals = { gpu, memory };
+  }
+
+  /** Stop the long-lived readers and return to per-call spawns. */
+  dispose() {
+    this._disposeNvidiaSmiStreams();
+    this._smiStreamIntervals = null;
+  }
+
+  _disposeNvidiaSmiStreams() {
+    this._smiGpuStream?.dispose();
+    this._smiDmonStream?.dispose();
+    this._smiGpuStream = null;
+    this._smiDmonStream = null;
+    this._computeAppsRead = null;
+  }
+
+  /** Streams the shared extended query plus memory.used,memory.total every GPU poll interval, or null when streams are off. */
+  _nvidiaGpuStream() {
+    if (!this._smiStreamIntervals) return null;
+    const ms = Math.max(100, Math.round(this._smiStreamIntervals.gpu));
+    this._smiGpuStream ??= this._createNvidiaSmiStream(
+      `--query-gpu=${GPU_QUERY_FIELDS.join(",")},memory.used,memory.total --format=csv,noheader,nounits -lms ${ms}`,
+      gpuQueryAssembler({ fieldCount: GPU_QUERY_FIELD_COUNT + 2, indexField: GPU_QUERY_INDEX_FIELD }),
+      ms
+    );
+    return this._smiGpuStream;
+  }
+
+  /** `dmon -s B` at the bandwidth interval (whole seconds, dmon's unit), or null when streams are off. */
+  _nvidiaDmonStream() {
+    if (!this._smiStreamIntervals) return null;
+    const seconds = Math.max(1, Math.round(this._smiStreamIntervals.memory / 1000));
+    this._smiDmonStream ??= this._createNvidiaSmiStream(`dmon -d ${seconds} -s B`, dmonAssembler(), seconds * 1000, {
+      maxQuickFailures: NVIDIA_DMON_MAX_QUICK_FAILURES,
+    });
+    return this._smiDmonStream;
+  }
+
+  _createNvidiaSmiStream(smiArgs, assembler, intervalMs, { maxQuickFailures } = {}) {
+    const label = `nvidia-smi ${smiArgs.split(" ")[0]}`;
+    return new NvidiaSmiStream({
+      spawn: () => this._spawnNvidiaSmi(smiArgs),
+      assembler,
+      intervalMs,
+      maxQuickFailures,
+      onExit: ({ code, signal, error, stderr, hadSample, gaveUp }) => {
+        // Same rootless classification as _execHostNs: later restarts run in the container.
+        if (stderr && this._hasHostProc() && !this._nsenterBroken && this._isNsenterPermError({ stderr })) {
+          this._markNsenterBroken(new Error(stderr));
+        }
+        if (gaveUp) {
+          console.warn(
+            `[SystemCollector] ${label} on ${this.spark.id} failed ${maxQuickFailures} times at start without output (\`${smiArgs}\` unsupported?); not restarting it.`
+          );
+        } else if (hadSample) {
+          console.warn(
+            `[SystemCollector] ${label} reader on ${this.spark.id} exited (${error?.message ?? signal ?? `code ${code}`}); restarting.`
+          );
+        }
+      },
+    });
+  }
+
+  /** Latest streamed sample; a just-started reader gets one interval plus a grace period to print it. */
+  _readNvidiaSmiStream(stream) {
+    return stream.read({ waitMs: stream.intervalMs + NVIDIA_SMI_FIRST_SAMPLE_WAIT_MS });
+  }
+
+  /** The shared GPU fields per line (memory.used,memory.total dropped), in the one-shot `GPU_QUERY` layout. */
+  _streamedGpuLines(sample) {
+    return sample
+      .split("\n")
+      .map((line) => line.split(",").slice(0, GPU_QUERY_FIELD_COUNT).join(","))
+      .join("\n");
+  }
+
+  /** `memory.used, memory.total` per line from the streamed `--query-gpu` sample. */
+  _streamedVramLines(sample) {
+    return sample
+      .split("\n")
+      .map((line) => line.split(",").slice(GPU_QUERY_FIELD_COUNT).join(","))
+      .join("\n");
+  }
+
+  /**
+   * Spawn a long-lived `nvidia-smi <args>` the way `_nvidiaSmi` runs it: in the
+   * host mount namespace when available, else in the container. `exec` makes
+   * the returned child nvidia-smi itself (nsenter without --pid does not fork),
+   * so killing the child stops the reader.
+   */
+  _spawnNvidiaSmi(smiArgs) {
+    const smi = this._nvidiaSmiPath || "nvidia-smi";
+    const cmd = `exec ${smi} ${smiArgs} 2>/dev/null`;
+    const options = { stdio: /** @type {const} */ (["ignore", "pipe", "pipe"]) };
+    if (this._hasHostProc() && !this._nsenterBroken) {
+      const mnt = "--mount=" + path.join(HOST_PATHS.PROC, "1", "ns", "mnt");
+      return childProcess.spawn("nsenter", [mnt, "--", "sh", "-c", cmd], options);
+    }
+    return childProcess.spawn("sh", ["-c", cmd], options);
+  }
+
+  /**
+   * `--query-compute-apps` output. With the streamed readers on, it is still
+   * spawned per call (an empty process list cannot be told apart from a
+   * stalled loop-mode reader) but at most once per POLL_INTERVAL_COMPUTE_APPS;
+   * a failed read is never answered from the previous result.
+   */
+  async _computeAppsOut() {
+    if (!this._smiStreamIntervals) return this._nvidiaSmi(NVIDIA_COMPUTE_APPS_QUERY);
+    const cached = this._computeAppsRead;
+    if (cached && Date.now() - cached.at < POLL_INTERVAL_COMPUTE_APPS) return cached.out;
+    this._computeAppsRead = null;
+    const out = await this._nvidiaSmi(NVIDIA_COMPUTE_APPS_QUERY);
+    this._computeAppsRead = { out, at: Date.now() };
+    return out;
   }
 
   /** amd-smi from the host namespace when available; AMD and NVIDIA are probed independently. */
