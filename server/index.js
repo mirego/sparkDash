@@ -107,6 +107,7 @@ import { ALERTS_JSON_PATH, FLEET_ENERGY_JSON_PATH, FLEET_ENERGY_MONTHLY_JSON_PAT
 import { createAlertsRuntime, registerAlertRoutes } from "./alerts/runtime.js";
 import { FleetEnergyTracker } from "./energy/FleetEnergyTracker.js";
 import { EventLog } from "./events/EventLog.js";
+import { RequestLifecycleTracker } from "./events/RequestLifecycle.js";
 import { planListenRetry } from "./listenRetry.js";
 import { UnitHistory } from "./metrics/UnitHistory.js";
 import { createUnitHistoryRuntime, registerUnitHistoryRoutes } from "./metrics/UnitHistoryRuntime.js";
@@ -467,13 +468,39 @@ const unitHistory = new UnitHistory({
 });
 
 /** Record an event; never throws (callers sit in poll loops and routes). */
-function recordEvent(event) {
+function recordEvent(event, opts) {
   try {
     const name = event.sparkName ?? registry.getSpark(event.sparkId)?.name ?? event.sparkId ?? null;
-    return eventLog.record({ ...event, sparkName: name });
+    return eventLog.record({ ...event, sparkName: name }, opts);
   } catch {
     return null;
   }
+}
+
+const recordEventWith = (event, opts) => recordEvent(event, opts);
+const requestLifecycle = new RequestLifecycleTracker({
+  file: process.env.REQUEST_LIFECYCLE_PATH || path.join(ROOT, "config", "request-lifecycle.json"),
+  record: (event, opts) => recordEventWith(event, opts),
+  resolveSparkId: resolveInflightSparkId,
+  sparkName: (id) => registry.getSpark(id)?.name ?? id,
+  staleAfterMs: () => Math.max(15_000, 3 * (getSettings().pollIntervalMs || 0)),
+});
+
+let inflightPromise = null;
+let inflightLast = null;
+async function pollInflight({ maxAgeMs = 0 } = {}) {
+  if (inflightLast && Date.now() - inflightLast.at <= maxAgeMs) return inflightLast.users;
+  if (inflightPromise) return inflightPromise;
+  inflightPromise = getActiveUsers()
+    .then((users) => {
+      requestLifecycle.ingest(users);
+      inflightLast = { at: Date.now(), users };
+      return users;
+    })
+    .finally(() => {
+      inflightPromise = null;
+    });
+  return inflightPromise;
 }
 
 for (const [mgr] of [[decodeBenchManager], [prefillBenchManager], [qualityBenchManager]]) {
@@ -692,6 +719,7 @@ app.get("/api/events", (req, res) => {
     oldestId: eventLog.oldestId?.() ?? null,
   });
 });
+app.get("/api/events/requests", (req, res) => res.json(requestLifecycle.snapshot()));
 
 /** Clear Activity history. Query: olderThanMs (omit to delete everything). */
 app.delete("/api/events", (req, res) => {
@@ -2531,6 +2559,7 @@ function initiateSparkShutdown(spark) {
       message: `Shutdown requested for ${spark.name || spark.id}`,
     });
     eventLog.flush(); // the local host may power off right after this
+    requestLifecycle.flush();
   };
   if (spark.isLocal) {
     noteShutdown();
@@ -3490,7 +3519,7 @@ function filterRecentForSpark(recent, sparkId) {
 
 async function buildSnapshotPayload(sparks = orderedSnapshots()) {
   // Poll the auth-proxy's /inflight endpoint for real-time active user counts.
-  const allActiveUsers = await getActiveUsers();
+  const allActiveUsers = await pollInflight({ maxAgeMs: 1000 });
   const proxyRunning = allActiveUsers._totalRunning || 0;
   const proxyWaiting = allActiveUsers._totalWaiting || 0;
   // Feed each online spark's GPU power draw into the energy tracker (integrates
@@ -3718,7 +3747,10 @@ function startBroadcast() {
     // (upstream 37d24c8 — snapshot arrival is the UI's liveness signal, so
     // the identical-payload skip this fork carried from v2.50 was dropped
     // upstream in 57813b4 and is not restored here).
-    if (wss.clients.size === 0) return;
+    if (wss.clients.size === 0) {
+      await pollInflight({ maxAgeMs: 1000 }).catch(() => {});
+      return;
+    }
     const payload = await buildSnapshotPayload(sparks);
     broadcastPayload(payload);
   }, interval);
@@ -3837,6 +3869,7 @@ async function shutdown(signal) {
   }
   try {
     eventLog.flush();
+    requestLifecycle.flush();
   } catch (err) {
     console.error("[sparkDash] failed to flush event log:", err.message);
   }

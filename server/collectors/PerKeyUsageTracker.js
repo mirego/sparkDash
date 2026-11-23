@@ -479,7 +479,8 @@ export function getAllModelUsers() {
 export async function getActiveUsers() {
   let fetchedAt = Date.now();
   try {
-    const resp = await fetch("http://127.0.0.1:8317/inflight", {
+    const inflightUrl = process.env.AUTH_PROXY_INFLIGHT_URL || "http://127.0.0.1:8317/inflight";
+    const resp = await fetch(inflightUrl, {
       signal: AbortSignal.timeout(2000),
     });
     fetchedAt = Date.now();
@@ -530,6 +531,7 @@ export async function getActiveUsers() {
       completionEstTokens: request.completionEstTokens ?? null,
       completionSource: request.completionSource ?? null,
       ageSec: request.ageSec ?? null,
+      startedAt: request.startedAt ?? null,
       idleSec: request.idleSec ?? null,
       ttftSec: request.ttftSec ?? null,
       sparkId: request.sparkId ?? null,
@@ -610,6 +612,8 @@ export async function getActiveUsers() {
       ttftSec: r.ttftSec ?? null,
       durationSec: r.durationSec ?? null,
       finishedAt: r.finishedAt ?? null,
+      outcome: r.outcome ?? null,
+      startedAt: r.startedAt ?? null,
       path: r.path ?? null,
       backend: r.backend ?? null,
       sparkId: r.sparkId ?? null,

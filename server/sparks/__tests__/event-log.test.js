@@ -43,6 +43,41 @@ test("dedupes same type+spark within 5s only", () => {
   assert.ok(log.record(ev("x")));
 });
 
+test("dedupe false bypasses and does not update dedupe state", () => {
+  const c = clock();
+  const log = new EventLog({ now: c.now });
+  assert.ok(log.record(ev("x")));
+  c.t += 1000;
+  assert.ok(log.record(ev("x"), { dedupe: false }));
+  assert.equal(log.record(ev("x")), null);
+});
+
+test("request events have a separate cap", () => {
+  const log = new EventLog({ max: 10, requestMax: 2 });
+  for (let i = 0; i < 5; i++) log.record(ev("request.ended", "a", `request-${i}`), { dedupe: false });
+  assert.deepEqual(log.list({ limit: 10 }).map((e) => e.message), ["request-4", "request-3"]);
+  assert.equal(log.lastIdOfType("request."), 5);
+  assert.equal(log.oldestId(), 4);
+});
+
+test("request flood cannot evict system history with a small overall cap", () => {
+  const log = new EventLog({ max: 3, requestMax: 10 });
+  log.record(ev("system.one"));
+  log.record(ev("system.two"));
+  for (let i = 0; i < 5; i++) log.record(ev("request.ended", "a", `request-${i}`), { dedupe: false });
+  assert.deepEqual(log.list({ limit: 10 }).map((e) => e.type), ["request.ended", "system.two", "system.one"]);
+  assert.equal(log.lastIdOfType("request."), 7);
+  assert.equal(log.oldestId(), 1);
+});
+
+test("overall trimming evicts requests before older system events", () => {
+  const log = new EventLog({ max: 2, requestMax: 10 });
+  log.record(ev("system.one"));
+  log.record(ev("request.ended", "a", "request"), { dedupe: false });
+  log.record(ev("system.two"));
+  assert.deepEqual(log.list({ limit: 10 }).map((e) => e.type), ["system.two", "system.one"]);
+});
+
 test("a real offline -> online -> offline flip inside 5s is not deduped", () => {
   const c = clock();
   const log = new EventLog({ now: c.now });
