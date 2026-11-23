@@ -16,6 +16,7 @@ import type {
   FleetEnergy,
   HealthResponse,
   InferenceActivity,
+  RequestActivity,
   HermesBatchUpdateResponse,
   GpuClockStatus,
   FleetGpuClockResult,
@@ -127,6 +128,11 @@ export function fetchFleetEnergy(): Promise<FleetEnergy> {
 /** Optional, sanitized inference request activity from a configured private source. */
 export function fetchInferenceActivity(): Promise<InferenceActivity> {
   return apiFetch("/api/inference/activity");
+}
+
+/** Current open LLM request activity. */
+export function fetchRequestActivity(): Promise<RequestActivity> {
+  return apiFetch("/api/events/requests");
 }
 
 /** Fleet activity log, newest first. */

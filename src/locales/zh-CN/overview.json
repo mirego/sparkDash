@@ -17,6 +17,34 @@
       "info": "信息"
     }
   },
+  "requests": {
+    "title": "未完成的 LLM 请求",
+    "pending": "等待中",
+    "active": "进行中",
+    "staleTag": "数据过期",
+    "unattributed": "未归属",
+    "unknownKey": "未知密钥",
+    "prompt": "提示词 ~{{count}}",
+    "output": "输出 {{count}}",
+    "outputWithMax": "输出 {{output}} / 上限 {{max}}",
+    "waiting": "正在等待请求数据",
+    "unavailable": "代理不可用 — 未知未完成请求",
+    "lastUpdateStale": "数据过期 — 上次更新 {{ago}}",
+    "empty": "没有未完成的请求",
+    "legacyNote": "旧版代理：终态结果报告为 Unknown",
+    "more": "另有 {{count}} 个未显示的未完成请求",
+    "completed": "已完成",
+    "outcomeLine": "结果：{{outcome}}",
+    "duration": "{{duration}}",
+    "outcome": {
+      "completed": "已完成",
+      "upstreamError": "上游错误",
+      "clientDisconnect": "客户端已断开",
+      "cancelled": "已取消",
+      "upstreamUnreachable": "无法连接上游",
+      "unknown": "未知"
+    }
+  },
   "alerts": {
     "title": "当前集群异常",
     "offline": "主机不可达",

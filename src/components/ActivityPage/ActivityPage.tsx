@@ -5,6 +5,8 @@ import type { SparkSnapshot } from "../../api/types";
 import { StackedBarChart, type BarBucket, type BarSeries } from "../ui/StackedBarChart";
 import { RotateIcon, SearchIcon, XIcon } from "../ui/icons";
 import { EventRow } from "./EventRow";
+import { OpenRequestsPinned } from "../OverviewPage/RequestActivity";
+import { useRequestActivity } from "../../hooks/useRequestActivity";
 import { ClearMenu } from "../ui/ClearMenu";
 import {
   CATEGORIES, EMPTY_FILTER, NO_SPARK, SEVERITIES, dayLabel, countByCategory, countBySeverity, countBySpark,
@@ -84,7 +86,8 @@ function formatUpdated(ts: number | null, now: number): string {
   const onArrive = useCallback((n: number) => {
     if (awayRef.current) setUnseen((c) => c + n);
   }, []);
-  const feed = useActivityFeed(onArrive);
+  const requestActivity = useRequestActivity();
+  const feed = useActivityFeed(onArrive, requestActivity.endedSignal);
   const { events } = feed;
 
   // Clock for relative labels and the Today/Yesterday headings.
@@ -441,6 +444,11 @@ function formatUpdated(ts: number | null, now: number): string {
         </div>
       ) : null}
 
+      {(!filter.category || filter.category === "all" || filter.category === "requests") ? (
+        <section className="panel ac-requests-panel">
+          <OpenRequestsPinned activity={requestActivity.data} clientError={requestActivity.clientError} now={now} sparkFilter={filter.sparkId} query={filter.query} onSelectSpark={onSelectSpark} />
+        </section>
+      ) : null}
       <div className="panel ac-timeline">{timeline}</div>
 
       {feed.status === "ready" && events.length > 0 ? (

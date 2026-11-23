@@ -12,11 +12,12 @@ const WRITE_DEBOUNCE_MS = 1500;
  */
 export class EventLog {
   /**
-   * @param {{ file?: string|null, max?: number, now?: () => number }} [opts]
+   * @param {{ file?: string|null, max?: number, requestMax?: number, now?: () => number }} [opts]
    */
-  constructor({ file = null, max = 200, now = Date.now } = {}) {
+  constructor({ file = null, max = 200, requestMax = 500, now = Date.now } = {}) {
     this.file = file;
     this.max = Math.max(1, Math.floor(max) || 200);
+    this.requestMax = Math.max(0, Math.floor(requestMax) || 0);
     this._now = now;
     /** @type {object[]} oldest first */
     this._events = [];
@@ -53,21 +54,23 @@ export class EventLog {
    * @param {{ type: string, severity?: string, sparkId?: string|null, sparkName?: string|null, message: string, data?: unknown }} input
    * @returns {object|null} the stored event, or null when dropped (invalid / deduped)
    */
-  record(input) {
+  record(input, opts = {}) {
     try {
       if (!input || typeof input.type !== "string" || typeof input.message !== "string") return null;
       const ts = this._now();
       const sparkId = input.sparkId ?? null;
       const key = `${input.type}\u0000${sparkId ?? ""}\u0000${input.message}`;
-      const last = this._recent.get(key);
-      // Only a repeat counts as a duplicate: if another event for this spark
-      // landed in between (offline -> online -> offline), it is a real change.
-      const interleaved = this._lastKeyBySpark.get(sparkId ?? "") !== key;
-      if (!interleaved && last != null && ts - last < DEDUPE_MS && ts >= last) return null;
-      this._recent.set(key, ts);
-      this._lastKeyBySpark.set(sparkId ?? "", key);
-      if (this._recent.size > 500) {
-        for (const [k, t] of this._recent) if (ts - t >= DEDUPE_MS) this._recent.delete(k);
+      if (opts.dedupe !== false) {
+        const last = this._recent.get(key);
+        // Only a repeat counts as a duplicate: if another event for this spark
+        // landed in between (offline -> online -> offline), it is a real change.
+        const interleaved = this._lastKeyBySpark.get(sparkId ?? "") !== key;
+        if (!interleaved && last != null && ts - last < DEDUPE_MS && ts >= last) return null;
+        this._recent.set(key, ts);
+        this._lastKeyBySpark.set(sparkId ?? "", key);
+        if (this._recent.size > 500) {
+          for (const [k, t] of this._recent) if (ts - t >= DEDUPE_MS) this._recent.delete(k);
+        }
       }
       const event = {
         id: this._nextId++,
@@ -80,7 +83,18 @@ export class EventLog {
       };
       if (input.data !== undefined) event.data = input.data;
       this._events.push(event);
-      if (this._events.length > this.max) this._events.splice(0, this._events.length - this.max);
+      const isRequest = (e) => e.type.startsWith("request.");
+      let requestCount = this._events.reduce((count, e) => count + Number(isRequest(e)), 0);
+      while (requestCount > this.requestMax) {
+        const index = this._events.findIndex(isRequest);
+        if (index < 0) break;
+        this._events.splice(index, 1);
+        requestCount--;
+      }
+      while (this._events.length > this.max) {
+        const oldestRequest = this._events.findIndex(isRequest);
+        this._events.splice(oldestRequest >= 0 ? oldestRequest : 0, 1);
+      }
       this._schedulePersist();
       for (const fn of [...this._subs]) {
         try {
@@ -138,6 +152,15 @@ export class EventLog {
   /** Id of the oldest retained event, or null when empty. */
   oldestId() {
     return this._events.length ? this._events[0].id : null;
+  }
+
+  /** Newest retained event id whose type starts with prefix, or null. */
+  lastIdOfType(prefix) {
+    if (typeof prefix !== "string") return null;
+    for (let i = this._events.length - 1; i >= 0; i--) {
+      if (this._events[i].type.startsWith(prefix)) return this._events[i].id;
+    }
+    return null;
   }
 
   subscribe(fn) {

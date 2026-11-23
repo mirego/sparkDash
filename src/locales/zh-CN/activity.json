@@ -152,6 +152,7 @@
     "hermes": "Hermes",
     "bench": "基准测试",
     "power": "电源",
+    "requests": "LLM 请求",
     "llm": "LLM 模型",
     "fleet": "设备变更",
     "other": "其他"
@@ -161,6 +162,7 @@
     "sparkOffline": "离线",
     "sparkAdded": "已添加 Spark",
     "sparkRemoved": "已移除 Spark",
+    "requestEnded": "LLM 请求已结束",
     "throttleThermal": "热降频",
     "throttleCleared": "降频已解除",
     "hermesAvailable": "有可用的 Hermes 更新",

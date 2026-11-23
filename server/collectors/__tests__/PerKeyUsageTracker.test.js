@@ -102,10 +102,11 @@ test("getActiveUsers prefers v2 requests and whitelists internal request fields"
       requests: [{
         id: "v2-id", user: "alice", state: "queued", phase: "waiting", model: "m",
         promptEstTokens: 10, promptSource: "estimate", maxTokens: 20,
-        completionEstTokens: 0, completionSource: "estimate", ageSec: 5,
+        completionEstTokens: 0, completionSource: "estimate", ageSec: 5, startedAt: 95,
         idleSec: 2, ttftSec: null, sparkId: "anton", backend: "internal",
         path: "/private", headers: { authorization: "secret" },
       }],
+      recent: [{ id: "done-id", user: "alice", outcome: "completed", startedAt: 90 }],
     }),
   });
   try {
@@ -116,8 +117,10 @@ test("getActiveUsers prefers v2 requests and whitelists internal request fields"
       id: "v2-id", user: "alice", model: "m", state: "queued",
       promptEstTokens: 10, promptSource: "estimate", maxTokens: 20,
       completionEstTokens: 0, completionSource: "estimate", ageSec: 5,
-      idleSec: 2, ttftSec: null, sparkId: "anton", backend: "internal",
+      startedAt: 95, idleSec: 2, ttftSec: null, sparkId: "anton", backend: "internal",
     }]);
+    assert.equal(users._recentRequests[0].outcome, "completed");
+    assert.equal(users._recentRequests[0].startedAt, 90);
   } finally {
     global.fetch = originalFetch;
   }
@@ -132,6 +135,7 @@ test("getActiveUsers flattens legacy requests and derives phase and user labels"
         alice: { waiting: 1, active: 0, requests: [{ id: "q", phase: "waiting" }] },
         bob: { waiting: 0, active: 1, requests: [{ id: "s", phase: "generating" }] },
       },
+      recent: [{ id: "legacy-done" }],
     }),
   });
   try {
@@ -141,6 +145,8 @@ test("getActiveUsers flattens legacy requests and derives phase and user labels"
       { id: "q", user: "alice", state: "queued" },
       { id: "s", user: "bob", state: "streaming" },
     ]);
+    assert.equal(users._recentRequests[0].outcome, null);
+    assert.equal(users._recentRequests[0].startedAt, null);
   } finally {
     global.fetch = originalFetch;
   }

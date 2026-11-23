@@ -17,6 +17,34 @@
       "info": "info"
     }
   },
+  "requests": {
+    "title": "Open LLM requests",
+    "pending": "Pending",
+    "active": "Active",
+    "staleTag": "Stale",
+    "unattributed": "Unattributed",
+    "unknownKey": "Unknown key",
+    "prompt": "prompt ~{{count}}",
+    "output": "out {{count}}",
+    "outputWithMax": "out {{output}} / max {{max}}",
+    "waiting": "Waiting for request data",
+    "unavailable": "Proxy unavailable — open requests unknown",
+    "lastUpdateStale": "Stale — last update {{ago}}",
+    "empty": "No open requests",
+    "legacyNote": "Legacy proxy: terminal outcomes reported as Unknown",
+    "more": "+{{count}} more open requests not shown",
+    "completed": "Completed",
+    "outcomeLine": "Outcome: {{outcome}}",
+    "duration": "{{duration}}",
+    "outcome": {
+      "completed": "Completed",
+      "upstreamError": "Upstream error",
+      "clientDisconnect": "Client disconnected",
+      "cancelled": "Cancelled",
+      "upstreamUnreachable": "Upstream unreachable",
+      "unknown": "Unknown"
+    }
+  },
   "alerts": {
     "title": "Active fleet exceptions",
     "offline": "Host unreachable",

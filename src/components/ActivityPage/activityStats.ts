@@ -14,7 +14,7 @@ export const SEVERITY_LABEL: Record<Severity, string> = {
   info: "Info",
 };
 
-export type CategoryId = "status" | "thermal" | "health" | "alerts" | "hermes" | "bench" | "power" | "llm" | "fleet" | "other";
+export type CategoryId = "status" | "thermal" | "health" | "alerts" | "hermes" | "bench" | "power" | "requests" | "llm" | "fleet" | "other";
 
 export const CATEGORIES: readonly { id: CategoryId; label: string }[] = [
   { id: "status", label: "Status (online/offline)" },
@@ -24,6 +24,7 @@ export const CATEGORIES: readonly { id: CategoryId; label: string }[] = [
   { id: "hermes", label: "Hermes" },
   { id: "bench", label: "Benchmarks" },
   { id: "power", label: "Power" },
+  { id: "requests", label: "LLM requests" },
   { id: "llm", label: "LLM models" },
   { id: "fleet", label: "Fleet changes" },
   { id: "other", label: "Other" },
@@ -62,6 +63,7 @@ export function categorize(type: string): CategoryId {
   if (type.startsWith("hermes.")) return "hermes";
   if (type.startsWith("bench.")) return "bench";
   if (type.startsWith("power.")) return "power";
+  if (type.startsWith("request.")) return "requests";
   if (type.startsWith("llm.")) return "llm";
   return "other";
 }
@@ -71,6 +73,7 @@ const KNOWN_LABELS: Record<string, string> = {
   "spark.offline": "Offline",
   "spark.added": "Spark added",
   "spark.removed": "Spark removed",
+  "request.ended": "LLM request finished",
   "gpu.throttle.thermal": "Thermal throttle",
   "gpu.throttle.cleared": "Throttle cleared",
   "hermes.update.available": "Hermes update available",

@@ -32,6 +32,7 @@ export const CONFIG_PATH_VARS = [
   "FLEET_ENERGY_JSON_PATH",
   "FLEET_ENERGY_MONTHLY_JSON_PATH",
   "EVENTS_JSON_PATH",
+  "REQUEST_LIFECYCLE_PATH",
   // Fork (custom features): per-key usage, energy and model-registry paths.
   "GPU_WH_PATH",
   "CPA_LOG_PATH",

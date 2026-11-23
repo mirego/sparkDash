@@ -2752,6 +2752,60 @@ export interface ActivityEvent {
   data?: unknown;
 }
 
+export type RequestLifecycleStatus = "unknown" | "ok" | "legacy" | "unavailable" | "stale";
+
+export interface RequestActivityRow {
+  key: string;
+  sparkId: string | null;
+  sparkName: string | null;
+  label: string;
+  model: string | null;
+  lifecycle: "pending" | "active";
+  promptEstTokens: number | null;
+  completionEstTokens: number | null;
+  maxTokens: number | null;
+  startedAt: number;
+  lastSeenAt: number;
+  stale: boolean;
+  attributed: boolean;
+}
+
+export interface RequestActivity {
+  status: RequestLifecycleStatus;
+  stale: boolean;
+  fetchedAt: number | null;
+  lastOkAt: number | null;
+  staleAfterMs: number;
+  legacy: boolean;
+  unattributedCount: number;
+  overflowCount: number;
+  lastRequestEventId: number | null;
+  requests: RequestActivityRow[];
+}
+
+export interface RequestEndedData {
+  kind: "llm-request";
+  lifecycle: "completed";
+  outcome: string;
+  outcomeKnown: boolean;
+  label: string | null;
+  model: string | null;
+  promptEstTokens: number | null;
+  completionEstTokens: number | null;
+  maxTokens: number | null;
+  startedAt: number;
+  endedAt: number;
+  endedAtApprox: boolean;
+  durationSec: number | null;
+  attributed: boolean;
+  sourceStatus: RequestLifecycleStatus;
+  endReason: string;
+}
+
+export function isRequestEndedData(data: unknown): data is RequestEndedData {
+  return Boolean(data && typeof data === "object" && (data as RequestEndedData).kind === "llm-request" && (data as RequestEndedData).lifecycle === "completed");
+}
+
 // ─── User-registered LLM launchers (start.sh / stop.sh) ───
 export interface LlmLauncher {
   id: string;

@@ -4,6 +4,8 @@ import { activeTimeZone } from "../../shared/timeZone";
 import { ACTIVITY_ID, idToPath } from "../../constants";
 import { useActivityEvents } from "../../hooks/useActivityEvents";
 import { formatRelativeTime, severityDotClass, splitMessage } from "./activityFormat";
+import { OpenRequestsPinned, RequestEndedDetail } from "./RequestActivity";
+import { useRequestActivity } from "../../hooks/useRequestActivity";
 
 interface ActivityFeedProps {
   limit?: number;
@@ -16,7 +18,8 @@ interface ActivityFeedProps {
 /** Compact fleet timeline. Renders card contents only (no outer chrome). */
 export function ActivityFeed({ limit = 8, sparkId, onSelectSpark, onViewAll }: ActivityFeedProps) {
   const { t, i18n } = useTranslation("overview");
-  const { events, loading, error } = useActivityEvents({ sparkId });
+  const requestActivity = useRequestActivity();
+  const { events, loading, error } = useActivityEvents({ sparkId, refreshKey: requestActivity.endedSignal });
   const now = Date.now();
   const shown = events.slice(0, limit);
   const severityLabels = {
@@ -42,13 +45,12 @@ export function ActivityFeed({ limit = 8, sparkId, onSelectSpark, onViewAll }: A
         </span>
       </header>
 
+      <OpenRequestsPinned activity={requestActivity.data} clientError={requestActivity.clientError} now={now} compact sparkFilter={sparkId ?? "all"} onSelectSpark={onSelectSpark} />
       {loading && shown.length === 0 ? (
         <p className="py-2 text-xs text-muted">{t("activity.loading")}</p>
       ) : shown.length === 0 ? (
         <p className="py-2 text-xs text-muted">
-          {error
-            ? t("activity.error")
-            : t("activity.empty")}
+          {error ? t("activity.error") : t("activity.empty")}
         </p>
       ) : (
         <ul className="divide-y divide-border">
@@ -69,20 +71,13 @@ export function ActivityFeed({ limit = 8, sparkId, onSelectSpark, onViewAll }: A
                   aria-label={severityLabels[ev.severity] ?? ev.severity}
                 />
                 <span className="min-w-0 break-words text-muted-strong">
-                  {before}
-                  {name &&
-                    (clickable ? (
-                      <AppLink
-                        href={idToPath(ev.sparkId as string)}
-                        className="font-semibold text-text-strong hover:underline"
-                        onNavigate={() => onSelectSpark!(ev.sparkId as string)}
-                      >
-                        {name}
-                      </AppLink>
-                    ) : (
-                      <strong className="font-semibold text-text-strong">{name}</strong>
-                    ))}
-                  {after}
+                  {ev.type === "request.ended" ? <RequestEndedDetail event={ev} compact onSelectSpark={onSelectSpark} /> : <>
+                    {before}
+                    {name && (clickable ? (
+                      <AppLink href={idToPath(ev.sparkId as string)} className="font-semibold text-text-strong hover:underline" onNavigate={() => onSelectSpark!(ev.sparkId as string)}>{name}</AppLink>
+                    ) : <strong className="font-semibold text-text-strong">{name}</strong>)}
+                    {after}
+                  </>}
                 </span>
               </li>
             );

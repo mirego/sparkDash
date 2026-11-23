@@ -21,7 +21,7 @@ const msg = (err: unknown) => (err instanceof Error ? err.message : String(err))
  * paging by beforeId, and a 15 s sinceId poll (paused while the tab is hidden). Merges by id, so
  * rows already on screen keep their identity (open details and scroll position survive).
  */
-export function useActivityFeed(onArrive?: (count: number) => void) {
+export function useActivityFeed(onArrive?: (count: number) => void, refreshKey?: number) {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [serverOldest, setServerOldest] = useState<number | null>(null);
   const [status, setStatus] = useState<FeedStatus>("loading");
@@ -40,6 +40,7 @@ export function useActivityFeed(onArrive?: (count: number) => void) {
   arrive.current = onArrive;
   const freshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const busy = useRef(false);
+  const refreshKeyRef = useRef(refreshKey);
 
   const apply = useCallback((incoming: ActivityEvent[]) => {
     ref.current = mergeEvents(ref.current, incoming);
@@ -107,6 +108,12 @@ export function useActivityFeed(onArrive?: (count: number) => void) {
     },
     [apply, status]
   );
+
+  useEffect(() => {
+    if (refreshKeyRef.current === refreshKey) return;
+    refreshKeyRef.current = refreshKey;
+    if (status === "ready") void poll();
+  }, [refreshKey, status, poll]);
 
   const loadOlder = useCallback(async () => {
     const tail = ref.current[ref.current.length - 1];

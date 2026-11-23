@@ -152,6 +152,7 @@
     "hermes": "Hermes",
     "bench": "Benchmarks",
     "power": "Power",
+    "requests": "LLM requests",
     "llm": "LLM models",
     "fleet": "Fleet changes",
     "other": "Other"
@@ -161,6 +162,7 @@
     "sparkOffline": "Offline",
     "sparkAdded": "Spark added",
     "sparkRemoved": "Spark removed",
+    "requestEnded": "LLM request finished",
     "throttleThermal": "Thermal throttle",
     "throttleCleared": "Throttle cleared",
     "hermesAvailable": "Hermes update available",
