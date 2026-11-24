@@ -24,6 +24,8 @@
     "staleTag": "数据过期",
     "unattributed": "未归属",
     "unknownKey": "未知密钥",
+    "unknownKeyHint": "未报告可显示的密钥标签",
+    "unknownModel": "未知模型",
     "prompt": "提示词 ~{{count}}",
     "output": "输出 {{count}}",
     "outputWithMax": "输出 {{output}} / 上限 {{max}}",
@@ -36,6 +38,9 @@
     "completed": "已完成",
     "outcomeLine": "结果：{{outcome}}",
     "duration": "{{duration}}",
+    "tookDuration": "耗时 {{duration}}",
+    "tookUnknown": "耗时 —",
+    "legacyOutcomeTag": "（旧版代理）",
     "outcome": {
       "completed": "已完成",
       "upstreamError": "上游错误",

@@ -423,6 +423,56 @@
 .ac-request-ended--compact {
   gap: 3px 6px;
 }
+
+/* Flat Overview activity timeline request rows. */
+.af-req-row {
+  padding: 6px 0;
+  font-size: 12px;
+  min-width: 0;
+}
+.af-req-line1 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.af-req-line1 > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.af-req-age {
+  flex-shrink: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+}
+.af-req-line2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 3px;
+  color: var(--color-muted-strong);
+}
+.af-status-chip {
+  margin-left: auto;
+}
+.af-key-chip--unknown {
+  border-style: dashed;
+  font-style: italic;
+  opacity: 0.8;
+}
+.af-req-state,
+.af-req-note,
+.af-req-more {
+  margin: 0;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
 .ac .ac-list {
   margin: 0;
   padding: 0;
