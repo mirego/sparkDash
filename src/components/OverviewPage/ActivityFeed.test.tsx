@@ -197,8 +197,10 @@ describe("ActivityFeed", () => {
     expect(rows[1].querySelector(".af-req-line1")!.textContent).toContain("Unattributed");
     expect(rows[1].querySelector("a")).toBeNull();
     expect(rows[0].querySelector("a")).not.toBeNull();
-    // Line 1 = Spark + duration/age; no chips there.
-    for (const row of rows) expect(row.querySelector(".af-req-line1 .tag")).toBeNull();
+    // Line 1 = Spark + outcome + duration/age; line 2 = exactly key chip, model, prompt, out/max, status.
+    for (const row of rows) expect(row.querySelector(".af-req-line2")!.children).toHaveLength(5);
+    expect(rows[2].querySelector(".af-req-line1")!.textContent).toContain("Outcome: Unknown (legacy proxy)");
+    expect(rows[0].querySelector(".af-req-line1 .tag")).toBeNull();
   });
 
   it("does not render request keys or end reasons", async () => {

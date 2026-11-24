@@ -79,26 +79,28 @@ export function ActivityFeed({ limit = 8, sparkId, onSelectSpark, onViewAll }: A
               const statusText = row.status === "pending" ? t("requests.pending") : row.status === "active" ? t("requests.active") : t("requests.completed");
               return (
                 <li key={row.rowKey} className={`af-req-row${row.stale ? " ac-request-row__muted" : ""}`} data-status={row.status}>
+                  {/* Line 1: Spark, terminal outcome / stale marker, duration/age. */}
                   <div className="af-req-line1">
                     {canSelect ? (
-                      <AppLink href={idToPath(row.sparkId!)} className="font-semibold text-text-strong hover:underline" onNavigate={() => onSelectSpark!(row.sparkId!)}>{sparkName}</AppLink>
-                    ) : <strong>{sparkName}</strong>}
-                    <time className="af-req-age mono" dateTime={dateTime}>{ageText}</time>
-                  </div>
-                  <div className="af-req-line2">
-                    <Tag tone="good" className={`af-key-chip${row.label ? "" : " af-key-chip--unknown"}`} title={!row.label ? t("requests.unknownKeyHint") : undefined}>
-                      {row.label || t("requests.unknownKey")}
-                    </Tag>
-                    <span className="af-req-meta">{row.model ?? t("requests.unknownModel")}</span>
-                    <span className="af-req-meta">{t("requests.prompt", { count: tokenCount(row.promptEstTokens) })}</span>
-                    <span className="af-req-meta">{t("requests.outputWithMax", { output: tokenCount(row.completionEstTokens), max: tokenCount(row.maxTokens) })}</span>
+                      <AppLink href={idToPath(row.sparkId!)} className="af-req-spark font-semibold text-text-strong hover:underline" onNavigate={() => onSelectSpark!(row.sparkId!)}>{sparkName}</AppLink>
+                    ) : <strong className="af-req-spark">{sparkName}</strong>}
                     {row.status === "completed" ? (
-                      <span className="af-req-meta af-req-outcome">
+                      <span className="af-req-outcome">
                         {t("requests.outcomeLine", { outcome: outcomeLabel(row.outcomeKnown ? row.outcome ?? "unknown" : "unknown", t) })}
                         {row.legacyUnknown ? ` ${t("requests.legacyOutcomeTag")}` : ""}
                       </span>
                     ) : null}
-                    {row.stale ? <Tag tone="neutral">{t("requests.staleTag")}</Tag> : null}
+                    {row.stale ? <Tag tone="neutral" className="af-req-stale">{t("requests.staleTag")}</Tag> : null}
+                    <time className="af-req-age mono" dateTime={dateTime}>{ageText}</time>
+                  </div>
+                  {/* Line 2: green key chip first … status chip last. */}
+                  <div className="af-req-line2">
+                    <Tag tone="good" className={`af-key-chip${row.label ? "" : " af-key-chip--unknown"}`} title={!row.label ? t("requests.unknownKeyHint") : undefined}>
+                      {row.label || t("requests.unknownKey")}
+                    </Tag>
+                    <span className="af-req-meta af-req-model" title={row.model ?? undefined}>{row.model ?? t("requests.unknownModel")}</span>
+                    <span className="af-req-meta">{t("requests.prompt", { count: tokenCount(row.promptEstTokens) })}</span>
+                    <span className="af-req-meta">{t("requests.outputWithMax", { output: tokenCount(row.completionEstTokens), max: tokenCount(row.maxTokens) })}</span>
                     <Tag tone={statusTone} className="af-status-chip">{statusText}</Tag>
                   </div>
                 </li>

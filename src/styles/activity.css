@@ -433,28 +433,57 @@
 .af-req-line1 {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   min-width: 0;
 }
-.af-req-line1 > :first-child {
+.af-req-spark {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.af-req-outcome {
+  color: var(--color-muted-strong);
+  font-size: 11px;
+}
 .af-req-age {
   flex-shrink: 0;
+  margin-left: auto;
   color: var(--color-muted);
   font-size: 11px;
 }
 .af-req-line2 {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 4px 6px;
   margin-top: 3px;
+  min-width: 0;
   color: var(--color-muted-strong);
+}
+.af-req-line2 > * {
+  flex-shrink: 0;
+}
+/* Long model names truncate (full name in the title) so the status chip stays on line 2. */
+.af-req-line2 > .af-req-model {
+  flex-shrink: 1;
+  min-width: 4ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-feed {
+  container-type: inline-size;
+}
+/* Narrow card: wrap line 2 but keep its order (key chip first, status chip last). */
+@container (max-width: 360px) {
+  .af-req-line2 {
+    flex-wrap: wrap;
+  }
+  .af-req-line2 > .af-req-model {
+    max-width: 100%;
+  }
 }
 .af-status-chip {
   margin-left: auto;
