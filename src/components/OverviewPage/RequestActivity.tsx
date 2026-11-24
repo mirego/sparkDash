@@ -29,7 +29,7 @@ interface OpenRequestsPinnedProps {
   maxRows?: number;
 }
 
-function durationLabel(ms: number): string {
+export function durationLabel(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -39,12 +39,12 @@ function durationLabel(ms: number): string {
   return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-function tokenCount(value: number | null): string {
+export function tokenCount(value: number | null): string {
   return value == null ? "—" : value.toLocaleString();
 }
 
 /** "out 20 / max 200", "out — / max 200" or "out 20": output is never confused with the max-token budget. */
-function outputText(output: number | null, max: number | null, t: ReturnType<typeof useTranslation>["t"]): string {
+export function outputText(output: number | null, max: number | null, t: ReturnType<typeof useTranslation>["t"]): string {
   return max == null
     ? t("requests.output", { count: tokenCount(output) })
     : t("requests.outputWithMax", { output: tokenCount(output), max: tokenCount(max) });
@@ -121,7 +121,7 @@ export function OpenRequestsPinned({ activity, clientError, now, compact = false
   );
 }
 
-function outcomeLabel(outcome: string, t: ReturnType<typeof useTranslation>["t"]): string {
+export function outcomeLabel(outcome: string, t: ReturnType<typeof useTranslation>["t"]): string {
   const known: Record<string, string> = {
     completed: t("requests.outcome.completed"),
     upstream_error: t("requests.outcome.upstreamError"),

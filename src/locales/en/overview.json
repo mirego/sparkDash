@@ -24,6 +24,8 @@
     "staleTag": "Stale",
     "unattributed": "Unattributed",
     "unknownKey": "Unknown key",
+    "unknownKeyHint": "No safe key label reported",
+    "unknownModel": "unknown model",
     "prompt": "prompt ~{{count}}",
     "output": "out {{count}}",
     "outputWithMax": "out {{output}} / max {{max}}",
@@ -36,6 +38,9 @@
     "completed": "Completed",
     "outcomeLine": "Outcome: {{outcome}}",
     "duration": "{{duration}}",
+    "tookDuration": "took {{duration}}",
+    "tookUnknown": "duration —",
+    "legacyOutcomeTag": "(legacy proxy)",
     "outcome": {
       "completed": "Completed",
       "upstreamError": "Upstream error",

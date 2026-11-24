@@ -1,5 +1,5 @@
 /**
- * E2E — fleet LLM request lifecycle in Overview "Recent activity" and the full Activity page
+ * E2E — fleet LLM request lifecycle in Overview "Recent activity" (flat timeline, t_3c1594c0) and the full Activity page
  * (t_98955a1d).
  *
  * Runs against an ISOLATED stack: a branch server with temp config whose auth-proxy source is
@@ -44,7 +44,7 @@ test.describe("fleet request lifecycle in Activity", () => {
     await request.post(`${FAKE}/_ctl/reset`);
   });
 
-  test("root Overview Recent activity: hydrate, start, stream, finish, outage, recovery", async ({ page }) => {
+  test("root Overview Recent activity: one flat newest-first timeline (open, completed, system rows)", async ({ page }) => {
     // Two requests already open BEFORE the page loads (initial hydration).
     await ctl(page, "start", { id: SECRET_IDS[0], user: "hermes", model: "gilfoyle-current-model", promptEstTokens: 5200, maxTokens: 4096, ageSec: 40 });
     await ctl(page, "start", { id: SECRET_IDS[1], user: "sbre", model: "model-b@b:son-of-anton", promptEstTokens: 900, ageSec: 5 });
@@ -53,70 +53,89 @@ test.describe("fleet request lifecycle in Activity", () => {
 
     await page.goto(`${BASE}/`);
     const feed = page.locator("section.activity-feed");
-    const pinned = feed.locator(".ac-requests");
-    await expect(pinned).toBeVisible({ timeout: 15_000 });
-    await expect(pinned.locator(".ac-request-row")).toHaveCount(2, { timeout: 15_000 });
-    await expect(pinned.locator(".ac-requests__count")).toHaveText("2");
-    await expect(pinned).toContainText("Legacy proxy: terminal outcomes reported as Unknown");
+    const list = feed.locator("ul");
+    const openRows = feed.locator(".af-req-row:not([data-status=completed])");
+    const doneRows = feed.locator(".af-req-row[data-status=completed]");
+    const systemRow = list.locator("> li", { hasText: "Anton came online" });
+    /** Index of a row among ALL rows of the single flat list. */
+    const indexOf = async (text: string) => (await list.locator("> li").allTextContents()).findIndex((t) => t.includes(text));
 
-    // Newest start first: sbre (5 s old) above hermes (40 s old).
-    const rows = pinned.locator(".ac-request-row");
-    await expect(rows.nth(0)).toContainText("sbre");
-    await expect(rows.nth(0)).toContainText("Active");
-    await expect(rows.nth(0)).toContainText("Son of Anton");
-    await expect(rows.nth(0)).toContainText("out 120");
-    await expect(rows.nth(1)).toContainText("hermes");
-    await expect(rows.nth(1)).toContainText("Pending");
-    await expect(rows.nth(1)).toContainText("Anton");
-    await expect(rows.nth(1)).toContainText("prompt ~5,200");
-    await expect(rows.nth(1)).toContainText("out — / max 4,096");
+    await expect(openRows).toHaveCount(2, { timeout: 15_000 });
+    await expect(feed).toContainText("Legacy proxy: terminal outcomes reported as Unknown");
 
-    // Pinned group sits above the ordinary activity rows; the seeded system event is still there.
-    await expect(feed).toContainText("Anton came online");
-    const pinnedBox = await pinned.boundingBox();
-    const ordinary = feed.locator("ul.divide-y li", { hasText: "Anton came online" });
-    const ordinaryBox = await ordinary.boundingBox();
-    expect(pinnedBox!.y).toBeLessThan(ordinaryBox!.y);
+    // Flat DOM: no pinned section, one list, every row a direct child, nothing nested.
+    await expect(feed.locator(".ac-requests")).toHaveCount(0);
+    await expect(list).toHaveCount(1);
+    await expect(feed.locator("li li, li ul")).toHaveCount(0);
+    expect(await feed.locator("li").count()).toBe(await list.locator("> li").count());
+
+    // Two-line rows: line 1 = Spark + age; line 2 = green key chip first … status chip last.
+    const hermes = openRows.filter({ hasText: "hermes" });
+    await expect(hermes.locator(".af-req-line1")).toContainText("Anton");
+    await expect(hermes.locator(".af-req-line2 > :first-child")).toHaveText("hermes");
+    await expect(hermes.locator(".af-req-line2 > :first-child")).toHaveClass(/tag--good/);
+    await expect(hermes.locator(".af-req-line2 > :last-child")).toHaveText("Pending");
+    await expect(hermes).toContainText("prompt ~5,200");
+    await expect(hermes).toContainText("out — / max 4,096");
+    const sbre = openRows.filter({ hasText: "sbre" });
+    await expect(sbre.locator(".af-req-line1")).toContainText("Son of Anton");
+    await expect(sbre.locator(".af-req-line2 > :last-child")).toHaveText("Active");
+    await expect(sbre).toContainText("out 120 / max —");
+
+    // Open rows (seen now) sit above the 10-minute-old system event in the SAME list.
+    await expect(systemRow).toBeVisible();
+    expect(await indexOf("hermes")).toBeLessThan(await indexOf("Anton came online"));
     await beat(page);
 
     // A new request starts while the view is open.
     await ctl(page, "start", { id: SECRET_IDS[2], user: "olivier", model: "gilfoyle-current-model", promptEstTokens: 300, maxTokens: 512 });
-    await expect(rows).toHaveCount(3, { timeout: 10_000 });
-    await expect(rows.nth(0)).toContainText("olivier");
+    await expect(openRows).toHaveCount(3, { timeout: 10_000 });
     await beat(page);
 
     // Pending → Active.
     await ctl(page, "stream", { id: SECRET_IDS[0], completionEstTokens: 64 });
-    await expect(pinned.locator(".ac-request-row", { hasText: "hermes" })).toContainText("Active", { timeout: 10_000 });
+    await expect(hermes.locator(".af-req-line2 > :last-child")).toHaveText("Active", { timeout: 10_000 });
     await beat(page);
 
-    // Terminal: hermes finishes → leaves the pinned group, enters history with outcome Unknown.
+    // Terminal: hermes finishes → becomes a Completed row in the same flat list.
     await ctl(page, "finish", { id: SECRET_IDS[0] });
-    await expect(rows).toHaveCount(2, { timeout: 10_000 });
-    const endedRow = feed.locator("ul.divide-y li", { hasText: "Outcome: Unknown" }).first();
-    await expect(endedRow).toBeVisible({ timeout: 10_000 });
-    await expect(endedRow).toContainText("Completed");
-    await expect(endedRow).toContainText("hermes");
-    // Newest first in history: the ended request is above the older system event.
-    const endedBox = await endedRow.boundingBox();
-    const ordinaryBox2 = await ordinary.boundingBox();
-    expect(endedBox!.y).toBeLessThan(ordinaryBox2!.y);
+    await expect(openRows).toHaveCount(2, { timeout: 10_000 });
+    const done = doneRows.filter({ hasText: "hermes" });
+    await expect(done).toHaveCount(1, { timeout: 15_000 });
+    await expect(done.locator(".af-req-line2 > :first-child")).toHaveText("hermes");
+    await expect(done.locator(".af-req-line2 > :last-child")).toHaveText("Completed");
+    await expect(done).toContainText("Outcome: Unknown (legacy proxy)");
+    await expect(done.locator(".af-req-line1")).toContainText("Outcome: Unknown (legacy proxy)");
+    // Normal card width: every request row is two visual lines; both chips sit on line 2.
+    const lineCounts = await feed.locator(".af-req-row").evaluateAll((rows) => rows.map((row) =>
+      [".af-req-line1", ".af-req-line2"].map((sel) => new Set([...row.querySelector(sel)!.children].map((c) => {
+        const b = c.getBoundingClientRect(); return Math.round(b.top + b.height / 2);
+      })).size)));
+    for (const [l1, l2] of lineCounts) { expect(l1).toBe(1); expect(l2).toBe(1); }
+    // Newest first: completed row above the older system event; still-open rows (seen again on
+    // later polls) move above it — interleaved, not pinned.
+    expect(await indexOf("Outcome: Unknown")).toBeLessThan(await indexOf("Anton came online"));
+    await expect.poll(async () => (await indexOf("sbre")) < (await indexOf("Outcome: Unknown")), { timeout: 15_000 }).toBe(true);
     await beat(page);
 
-    // Proxy outage: no false zero, no synthetic completion; rows marked stale.
+    // Proxy outage: explicit unavailable state, rows marked Stale, no synthetic completion.
     await ctl(page, "mode", { mode: "down" });
-    await expect(pinned).toContainText("Proxy unavailable — open requests unknown", { timeout: 10_000 });
-    await expect(pinned.locator(".ac-requests__count")).toHaveText("—");
-    await expect(pinned.locator(".ac-request-row").first()).toContainText("Stale");
-    await expect(feed.locator("ul.divide-y li", { hasText: "Outcome: Unknown" })).toHaveCount(1);
+    await expect(feed.locator(".af-req-state")).toHaveText("Proxy unavailable — open requests unknown", { timeout: 10_000 });
+    await expect(openRows.first()).toContainText("Stale");
+    await expect(doneRows).toHaveCount(1);
     await beat(page, 2000);
 
-    // Recovery: rows still open come back fresh without duplicate history rows.
+    // Recovery: state line clears, open rows return fresh, no duplicate completed rows.
     await ctl(page, "mode", { mode: "legacy" });
-    await expect(pinned.locator(".ac-requests__count")).toHaveText("2", { timeout: 10_000 });
-    await expect(pinned).not.toContainText("Proxy unavailable");
-    await expect(feed.locator("ul.divide-y li", { hasText: "Outcome: Unknown" })).toHaveCount(1);
+    await expect(feed.locator(".af-req-state")).toHaveCount(0, { timeout: 10_000 });
+    await expect(openRows).toHaveCount(2);
+    await expect(doneRows).toHaveCount(1);
     await expectNoLeaks(page);
+    await beat(page);
+
+    // Spark navigation from a request row still opens that Spark.
+    await openRows.filter({ hasText: "sbre" }).locator(".af-req-line1 a").click();
+    await expect(page).toHaveURL(/son-of-anton/);
     await beat(page);
   });
 
